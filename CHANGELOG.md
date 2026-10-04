@@ -4,6 +4,8 @@
 
 - 新增快捷键 `⇧⌘D`（Windows/Linux 为 `Ctrl+Shift+D`）：跑与按钮相同的定位动作。侧边栏折叠成 rail 时按钮不在界面上，按键会被明确拒绝并给出原因，而不是静默无事。
 - 「心流」页的描述随按钮新位置更新。
+- 补齐对外元数据：`LICENSE`、`screenshots.json`、README 首屏示意图，以及八个官方包的 `peerDependencies`（全部 `optional`，范围带显式预发布分支 `^0.2.0-rc.2`）。
+- README 按受众分闸：只留使用者口径，架构理由、官方契约、缓存规则与上架流程移入 `AGENTS.md`。
 
 ## 0.1.0
 

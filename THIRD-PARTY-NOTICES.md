@@ -5,7 +5,9 @@
 `client.js` carries the *Locate* glyph from the IntelliJ platform icon set,
 verbatim from `platform/icons/src/icons/general/locate.svg` in
 <https://github.com/JetBrains/intellij-community> (as shipped inside the
-`app-client.jar` of an installed JetBrains IDE).
+`app-client.jar` of an installed JetBrains IDE). The same artwork is drawn by
+`scripts/render-assets.mjs` into `assets/locate-flow.svg` / `assets/locate-flow.png`,
+so the README diagram and the shipped button cannot drift apart.
 
 > Copyright 2000-2022 JetBrains s.r.o. and contributors.
 > Use of this source code is governed by the Apache 2.0 license.

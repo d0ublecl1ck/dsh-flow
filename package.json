@@ -2,7 +2,7 @@
   "name": "dsh-flow",
   "version": "0.2.0",
   "private": true,
-  "description": "DSH Web 插件：在工作区标题行的搜索按钮右侧提供「定位当前会话」按钮（JetBrains Scroll from Source 式），并在设置里提供「心流」页开关该按钮。",
+  "description": "DSH Web 插件：在工作区标题行的搜索按钮右侧提供「定位当前会话」按钮，并可用 ⇧⌘D 触发同一动作；设置里的「心流」页开关该按钮。",
   "type": "module",
   "license": "MIT",
   "author": "d0ublecl1ck",
@@ -21,11 +21,17 @@
     "README.md",
     "AGENTS.md",
     "CHANGELOG.md",
-    "THIRD-PARTY-NOTICES.md"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "screenshots.json",
+    "assets",
+    "scripts",
+    "tests"
   ],
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "verify:browser": "node scripts/verify-browser.mjs",
+    "assets": "node scripts/render-assets.mjs",
     "verify": "npm test && npm run verify:browser"
   },
   "keywords": [
@@ -36,10 +42,50 @@
     "session",
     "locate",
     "reveal",
+    "scroll-from-source",
+    "shortcut",
+    "keyboard-shortcut",
+    "keybinding",
     "flow"
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-client-locale": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-shortcuts": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings-general": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-shortcuts": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings-general": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-sidebar": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-workspace": {
+      "optional": true
+    }
   },
   "dsh": {
     "bundle": {

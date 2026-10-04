@@ -1,58 +1,80 @@
 # dsh-flow
 
-DSH Web 插件。两个表面，一个 bundle：
+**侧栏滚到哪都行，`⇧⌘D` 把你拉回正在聊的那一行。**
 
-- **「定位当前会话」按钮** —— 放在工作区标题行里、搜索按钮右侧（`sectionHeader` 内的 `searchSlot` 之后），即 JetBrains 工具窗给 *Scroll from Source* 的那个位置。点一下，把对话列正在显示的会话重新拉回视野：所属工作区分组折叠就先展开分组；行被分组的溢出折叠挡住就先展开溢出；然后滚动到该行并短暂高亮。
-- **同一动作的快捷键** —— `⇧⌘D`（Windows/Linux 为 `Ctrl+Shift+D`）。侧边栏折叠成 rail 时按钮不在界面上，按键会被明确拒绝并给出原因，而不是静默无事。
-- **设置里的「心流」页** —— 该按钮的开关，偏好存在宿主 Config 的 `flow.locateButton`，属于设置文档的一部分，不是页面局部状态。
+![定位当前会话的三步流程与 rail 边界](assets/locate-flow.svg)
 
-## 怎么跑
+DSH Web 插件。会话一多，侧栏列表的滚动位置就和当前会话脱钩了；这个插件把它接回来：
+
+- **「定位当前会话」按钮** —— 住在工作区标题行里、搜索按钮右侧（JetBrains 工具窗给 *Scroll from Source* 的那个位置）。
+- **`⇧⌘D`**（Windows/Linux `Ctrl+Shift+D`）—— 跑同一个动作。
+- **设置 → 心流** —— 关掉这个按钮。
+
+## 你什么时候需要它？
+
+- 侧栏里会话按工作区分组堆了几十行，你正在聊的那个不在视口里，得靠手感滚。
+- 你刚点开过别的会话，又切回来，侧栏却还停在原来那一屏。
+- 你想用键盘回到当前会话，不想离开输入框去摸鼠标。
+
+## 它做了什么（三步，按顺序自动完成）
+
+1. **所属工作区分组是折起来的** → 先点开分组（折叠的分组一行都不渲染，`scrollIntoView` 够不着）。
+2. **分组开着，但当前会话在「还有 N 个」后面** → 先展开溢出。
+3. **行渲染出来了** → `scrollIntoView({block:'nearest'})` 滚进视口，并短暂高亮一次。
+
+三层折叠里的**侧栏 rail（整列收起）不是第四步**：rail 形态下标题行没有搜索座位，按钮根本不在界面上，`⇧⌘D` 会明确告诉你原因。找不到时也一样——当前会话不在侧栏筛选结果里、或当前没有打开的会话，都会用状态文本说明，不会按下去什么都没发生。
+
+## 怎么装
 
 ```sh
-npm test                 # node --test：纯逻辑 + 接线断言
-npm run verify:browser   # 真浏览器验收：需要本机跑着 DSH Web 实例
-dsh plugin --profile <profile> add "$PWD"    # 装进 profile（用绝对路径）
-dsh --profile <profile> --dump-config        # 确认出现 dsh-flow 层
+dsh plugin --profile web add /absolute/path/to/dsh-flow
 ```
 
-`verify:browser` 用 `$DSH_HOME/.credentials.yaml` 里的 `client-connection/browser-session` 密钥现签一个浏览器会话 Cookie，起一个用完即删的无头 Chrome，逐条验：按钮是否真的落在搜索座位右侧、会话行被滚出视口后能否滚回来、折叠的工作区分组是否先被展开、`⇧⌘D` 是否跑同一个定位、`心流` 页的开关是否真的把按钮摘掉。所有手势走真实鼠标/键盘事件（`Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`），不用 `element.click()`；改动过的分组折叠状态与偏好都会复原。
+装完用 `dsh --profile web --dump-config` 确认出现 `dsh-flow` 层。改过 `client.js` 刷新页面即可；改过宿主半边（`index.js`）要 `remove` 再 `add`。
 
-改完 `client.js` 刷新页面即可；**改了 `index.js`（宿主半边）必须 `remove` 再 `add`**，宿主按 URL 缓存模块，只 `add` 不会重新导入。若某个包的客户端产物曾被判定为「不是客户端包」或解析失败，该判定会**缓存到宿主重启为止**，此后刷新页面也不会恢复 —— 这是宿主自己的行为，不是本插件的问题。
+> 不要用 `npm install dsh-flow`：npm 上同名的 `dsh-flow` 是**另一位作者**的另一个插件（工作流自动化）。本插件的安装来源只有仓库本身。
 
-## 图标
+## 装完怎么确认
 
-按钮戴的是 IntelliJ 平台自带的 *Locate* 图标（`platform/icons/src/icons/general/locate.svg`，Apache-2.0），逐字内联在 `client.js` 里，只把原图的固定填充色换成 `currentColor` 以跟随主题令牌。出处、改动说明与完整许可证正文见 `THIRD-PARTY-NOTICES.md`。
-
-
-## 为什么是 DOM portal
-
-按钮要落的那一行**不是 slot**。侧边栏的浏览区是 `sidebar.workspaces` 这个单占用槽，它内部的标题行（`sectionLabel` / `searchSlot` / `headerActions`）没有给第三方留洞。所以本插件：
-
-1. 注册 `sidebar.footer.action`（id `flow`），**入口本身不渲染任何可见内容** —— 它只是客户端插件唯一能拿到的挂载点，用来说明生命周期与 locale 命名空间；
-2. 找到带搜索控件的 `sectionHeader`，在 `searchSlot` **之后**插入自己的容器 `[data-flow-host="locate"]`，再用 `createPortal` 把按钮渲染进去；
-3. 只在容器掉了或被挤开时才重建，插入从不移动/删除 shell 的节点。
-
-rail（侧边栏折叠）形态下标题行**根本没有 `searchSlot`**，此时容器被移除、按钮不出现 —— 这是设计选择，不是兜底缺失：插件不会把按钮挪到别处，也不会在你刚收起侧边栏时替你把它展开。
-
-## 依赖的官方契约
-
-按钮与定位逻辑都只说官方自己用的那套话：
-
-| 契约 | 用途 |
+| 命令 | 期望 |
 | --- | --- |
-| `[class*="sectionHeader"]` + `[class*="searchSlot"]`（槽内要有 `button`） | 识别标题行与插入点 |
-| `[class*="listArea"]` | 从按钮最近的、拥有该座位的祖先解析出列表座位 |
-| `[data-row-key="session:<id>"]` | 会话行；官方 reveal 也是对它 `scrollIntoView({block:'nearest'})` |
-| `[data-row-key="workspace:<key>"]` 的 `aria-expanded` | 分组是否折叠 |
-| `[data-row-key="overflow:<key>"]` | 分组尾部被折叠时的展开按钮 |
-| 会话快照 `byId[id].retainedBy.mainView > 0` | 当前会话（官方自己也是这么判定的） |
-| 工作区注册表 `items[].sessionIds` | 会话归属哪个分组；没人认领的就是 `workspace:`（空 key） |
+| `npm test` | `pass 22` / `fail 0`（不需要运行中的实例） |
+| `npm run verify:browser` | `13 passed, 0 failed`（需要本机跑着 DSH Web；会真实点按钮、按 `⇧⌘D`、开合设置面板，结束复原） |
+| `npm run assets` | 重新生成 `assets/locate-flow.svg` 与 `.png`（需要本机 Chrome） |
 
-CSS-module 的 local name（`sectionHeader` 等）比构建哈希稳定，这是唯一被依赖的脆弱点。
+侧栏标题行里出现那个准星按钮、点它侧栏滚到当前会话，就装对了。
 
-## 偏好
+## 触发方式
 
-- 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton: z.boolean().default(true).volatile() })`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行。
-- 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
-- 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉。
+- 鼠标：点侧栏标题行搜索图标右侧的准星按钮。
+- 键盘：`⇧⌘D`（macOS 桌面版走的是 web 快捷键通道，因此也是 `⇧⌘D`）；Windows/Linux 为 `Ctrl+Shift+D`。可在 设置 → 通用设置 → 快捷键 里改键。
+- 关掉：设置 → **心流** → 定位当前会话按钮。
+
+## 安全边界
+
+- **只动视图，不动数据**：滚动、展开分组、闪一下高亮。不归档、不删除、不改会话排序、不写会话内容。
+- **唯一的持久化写入**是「心流」页里你按的那次开关（宿主 Config 的 `flow.locateButton`）。
+- **不抢官方交互**：插入的只是自己的一个容器，从不移动或删除 shell 的节点；快捷键注册前会校验所有 profile 的默认键冲突，冲突就报错而不是覆盖别人。
+- **不静默失败**：拒绝按下时给出原因文本（走 `role="status"`，读屏可闻）。
+- **不发网络请求**、不读凭据、不碰 `localStorage`。
+
+## 已知限制
+
+- 侧栏折叠成 rail 时**没有按钮**（标题行没有搜索座位），快捷键在该形态下被拒绝。
+- 当前会话被侧栏的搜索或「仅归档」筛选挡掉时，定位不到——会明确说明，不会帮你清筛选。
+- 只能定位**已渲染**的会话行；分组折叠与分组溢出这两层插件会替你展开，其他筛选不会。
+- 运行中的实例把客户端产物当**激活时的快照**：改完 `client.js` 要刷新页面，而某些缓存判定（例如某包被判为「不是客户端包」）只能靠重启宿主清除。
+
+## 仓库里有什么
+
+| 路径 | 作用 |
+| --- | --- |
+| `client.js` | 浏览器半边（零构建，就是产物本体）：按钮、portal、快捷键命令、定位逻辑 |
+| `index.js` | 宿主半边：`locateButton` 这个 volatile Config 字段 + 「自带页面」策略 |
+| `tests/` | 22 条 `node --test`：纯逻辑与接线断言 |
+| `scripts/verify-browser.mjs` | 真浏览器验收（13 条断言，真实鼠标/键盘事件） |
+| `scripts/render-assets.mjs` | 生成 README 里的示意图（SVG + 2x PNG） |
+| `assets/` | 示意图产物（手绘生成，不含任何真实会话） |
+| `THIRD-PARTY-NOTICES.md` | 按钮图标的出处与 Apache-2.0 正文 |
+
+面向改这个插件的人（架构理由、官方 DOM 契约、运行中实例的缓存规则）：见 [`AGENTS.md`](AGENTS.md)。
