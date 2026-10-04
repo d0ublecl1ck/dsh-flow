@@ -2,18 +2,45 @@
   "name": "dsh-flow",
   "version": "0.1.0",
   "private": true,
+  "description": "DSH Web 插件：在工作区标题行的搜索按钮右侧提供「定位当前会话」按钮（JetBrains Scroll from Source 式），并在设置里提供「心流」页开关该按钮。",
   "type": "module",
   "license": "MIT",
+  "author": "d0ublecl1ck",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "index.js",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
   },
-  "main": "index.js",
   "files": [
     "index.js",
     "client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "README.md",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "THIRD-PARTY-NOTICES.md"
   ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "verify:browser": "node scripts/verify-browser.mjs",
+    "verify": "npm test && npm run verify:browser"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "sidebar",
+    "session",
+    "locate",
+    "reveal",
+    "flow"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -22,7 +49,12 @@
       "platform": "web",
       "immediately": true,
       "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-general",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
   }

@@ -1,0 +1,9 @@
+# FREAK
+
+`dsh-flow` 历次洁癖审查留下的待核查线索。只记「下次该优先看哪里」，权威结论在 `README.md` / `AGENTS.md`。
+
+- [ ] `client.js` 的 DOM 契约（`[class*="sectionHeader"]` / `[class*="searchSlot"]` / `[class*="listArea"]` / `[data-row-key="session:<id>"]` / `workspace:<key>` 的 `aria-expanded` / `overflow:<key>`）全是从运行时产物里测出来的，官方任何一个改名都会变成静默失效（按钮不出现或定位不动作，控制台不报错）。DSH Desktop 升级后先跑 `npm run verify:browser`，再决定要不要改选择器。记录：`2026-10-04`
+- [ ] `client.js` 里内联的 IntelliJ *Locate* 图形与 `THIRD-PARTY-NOTICES.md` 是一对：换图（例如换成 `general/autoscrollFromSource.svg`）必须同步改通知文件里的出处、改动说明与版权行。记录：`2026-10-04`
+- [ ] `scripts/verify-browser.mjs` 依赖两件易漂移的事实：浏览器会话 Cookie 的签名格式（`v1.<b64url payload>.<b64url HMAC>`，密钥取自 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session`），以及「当前会话行」用 `[aria-selected="true"]` 判定。升级后若 Cookie 校验失败或该属性消失，症状是脚本全红但插件其实正常。记录：`2026-10-04`
+- [ ] `index.js` 的 `configure({ auto: false }, ctx.fiber)` 与 `locateButton` 的 `volatile()` 是设置页能出现的前提；设置域若改投影口径，症状是「心流」页静默消失。升级后核对 设置 → 心流 是否仍在 nav 里。记录：`2026-10-04`
+- [ ] 本插件在 DSH Desktop 的 `web` profile 里是 `link:` 安装，指向哪个目录决定了跑的是哪份代码。本次开发期一度指向 worktree，合并后应指向 `~/dsh-flow`。核对：`node -e 'console.log(require(process.env.DSH_PROFILE_DIR+"/package.json").dependencies["dsh-flow"])'`。记录：`2026-10-04`
