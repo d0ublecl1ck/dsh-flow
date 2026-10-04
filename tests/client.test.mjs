@@ -11,16 +11,23 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 /** Build one element stub. `find` maps a selector to the node it must return. */
-function node({ className = '', attrs = {}, find, isCollapsedDoc = false } = {}) {
+function node({ className = '', attrs = {}, find, tag = 'div' } = {}) {
   const element = {
     nodeType: 1,
+    tagName: tag.toUpperCase(),
     className,
     parentElement: null,
+    dataset: {},
+    inserted: [],
     clicks: 0,
     scrollOptions: undefined,
     animations: [],
     getAttribute: (name) => (name in attrs ? attrs[name] : null),
     querySelector: (selector) => (find === undefined ? null : (find(selector) ?? null)),
+    insertAdjacentElement(position, child) {
+      element.inserted.push({ position, child })
+      return child
+    },
     click() {
       element.clicks += 1
     },
@@ -31,7 +38,6 @@ function node({ className = '', attrs = {}, find, isCollapsedDoc = false } = {})
       element.animations.push({ keyframes, options })
       return { cancel() {} }
     },
-    isCollapsedDoc,
   }
   return element
 }
@@ -161,10 +167,31 @@ test('resolveListArea walks up from the anchor and never leaves the sidebar', as
   assert.equal(resolveListArea(null), null)
 })
 
-test('isSidebarCollapsed reads the shell attribute the layout publishes', async () => {
-  const { isSidebarCollapsed } = (await load()).internals
-  assert.equal(isSidebarCollapsed({ querySelector: (selector) => (selector === '[data-sidebar-collapsed]' ? node({}) : null) }), true)
-  assert.equal(isSidebarCollapsed({ querySelector: () => null }), false)
+test('resolveHeaderAnchors recognises the header by the search seat it holds', async () => {
+  const { resolveHeaderAnchors } = (await load()).internals
+  const searchSlot = node({ className: 'hash_searchSlot', find: (selector) => (selector === 'button' ? node({}) : null) })
+  const header = node({ className: 'hash_sectionHeader', find: (selector) => (/searchSlot/.test(selector) ? searchSlot : null) })
+  const doc = { querySelectorAll: (selector) => (/sectionHeader/.test(selector) ? [header] : []) }
+  assert.deepEqual(resolveHeaderAnchors(doc), { header, searchSlot })
+
+  // A rail header carries no search seat at all.
+  assert.equal(resolveHeaderAnchors({ querySelectorAll: () => [node({ find: () => null })] }), null)
+  // An empty seat is not the seat: the control must actually be inside it.
+  const emptySeatHeader = node({ find: (selector) => (/searchSlot/.test(selector) ? node({ find: () => null }) : null) })
+  assert.equal(resolveHeaderAnchors({ querySelectorAll: () => [emptySeatHeader] }), null)
+  assert.equal(resolveHeaderAnchors(undefined), null)
+})
+
+test('attachLocateHost inserts its own container right after the search seat', async () => {
+  const { attachLocateHost } = (await load()).internals
+  const searchSlot = node({})
+  searchSlot.ownerDocument = { createElement: (tag) => node({ tag }) }
+  const host = attachLocateHost(searchSlot)
+  assert.equal(searchSlot.inserted.length, 1)
+  assert.equal(searchSlot.inserted[0].position, 'afterend')
+  assert.equal(searchSlot.inserted[0].child, host)
+  assert.equal(host.className, 'flow-host')
+  assert.equal(host.dataset.flowHost, 'locate')
 })
 
 test('locateCurrentSession reports every outcome it can reach', async () => {
@@ -183,25 +210,21 @@ test('locateCurrentSession reports every outcome it can reach', async () => {
     locateCurrentSession({ anchor, listArea, sessionList: list(session('s1', 1)), workspaceList }),
     { status: 'revealed' },
   )
-  // No seat at all, sidebar collapsed: the caller expands, then retries.
-  let expanded = 0
+  // No seat: the browsing region may simply not have mounted yet, so the
+  // caller gets one more frame before this counts as a miss.
+  assert.deepEqual(
+    locateCurrentSession({ anchor, listArea: null, sessionList: list(session('s1', 1)), workspaceList }),
+    { status: 'retry' },
+  )
+  // Seat present, row nowhere: a real miss, never a silent success.
   assert.deepEqual(
     locateCurrentSession({
       anchor,
-      listArea: null,
+      listArea: node({ find: () => null }),
       sessionList: list(session('s1', 1)),
       workspaceList,
-      collapsed: true,
-      expandSidebar: () => { expanded += 1 },
     }),
-    { status: 'expanding-sidebar' },
-  )
-  assert.equal(expanded, 1)
-  // No seat and the sidebar is open: nothing to expand, so the caller retries
-  // once for the region mount before reporting a miss.
-  assert.deepEqual(
-    locateCurrentSession({ anchor, listArea: null, sessionList: list(session('s1', 1)), workspaceList, collapsed: false }),
-    { status: 'retry' },
+    { status: 'missing' },
   )
 })
 
@@ -291,7 +314,6 @@ function fakeContext(registrations, effects, { served = true } = {}) {
     },
     sessions: { list: { getSnapshot: () => list(), subscribe: () => () => {} } },
     workspaces: { list: { getSnapshot: () => ({ items: [] }), subscribe: () => () => {} } },
-    layout: { toggleSidebar: () => {} },
     configForms: {
       get: () => form,
       whileServed: (namespaces, register) => {

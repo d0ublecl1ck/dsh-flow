@@ -3,23 +3,28 @@
  *
  * Two surfaces, one entry:
  *
- *  - `sidebar.footer.action` — the 「定位当前会话」 button, placed beside the
- *    Settings row the way JetBrains puts *Scroll from Source* in a tool
- *    window's footer. One click brings the Session the conversation column is
- *    showing back into view: it expands the sidebar when it is a rail, opens
- *    the owning Workspace group when it is folded, raises that group's
- *    overflow when the row hides behind it, then scrolls the row into view and
- *    flashes it. The sidebar reveals rows with `scrollIntoView({block:
- *    'nearest'})` on `[data-row-key="session:<id>"]`; every step here speaks
- *    that same shipped contract (see the anchor notes in `internals`).
+ *  - the 「定位当前会话」 button, sitting in the workspace browser's section
+ *    header immediately to the right of the search control — the seat JetBrains
+ *    gives *Scroll from Source* in a tool window's toolbar. One click brings the
+ *    Session the conversation column is showing back into view: it expands the
+ *    sidebar when it is a rail, opens the owning Workspace group when it is
+ *    folded, raises that group's overflow when the row hides behind it, then
+ *    scrolls the row into view and flashes it. The sidebar reveals rows with
+ *    `scrollIntoView({block:'nearest'})` on `[data-row-key="session:<id>"]`;
+ *    every step here speaks that same shipped contract.
  *  - `settings.section` — the 心流 page, holding the one preference that turns
  *    the button off. The preference lives in this plugin's Host Config
  *    namespace (`flow.locateButton`), reached through `ctx.configForms`, so it
  *    is a durable part of the settings document rather than page-local state.
  *
- * The preference is read by both surfaces through the one form, and only the
- * page is withheld while the Host serves no `flow` namespace; the button keeps
- * rendering so a deployment can never lose the entry point silently.
+ * The header is not a slot: the shell's browsing region is a single-occupant
+ * slot (`sidebar.workspaces`) whose header declares no hole beside the search
+ * control, so the button is portalled into a container this plugin inserts
+ * after that control. The `sidebar.footer.action` entry below renders nothing —
+ * it exists for the component's lifecycle and locale seat, which is the only
+ * mount point a client plugin gets. Because the rail form of the header carries
+ * no search control at all, the button is absent there by design rather than
+ * mis-inserted somewhere else.
  *
  * @module dsh-flow/client
  */
@@ -29,16 +34,17 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useRef, useState, useSyncExternalStore } = React
+    const { createPortal } = require('react-dom')
+    const { useCallback, useEffect, useRef, useState, useSyncExternalStore } = React
     const { Switch, Tooltip } = require('@deepseek-ai/dsh-client-ui-primitives')
 
     /** Row id of the bundle — also the settings namespace and the locale namespace. */
     const ENTRY_ID = 'flow'
 
     /**
-     * Footer order. The plugin's own seats never collide: session-radar owns
-     * 890/900, hide-empty-workspace 1000, so the locate button sits after the
-     * shipped readouts and before the workspace hider.
+     * Order of the footer entry that carries this plugin's lifecycle. The entry
+     * renders nothing visible, so the order only has to stay unique: the shipped
+     * third-party seats in this slot use 890/900 and 1000.
      */
     const FOOTER_ORDER = 950
 
@@ -194,17 +200,49 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Whether the sidebar currently renders as a rail.
+     * Resolve the browsing region's header and the search seat the button sits
+     * beside.
      *
-     * The layout frame publishes its own collapsed fact as a boolean attribute,
-     * which is also what the shell's stylesheets key off; a rail has no list
-     * seat, so this is the one case where locating must expand first.
+     * The header is recognised by the control it must contain, not by position:
+     * the section label, the search seat, and the trailing action cluster are
+     * the shipped children, and only one header in the shell holds a search
+     * seat. A rail header has no search seat at all, which is how the button
+     * knows to stay away rather than drift to another edge.
      *
      * @param doc - document to read.
-     * @returns true while the sidebar is collapsed.
+     * @returns `{header, searchSlot}`, or null while no header carries a search seat.
      */
-    function isSidebarCollapsed(doc) {
-      return (doc?.querySelector?.('[data-sidebar-collapsed]') ?? null) !== null
+    function resolveHeaderAnchors(doc) {
+      if (typeof doc?.querySelectorAll !== 'function') return null
+      for (const header of doc.querySelectorAll('[class*="sectionHeader"]')) {
+        if (!isElement(header)) continue
+        const searchSlot = header.querySelector('[class*="searchSlot"]')
+        if (!isElement(searchSlot)) continue
+        if (searchSlot.querySelector('button') === null) continue
+        return { header, searchSlot }
+      }
+      return null
+    }
+
+    /**
+     * Insert this plugin's container directly after the search seat and return
+     * it.
+     *
+     * Inserting — never moving or removing shell nodes — is what keeps the
+     * container safe across React re-renders: the shell owns its children, this
+     * plugin owns the extra node, and reconciliation leaves it alone. The
+     * caller re-runs this only when the container it holds is gone or has been
+     * pushed out of position.
+     *
+     * @param searchSlot - the header's search seat.
+     * @returns the attached container.
+     */
+    function attachLocateHost(searchSlot) {
+      const host = searchSlot.ownerDocument.createElement('div')
+      host.className = 'flow-host'
+      host.dataset.flowHost = 'locate'
+      searchSlot.insertAdjacentElement('afterend', host)
+      return host
     }
 
     /**
@@ -213,22 +251,16 @@ window.__ModuleLoader__.load({
      * The caller drives this in a bounded loop: an expansion was just kicked
      * off and the shell needs a repaint before the next pass can see the row.
      *
-     * @param input - anchor, resolved seat, both snapshots, and the expansion hooks.
-     * @returns `no-session`, `revealed`, `expanding-sidebar`, `retry`, or `missing`.
+     * @param input - the button, the two snapshots, and an optional resolved seat.
+     * @returns `no-session`, `revealed`, `retry`, or `missing`.
      */
     function locateCurrentSession(input) {
       const sessionId = currentSessionId(input.sessionList)
       if (sessionId === null) return { status: 'no-session' }
       const listArea = input.listArea ?? resolveListArea(input.anchor)
-      if (listArea === null || listArea === undefined) {
-        // A rail renders no rows at all: expand it, then look again.
-        if (input.collapsed === true && typeof input.expandSidebar === 'function') {
-          input.expandSidebar()
-          return { status: 'expanding-sidebar' }
-        }
-        // The region may simply not have mounted yet.
-        return { status: 'retry' }
-      }
+      // No seat means the browsing region has not mounted yet; the caller looks
+      // again on the next frame before calling this a miss.
+      if (listArea === null || listArea === undefined) return { status: 'retry' }
       const step = revealSessionRow(listArea, owningGroupKey(input.workspaceList?.items, sessionId), sessionId)
       if (step.status === 'revealed') return { status: 'revealed' }
       if (step.status === 'expanding-group' || step.status === 'expanding-overflow') return { status: 'retry' }
@@ -258,10 +290,10 @@ window.__ModuleLoader__.load({
     const STYLE_TAG = 'dsh-flow/flow.css'
 
     const CSS = `
+.flow-host{flex:none;display:flex;align-items:center}
 .flow-locate{box-sizing:border-box;flex:none;width:28px;height:28px;padding:0;border:none;border-radius:var(--dsw-radius-sm,8px);background:0 0;color:var(--dsw-alias-label-secondary,currentColor);cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
 .flow-locate:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,140,.12))}
 .flow-locate:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,currentColor);outline-offset:-2px}
-.flow-locate[data-rail="true"]{width:36px;height:36px;border-radius:var(--dsw-radius-md,10px);color:var(--dsw-alias-label-primary,currentColor)}
 .flow-locate[data-miss="true"]{color:var(--dsw-alias-state-warning-primary,currentColor)}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
@@ -296,7 +328,7 @@ window.__ModuleLoader__.load({
       'locate.missing': '当前会话不在侧边栏的筛选结果里',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
-      'section.locate.description': '在侧边栏底部显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
+      'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
       'section.locate.error': '偏好没有保存成功，请重试',
     }
 
@@ -308,7 +340,7 @@ window.__ModuleLoader__.load({
       'locate.missing': 'The current Session is outside the sidebar filter',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
-      'section.locate.description': 'Show a “Locate current Session” button at the sidebar foot; clicking it expands and scrolls to the open Session.',
+      'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
       'section.locate.error': 'The preference was not saved. Try again.',
     }
 
@@ -316,7 +348,17 @@ window.__ModuleLoader__.load({
 
     // #region components
 
-    /** The JetBrains-style target mark the button wears. */
+    /**
+     * The mark the button wears: the IntelliJ platform's own *Locate* icon,
+     * `platform/icons/src/icons/general/locate.svg`, carried verbatim.
+     *
+     * Copyright 2000-2022 JetBrains s.r.o. and contributors. Use of this source
+     * code is governed by the Apache 2.0 license (see THIRD-PARTY-NOTICES.md).
+     *
+     * One change from the original: the shipped artwork hard-codes the light
+     * theme's label colour and ships a separate dark file, while this glyph
+     * inherits `currentColor` so the button's own theme token decides it.
+     */
     function LocateIcon() {
       return h(
         'svg',
@@ -328,31 +370,85 @@ window.__ModuleLoader__.load({
           'aria-hidden': 'true',
           focusable: 'false',
         },
-        h('circle', { cx: 8, cy: 8, r: 4.25, stroke: 'currentColor', strokeWidth: 1.2 }),
-        h('circle', { cx: 8, cy: 8, r: 1.1, fill: 'currentColor' }),
         h('path', {
-          d: 'M8 0.9V3.2M8 12.8V15.1M0.9 8H3.2M12.8 8H15.1',
-          stroke: 'currentColor',
-          strokeWidth: 1.2,
-          strokeLinecap: 'round',
+          fillRule: 'evenodd',
+          clipRule: 'evenodd',
+          fill: 'currentColor',
+          d: 'M8.5 5V2.02054C11.4149 2.26101 13.739 4.5851 13.9795 7.5H11C10.7239 7.5 10.5 7.72386 10.5 8C10.5 8.27614 10.7239 8.5 11 8.5H13.9795C13.739 11.4149 11.4149 13.739 8.5 13.9795V11C8.5 10.7239 8.27614 10.5 8 10.5C7.72386 10.5 7.5 10.7239 7.5 11V13.9795C4.5851 13.739 2.26101 11.4149 2.02054 8.5H5C5.27614 8.5 5.5 8.27614 5.5 8C5.5 7.72386 5.27614 7.5 5 7.5H2.02054C2.26101 4.5851 4.5851 2.26101 7.5 2.02054V5C7.5 5.27614 7.72386 5.5 8 5.5C8.27614 5.5 8.5 5.27614 8.5 5ZM1 8C1 4.13401 4.13401 1 8 1C11.866 1 15 4.13401 15 8C15 11.866 11.866 15 8 15C4.13401 15 1 11.866 1 8Z',
         }),
       )
     }
 
     /**
-     * The sidebar-foot button.
+     * Keep one container attached immediately after the header's search seat,
+     * for as long as the button is wanted and that seat exists.
      *
-     * @param props - slot owner share, the localized copy, both snapshots, and
-     * the sidebar expansion hook.
+     * The shell re-renders the browsing region freely (a fold, a view change, a
+     * locale switch), so the container is re-checked whenever the document
+     * mutates and is only rebuilt when the shell actually dropped it or moved
+     * another node into its place. A rail header has no search seat, so the
+     * container is removed there and the button simply is not part of that
+     * form.
+     *
+     * @param enabled - whether the preference asks for the button at all.
+     * @returns the container to portal into, or null while there is none.
+     */
+    function useLocateHost(enabled) {
+      const [host, setHost] = useState(null)
+      useEffect(() => {
+        if (!enabled || typeof document === 'undefined') {
+          setHost(null)
+          return undefined
+        }
+        let current = null
+        let frame = null
+        const sync = () => {
+          frame = null
+          const anchors = resolveHeaderAnchors(document)
+          if (anchors === null) {
+            if (current !== null) {
+              current.remove()
+              current = null
+              setHost(null)
+            }
+            return
+          }
+          if (current !== null && current.isConnected && current.previousElementSibling === anchors.searchSlot) return
+          current?.remove()
+          current = attachLocateHost(anchors.searchSlot)
+          setHost(current)
+        }
+        const schedule = () => {
+          if (frame === null) frame = window.requestAnimationFrame(sync)
+        }
+        sync()
+        const observer = new MutationObserver(schedule)
+        observer.observe(document.body, { childList: true, subtree: true })
+        return () => {
+          observer.disconnect()
+          if (frame !== null) window.cancelAnimationFrame(frame)
+          current?.remove()
+          setHost(null)
+        }
+      }, [enabled])
+      return host
+    }
+
+    /**
+     * The 「定位当前会话」 button, portalled into the header container.
+     *
+     * @param props - both snapshots, the plugin's config form, and the
+     * localized copy.
      */
     function LocateButton(props) {
-      const { t, wide, sessions, workspaces, layout } = props
+      const { t, sessions, workspaces } = props
       const anchor = useRef(null)
       const [notice, setNotice] = useState(null)
       const [missed, setMissed] = useState(false)
       const enabled = useConfigValue(props.config)
       // The locale revision is this component's only re-render trigger for copy.
       props.useLocaleRevision()
+      const host = useLocateHost(enabled)
 
       const locate = useCallback(() => {
         let attempt = 0
@@ -362,8 +458,6 @@ window.__ModuleLoader__.load({
             anchor: anchor.current,
             sessionList: sessions.getSnapshot(),
             workspaceList: workspaces.getSnapshot(),
-            collapsed: isSidebarCollapsed(anchor.current?.ownerDocument ?? globalThis.document),
-            expandSidebar: () => layout.toggleSidebar(),
           })
           if (outcome.status === 'revealed') {
             setNotice(t('locate.done'))
@@ -379,7 +473,7 @@ window.__ModuleLoader__.load({
             setMissed(true)
             return
           }
-          // `retry` and `expanding-sidebar`: an expansion is in flight.
+          // `retry`: an expansion is in flight, or the region has not mounted.
           attempt += 1
           if (attempt > RETRY_ATTEMPTS) {
             setNotice(t('locate.missing'))
@@ -389,35 +483,37 @@ window.__ModuleLoader__.load({
           setTimeout(pass, RETRY_BASE_MS * attempt)
         }
         pass()
-      }, [layout, sessions, t, workspaces])
+      }, [sessions, t, workspaces])
 
-      if (!enabled) return null
+      if (!enabled || host === null) return null
 
-      return h(
-        React.Fragment,
-        null,
+      return createPortal(
         h(
-          Tooltip,
-          { label: t('locate.label'), delayMs: 500 },
+          React.Fragment,
+          null,
           h(
-            'button',
-            {
-              ref: anchor,
-              type: 'button',
-              className: 'flow-locate',
-              'data-rail': wide ? 'false' : 'true',
-              'data-miss': missed ? 'true' : 'false',
-              'aria-label': t('locate.label'),
-              onClick: locate,
-            },
-            h(LocateIcon, null),
+            Tooltip,
+            { label: t('locate.label'), delayMs: 500 },
+            h(
+              'button',
+              {
+                ref: anchor,
+                type: 'button',
+                className: 'flow-locate',
+                'data-miss': missed ? 'true' : 'false',
+                'aria-label': t('locate.label'),
+                onClick: locate,
+              },
+              h(LocateIcon, null),
+            ),
+          ),
+          h(
+            'span',
+            { className: 'flow-visually-hidden', role: 'status', 'aria-live': 'polite' },
+            notice ?? '',
           ),
         ),
-        h(
-          'span',
-          { className: 'flow-visually-hidden', role: 'status', 'aria-live': 'polite' },
-          notice ?? '',
-        ),
+        host,
       )
     }
 
@@ -478,7 +574,7 @@ window.__ModuleLoader__.load({
     // #endregion
 
     return {
-      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces', 'layout'],
+      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces'],
       apply(ctx) {
         ctx.effect(() => {
           const style = injectStyles()
@@ -495,12 +591,13 @@ window.__ModuleLoader__.load({
 
         const sessions = ctx.sessions.list
         const workspaces = ctx.workspaces.list
-        const layout = ctx.layout
         // One form, two surfaces: the button reads it for its visibility, the
         // page reads and writes it.
         const forms = ctx.configForms
         const config = forms.get(ENTRY_ID)
 
+        // The entry itself renders nothing: it is this plugin's lifecycle and
+        // locale seat, and the button is portalled into the header instead.
         ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
           name: 'sidebar.footer.action',
           id: ENTRY_ID,
@@ -511,10 +608,9 @@ window.__ModuleLoader__.load({
           t,
           sessions,
           workspaces,
-          layout,
           config,
           useLocaleRevision,
-        }))), 'flow: locate button')
+        }))), 'flow: locate button seat')
 
         // The page follows the Host's own namespace: a deployment that never
         // served `flow` shows no trace of the section.
@@ -539,7 +635,8 @@ window.__ModuleLoader__.load({
         revealSessionRow,
         locateCurrentSession,
         resolveListArea,
-        isSidebarCollapsed,
+        resolveHeaderAnchors,
+        attachLocateHost,
         readLocateEnabled,
       },
     }

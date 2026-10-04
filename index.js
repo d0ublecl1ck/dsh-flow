@@ -26,7 +26,7 @@ export const name = 'flow'
  * page: the settings domain only projects volatile fields into a namespace.
  *
  * @typedef {object} Config
- * @property {boolean} locateButton - whether the sidebar foot shows the locate-current-Session button.
+ * @property {boolean} locateButton - whether the workspace header shows the locate-current-Session button.
  */
 export const Config = z.object({
   locateButton: z.boolean().default(true).volatile(),
