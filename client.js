@@ -283,6 +283,89 @@ window.__ModuleLoader__.load({
       return value.locateButton !== false
     }
 
+    /**
+     * Create the one-slot seat the mounted button and the plugin-scope command
+     * share.
+     *
+     * Locating can only live inside the mounted button: it needs the resolved
+     * header container to read the list seat from, it owns the retry pacing, and
+     * it owns the live region that reports the outcome. The command, on the
+     * other hand, is registered once for the plugin's lifetime. This seat is
+     * that seam — the button publishes while it is mounted, the command resolves
+     * against the current publication, and a resolved action captures the
+     * handler it saw.
+     *
+     * @returns the seat.
+     */
+    function createLocateSeat() {
+      let current = null
+      return {
+        /**
+         * Publish the mounted handler.
+         * @param handler - the button's locate, or null to clear it.
+         * @returns a disposer that clears only the value it published.
+         */
+        publish(handler) {
+          current = handler
+          return () => {
+            if (current === handler) current = null
+          }
+        },
+        /** @returns the current handler, or null while no button is mounted. */
+        current: () => current,
+      }
+    }
+
+    /**
+     * Command id. It keys the stored key override, so it has to stay stable.
+     */
+    const LOCATE_COMMAND = 'flow.locateCurrent'
+
+    /**
+     * Per-profile default bindings: Mod+Shift+D everywhere a Web default is
+     * admissible.
+     *
+     * macOS Desktop runs the Web shortcut path (its preload sets
+     * `data-dsh-desktop-web-shortcuts`, so the runtime is `web`), where a bare
+     * Command+letter is rejected as `unsupported-browser` and an Option
+     * combination can die as a macOS dead key — Mod+Shift avoids both. Linux Web
+     * admits none of these shapes, so no default is declared for it.
+     */
+    const LOCATE_DEFAULTS = {
+      'desktop:macos': { code: 'KeyD', modifiers: ['primary', 'shift'] },
+      'desktop:windows': { code: 'KeyD', modifiers: ['primary', 'shift'] },
+      'desktop:linux': { code: 'KeyD', modifiers: ['primary', 'shift'] },
+      'web:macos': { code: 'KeyD', modifiers: ['primary', 'shift'] },
+      'web:windows': { code: 'KeyD', modifiers: ['primary', 'shift'] },
+    }
+
+    /**
+     * Build the locating command over the seat.
+     *
+     * @param seat - the seat the mounted button publishes into.
+     * @param label - localized command name shown in the shortcut reference.
+     * @param reasons - localized reasons a press can be refused.
+     * @returns the command definition for `ctx.shortcuts.register`.
+     */
+    function locateCommand(seat, label, reasons) {
+      return {
+        id: LOCATE_COMMAND,
+        label,
+        aliases: ['locate current session', 'scroll from source', '定位当前会话'],
+        defaults: LOCATE_DEFAULTS,
+        regions: ['page', 'editable'],
+        modals: [],
+        resolve: () => {
+          const handler = seat.current()
+          // The button has no rail form, so a folded sidebar has nothing to
+          // press and the command says so instead of reopening the column.
+          if (handler === null) return { status: 'blocked', reason: reasons.unmounted() }
+          if (!handler.available()) return { status: 'blocked', reason: reasons.noSession() }
+          return { status: 'handled', run: () => { handler.run() } }
+        },
+      }
+    }
+
     // #endregion
 
     // #region styles
@@ -326,6 +409,7 @@ window.__ModuleLoader__.load({
       'locate.done': '已定位到当前会话',
       'locate.noSession': '当前没有打开的会话',
       'locate.missing': '当前会话不在侧边栏的筛选结果里',
+      'locate.unmounted': '侧边栏已折叠，定位按钮当前不在界面上',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
       'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
@@ -338,6 +422,7 @@ window.__ModuleLoader__.load({
       'locate.done': 'Current Session located',
       'locate.noSession': 'No Session is open',
       'locate.missing': 'The current Session is outside the sidebar filter',
+      'locate.unmounted': 'The sidebar is collapsed, so the locate button is not on screen',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
       'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
@@ -485,6 +570,13 @@ window.__ModuleLoader__.load({
         pass()
       }, [sessions, t, workspaces])
 
+      // Hand the live locate to the plugin-scope command while this button is
+      // mounted; the command has no other way to reach it.
+      useEffect(() => props.seat.publish({
+        available: () => currentSessionId(sessions.getSnapshot()) !== null,
+        run: locate,
+      }), [locate, props.seat, sessions])
+
       if (!enabled || host === null) return null
 
       return createPortal(
@@ -574,7 +666,7 @@ window.__ModuleLoader__.load({
     // #endregion
 
     return {
-      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces'],
+      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces', 'shortcuts'],
       apply(ctx) {
         ctx.effect(() => {
           const style = injectStyles()
@@ -595,6 +687,13 @@ window.__ModuleLoader__.load({
         // page reads and writes it.
         const forms = ctx.configForms
         const config = forms.get(ENTRY_ID)
+        // The command is plugin-scope while the locate itself lives in the
+        // mounted button, so the two meet through one seat.
+        const seat = createLocateSeat()
+        ctx.effect(() => ctx.shortcuts.register(locateCommand(seat, () => t('locate.label'), {
+          unmounted: () => t('locate.unmounted'),
+          noSession: () => t('locate.noSession'),
+        })), 'flow: locate command')
 
         // The entry itself renders nothing: it is this plugin's lifecycle and
         // locale seat, and the button is portalled into the header instead.
@@ -609,6 +708,7 @@ window.__ModuleLoader__.load({
           sessions,
           workspaces,
           config,
+          seat,
           useLocaleRevision,
         }))), 'flow: locate button seat')
 
@@ -629,6 +729,10 @@ window.__ModuleLoader__.load({
         ENTRY_ID,
         FOOTER_ORDER,
         SECTION_ORDER,
+        LOCATE_COMMAND,
+        LOCATE_DEFAULTS,
+        createLocateSeat,
+        locateCommand,
         currentSessionId,
         findSessionRow,
         owningGroupKey,

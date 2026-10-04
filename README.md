@@ -3,6 +3,7 @@
 DSH Web 插件。两个表面，一个 bundle：
 
 - **「定位当前会话」按钮** —— 放在工作区标题行里、搜索按钮右侧（`sectionHeader` 内的 `searchSlot` 之后），即 JetBrains 工具窗给 *Scroll from Source* 的那个位置。点一下，把对话列正在显示的会话重新拉回视野：所属工作区分组折叠就先展开分组；行被分组的溢出折叠挡住就先展开溢出；然后滚动到该行并短暂高亮。
+- **同一动作的快捷键** —— `⇧⌘D`（Windows/Linux 为 `Ctrl+Shift+D`）。侧边栏折叠成 rail 时按钮不在界面上，按键会被明确拒绝并给出原因，而不是静默无事。
 - **设置里的「心流」页** —— 该按钮的开关，偏好存在宿主 Config 的 `flow.locateButton`，属于设置文档的一部分，不是页面局部状态。
 
 ## 怎么跑
@@ -14,9 +15,9 @@ dsh plugin --profile <profile> add "$PWD"    # 装进 profile（用绝对路径�
 dsh --profile <profile> --dump-config        # 确认出现 dsh-flow 层
 ```
 
-`verify:browser` 用 `$DSH_HOME/.credentials.yaml` 里的 `client-connection/browser-session` 密钥现签一个浏览器会话 Cookie，起一个用完即删的无头 Chrome，逐条验：按钮是否真的落在搜索座位右侧、会话行被滚出视口后能否滚回来、折叠的工作区分组是否先被展开、`心流` 页的开关是否真的把按钮摘掉。所有手势走真实鼠标事件（`Input.dispatchMouseEvent`），不用 `element.click()`；改动过的分组折叠状态与偏好都会复原。
+`verify:browser` 用 `$DSH_HOME/.credentials.yaml` 里的 `client-connection/browser-session` 密钥现签一个浏览器会话 Cookie，起一个用完即删的无头 Chrome，逐条验：按钮是否真的落在搜索座位右侧、会话行被滚出视口后能否滚回来、折叠的工作区分组是否先被展开、`⇧⌘D` 是否跑同一个定位、`心流` 页的开关是否真的把按钮摘掉。所有手势走真实鼠标/键盘事件（`Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`），不用 `element.click()`；改动过的分组折叠状态与偏好都会复原。
 
-改完 `client.js` 刷新页面即可；**改了 `index.js`（宿主半边）必须 `remove` 再 `add`**，宿主按 URL 缓存模块，只 `add` 不会重新导入。
+改完 `client.js` 刷新页面即可；**改了 `index.js`（宿主半边）必须 `remove` 再 `add`**，宿主按 URL 缓存模块，只 `add` 不会重新导入。若某个包的客户端产物曾被判定为「不是客户端包」或解析失败，该判定会**缓存到宿主重启为止**，此后刷新页面也不会恢复 —— 这是宿主自己的行为，不是本插件的问题。
 
 ## 图标
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-flow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "DSH Web 插件：在工作区标题行的搜索按钮右侧提供「定位当前会话」按钮（JetBrains Scroll from Source 式），并在设置里提供「心流」页开关该按钮。",
   "type": "module",
@@ -50,6 +50,7 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-shortcuts",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-settings-general",
         "@deepseek-ai/dsh-client-ui-primitives",

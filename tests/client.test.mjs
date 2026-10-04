@@ -240,7 +240,8 @@ test('apply registers the footer button and the 心流 section', async () => {
   const module = await load()
   const registrations = []
   const effects = []
-  const ctx = fakeContext(registrations, effects)
+  const commands = []
+  const ctx = fakeContext(registrations, effects, { commands })
   module.apply(ctx)
 
   const footer = registrations.find((entry) => entry.name === 'sidebar.footer.action')
@@ -252,8 +253,13 @@ test('apply registers the footer button and the 心流 section', async () => {
   assert.equal(section.label(), '心流')
   assert.ok(section.order < 40, 'must land ahead of the shipped third-party sections')
 
+  // The one application command, registered for the plugin's whole lifetime.
+  assert.equal(commands.length, 1)
+  assert.equal(commands[0].id, 'flow.locateCurrent')
+  assert.equal(commands[0].label(), '定位当前会话')
+
   // Every registration the module makes is released with its fiber.
-  assert.ok(effects.length >= 2)
+  assert.ok(effects.length >= 3)
   assert.ok(registrations.length >= 2)
 })
 
@@ -267,8 +273,71 @@ test('the section is withheld until the Host serves the flow namespace', async (
   assert.equal(registrations.some((entry) => entry.name === 'sidebar.footer.action'), true)
 })
 
+test('the seat hands the mounted button to the command, and nothing else', async () => {
+  const { createLocateSeat } = (await load()).internals
+  const seat = createLocateSeat()
+  assert.equal(seat.current(), null)
+  const handler = { available: () => true, run: () => {} }
+  const clear = seat.publish(handler)
+  assert.equal(seat.current(), handler)
+  // A later mount replaces the first, and the first disposer must not clear it.
+  const second = { available: () => false, run: () => {} }
+  const clearSecond = seat.publish(second)
+  clear()
+  assert.equal(seat.current(), second)
+  clearSecond()
+  assert.equal(seat.current(), null)
+})
+
+test('the command refuses a press it cannot honour, and never silently', async () => {
+  const { createLocateSeat, locateCommand, LOCATE_COMMAND, LOCATE_DEFAULTS } = (await load()).internals
+  const seat = createLocateSeat()
+  const command = locateCommand(seat, () => '定位当前会话', {
+    unmounted: () => '侧边栏已折叠，定位按钮当前不在界面上',
+    noSession: () => '当前没有打开的会话',
+  })
+
+  assert.equal(command.id, LOCATE_COMMAND)
+  assert.deepEqual(command.defaults, LOCATE_DEFAULTS)
+  assert.equal(command.label(), '定位当前会话')
+  assert.deepEqual([...command.regions], ['page', 'editable'])
+
+  // Folded sidebar: the button has no rail form, so there is no handler at all.
+  assert.deepEqual(command.resolve(), { status: 'blocked', reason: '侧边栏已折叠，定位按钮当前不在界面上' })
+
+  let ran = 0
+  const mounted = { available: () => false, run: () => { ran += 1 } }
+  seat.publish(mounted)
+  assert.deepEqual(command.resolve(), { status: 'blocked', reason: '当前没有打开的会话' })
+  assert.equal(ran, 0)
+
+  mounted.available = () => true
+  const resolution = command.resolve()
+  assert.equal(resolution.status, 'handled')
+  // The action captures the handler it resolved against.
+  seat.publish({ available: () => false, run: () => { ran += 100 } })
+  resolution.run()
+  assert.equal(ran, 1)
+})
+
+test('the shortcut defaults stay inside what every declared profile admits', async () => {
+  const { LOCATE_DEFAULTS, LOCATE_COMMAND } = (await load()).internals
+  const profiles = Object.keys(LOCATE_DEFAULTS)
+  assert.deepEqual(profiles.sort(), [
+    'desktop:linux', 'desktop:macos', 'desktop:windows', 'web:macos', 'web:windows',
+  ])
+  // Linux Web admits none of these shapes, so declaring it would throw at
+  // registration and take the whole client half down.
+  assert.equal(profiles.includes('web:linux'), false)
+  for (const [profile, binding] of Object.entries(LOCATE_DEFAULTS)) {
+    assert.equal(binding.code, 'KeyD', profile)
+    assert.deepEqual(binding.modifiers, ['primary', 'shift'], profile)
+  }
+  assert.equal(LOCATE_COMMAND.startsWith('flow.'), true)
+})
+
 /** A client-root stub with exactly the services the module injects. */
-function fakeContext(registrations, effects, { served = true } = {}) {
+function fakeContext(registrations, effects, { served = true, commands = [] } = {}) {
   const form = {
     getSnapshot: () => ({ value: {}, writable: true }),
     subscribe: () => () => {},
@@ -314,6 +383,12 @@ function fakeContext(registrations, effects, { served = true } = {}) {
     },
     sessions: { list: { getSnapshot: () => list(), subscribe: () => () => {} } },
     workspaces: { list: { getSnapshot: () => ({ items: [] }), subscribe: () => () => {} } },
+    shortcuts: {
+      register: (command) => {
+        commands.push(command)
+        return () => {}
+      },
+    },
     configForms: {
       get: () => form,
       whileServed: (namespaces, register) => {

@@ -244,6 +244,51 @@ async function restoreGroups(cdp, sessionId, groups) {
   await sleep(500)
 }
 
+/** Open every folded Workspace group, so the list becomes long enough to scroll. */
+async function openEveryGroup(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
+      if (row.getAttribute('aria-expanded') === 'false') row.click();
+    }
+    return true;
+  })()`)
+  await sleep(1200)
+}
+
+/**
+ * Park one row strictly above the list seat, so it has to be scrolled back.
+ *
+ * The delta comes from the two boxes rather than a guessed offset, so it holds
+ * at any list length.
+ */
+async function pushRowAboveSeat(cdp, sessionId, rowKey) {
+  return evaluate(cdp, sessionId, `(() => {
+    const row = document.querySelector(${JSON.stringify(`[data-row-key="${rowKey}"]`)});
+    let seat = row;
+    while (seat && !(seat.scrollHeight > seat.clientHeight + 4)) seat = seat.parentElement;
+    if (!row || !seat) return false;
+    const r = row.getBoundingClientRect();
+    const s = seat.getBoundingClientRect();
+    seat.scrollTop += (r.bottom - s.top) + 40;
+    return true;
+  })()`)
+}
+
+/** Press Escape the way the keyboard does; the shell's modals listen for it. */
+async function pressEscape(cdp, sessionId) {
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, sessionId)
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, sessionId)
+  await sleep(400)
+}
+
+/** Press one shortcut with its modifier bitmask (Alt 1, Ctrl 2, Meta 4, Shift 8). */
+async function pressShortcut(cdp, sessionId, { key, code, virtualKeyCode, modifiers }) {
+  const base = { modifiers, key, code, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode }
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base }, sessionId)
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, sessionId)
+  await sleep(300)
+}
+
 /** The Workspace group whose row precedes this Session row in the shipped row order. */
 function ownerOf(rowKeys, current) {
   const at = rowKeys.indexOf(current)
@@ -321,25 +366,8 @@ async function main() {
       const baseline = state.groups
 
       // ---- A. a row scrolled out of the seat comes back ------------------
-      await evaluate(cdp, sessionId, `(() => {
-        for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
-          if (row.getAttribute('aria-expanded') === 'false') row.click();
-        }
-        return true;
-      })()`)
-      await sleep(1200)
-      // Park the row strictly above the seat rather than at a guessed offset:
-      // the delta comes from the two boxes, so it holds at any list length.
-      await evaluate(cdp, sessionId, `(() => {
-        const row = document.querySelector(${JSON.stringify('[data-row-key="' + current + '"]')});
-        let seat = row;
-        while (seat && !(seat.scrollHeight > seat.clientHeight + 4)) seat = seat.parentElement;
-        if (!row || !seat) return false;
-        const r = row.getBoundingClientRect();
-        const s = seat.getBoundingClientRect();
-        seat.scrollTop += (r.bottom - s.top) + 40;
-        return true;
-      })()`)
+      await openEveryGroup(cdp, sessionId)
+      await pushRowAboveSeat(cdp, sessionId, current)
       await sleep(400)
       const away = await box(cdp, sessionId, current)
       if (away !== null && away.visible === false) {
@@ -393,6 +421,27 @@ async function main() {
       const drifted = Object.entries(baseline).filter(([key, value]) => restored.groups[key] !== value)
       if (drifted.length === 0) pass('every Workspace group is back in its original fold state')
       else fail('group fold state drifted: ' + JSON.stringify(drifted))
+
+      // ---- B2. the same locate answers Mod+Shift+D ------------------------
+      await openEveryGroup(cdp, sessionId)
+      await pushRowAboveSeat(cdp, sessionId, current)
+      await sleep(400)
+      const awayByKey = await box(cdp, sessionId, current)
+      if (awayByKey !== null && awayByKey.visible === false) {
+        // Meta 4 | Shift 8 — the binding this plugin declares for every profile
+        // it can declare one for.
+        await pressShortcut(cdp, sessionId, { key: 'D', code: 'KeyD', virtualKeyCode: 68, modifiers: 12 })
+        await sleep(1100)
+        const backByKey = await box(cdp, sessionId, current)
+        if (backByKey !== null && backByKey.visible === true) {
+          pass('Mod+Shift+D runs the same locate as the button')
+        } else {
+          fail('Mod+Shift+D did not bring the row back: ' + JSON.stringify({ away: awayByKey, back: backByKey }))
+        }
+      } else {
+        fail('could not push the row out of the seat for the shortcut leg: ' + JSON.stringify(awayByKey))
+      }
+      await restoreGroups(cdp, sessionId, baseline)
     }
 
     // ---- C. the 心流 page owns the button's visibility -------------------
@@ -401,6 +450,40 @@ async function main() {
     state = await evaluate(cdp, sessionId, PROBE)
     if (state.flowNav.includes('心流')) pass('the settings navigation carries the 心流 tab')
     else fail('no 心流 tab in the settings navigation: ' + JSON.stringify(state.flowNav))
+
+    // The shortcut reference must list this plugin's command under the key the
+    // registry actually accepted — the binding, not just the command.
+    await click(cdp, sessionId, '[role="dialog"] nav button:nth-child(1)')
+    await sleep(500)
+    const editor = await evaluate(cdp, sessionId, `(() => {
+      const trigger = [...document.querySelectorAll('[role="dialog"] button')]
+        .find((b) => b.textContent.trim() === '编辑快捷键');
+      if (!trigger) return null;
+      const rect = trigger.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`)
+    if (editor === null) {
+      fail('the 快捷键 editor trigger was not found')
+    } else {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: editor.x, y: editor.y, button: 'none', buttons: 0 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: editor.x, y: editor.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: editor.x, y: editor.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+      await sleep(900)
+      const listed = await evaluate(cdp, sessionId, `(() => {
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+        const text = dialogs.map((d) => d.innerText).join('\\n');
+        const at = text.indexOf('定位当前会话');
+        return { present: at !== -1, around: at === -1 ? null : text.slice(Math.max(0, at - 40), at + 20) };
+      })()`)
+      if (listed.present) pass('the shortcut reference lists 定位当前会话 with ' + JSON.stringify(listed.around))
+      else fail('the shortcut reference does not list the locate command')
+      await pressEscape(cdp, sessionId)
+      await sleep(400)
+      await pressEscape(cdp, sessionId)
+      await sleep(400)
+      await click(cdp, sessionId, '[data-slot="sidebar.settings"] button')
+      await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"] nav button\') !== null', 'the settings dialog again')
+    }
 
     const flowTab = await evaluate(cdp, sessionId, `(() => {
       const tab = [...document.querySelectorAll('[role="dialog"] nav button')].find((b) => b.textContent === '心流');
@@ -447,9 +530,7 @@ async function main() {
     }
 
     // Leave the dialog closed; the toggle is already back where it started.
-    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, sessionId)
-    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, sessionId)
-    await sleep(400)
+    await pressEscape(cdp, sessionId)
   } finally {
     socket?.close()
     chrome.kill('SIGKILL')
