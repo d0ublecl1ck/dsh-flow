@@ -63,6 +63,7 @@ async function load() {
         return {
           Tooltip: (props) => props.children ?? null,
           Switch: () => null,
+          Menu: (props) => props.children ?? null,
           MenuItemButton: (props) => props.children ?? null,
           Toast: (props) => props.text ?? null,
           IconCopyOutlineRegular: () => null,
@@ -273,9 +274,13 @@ test('apply registers the footer button, the 心流 section and the copy seats',
   assert.equal(menu.id, 'flow')
   assert.equal(menu.locale, 'flow')
   assert.equal(menu.order, MENU_ORDER)
-  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
-  assert.equal(overlay.id, 'flow')
-  assert.equal(overlay.locale, 'flow')
+  const overlays = registrations.filter((entry) => entry.name === 'shell.overlay')
+  assert.deepEqual(overlays.map((entry) => entry.id), ['flow', 'flow.code-menu'])
+  assert.equal(overlays[0].locale, 'flow')
+  // The inline-code menu is a second cell of the same list slot rather than a
+  // second surface sharing the notice's cell.
+  assert.equal(overlays[1].locale, 'flow')
+  assert.notEqual(overlays[1].id, overlays[0].id)
 
   // Every registration the module makes is released with its fiber.
   assert.ok(effects.length >= 5)
@@ -394,6 +399,186 @@ test('the notice store hands out one fresh snapshot per notice', async () => {
   assert.equal(wakes, 2, 'an unsubscribed listener stays silent')
   store.clear()
   assert.equal(wakes, 2, 'clearing an empty store is not a second wake-up')
+})
+
+test('the code-menu seat mints one fresh snapshot per open', async () => {
+  const { createCodeMenuStore } = (await load()).internals
+  const store = createCodeMenuStore()
+  assert.equal(store.getSnapshot(), null)
+
+  let wakes = 0
+  const off = store.subscribe(() => { wakes += 1 })
+  const element = { nodeType: 1 }
+  store.open({ x: 120, y: 240, text: 'npm test', element })
+  const first = store.getSnapshot()
+  assert.deepEqual(first, { seq: 1, x: 120, y: 240, text: 'npm test', element })
+  assert.equal(wakes, 1)
+
+  // The very same press point again is still a new object: React compares
+  // snapshots by identity, so a re-open has to re-render.
+  store.open({ x: 120, y: 240, text: 'npm test', element })
+  assert.equal(store.getSnapshot() === first, false)
+  assert.equal(store.getSnapshot().seq, 2)
+  assert.equal(wakes, 2)
+
+  off()
+  store.close()
+  assert.equal(store.getSnapshot(), null)
+  assert.equal(wakes, 2, 'an unsubscribed listener stays silent')
+  store.close()
+  assert.equal(wakes, 2, 'closing an empty seat is not a second wake-up')
+})
+
+/** The `<code>` of a markdown body, plus the event that right-clicked it. */
+function inlineCode({ text = 'npm test', pre = false, editable = false, anchor = false, markdown = true, node = true } = {}) {
+  const element = { nodeType: 1, textContent: text }
+  element.closest = (selector) => {
+    if (selector === 'code') return element
+    if (selector === 'pre') return pre ? { nodeType: 1 } : null
+    if (selector === '[contenteditable]') return editable ? { nodeType: 1 } : null
+    if (selector === 'a[href]') return anchor ? { nodeType: 1 } : null
+    if (selector === '[class*="_markdown_"]') return markdown ? { nodeType: 1 } : null
+    return null
+  }
+  const target = node ? { nodeType: 1, closest: (selector) => (selector === 'code' ? element : null) } : {}
+  return { element, event: { target } }
+}
+
+test('codeMenuTarget claims one inline code in a markdown body, and nothing else', async () => {
+  const { codeMenuTarget } = (await load()).internals
+
+  const hit = inlineCode({ text: '  npm test\n' })
+  assert.deepEqual(codeMenuTarget(hit.event), { element: hit.element, text: 'npm test' })
+
+  // A fenced block (`pre > code`) is multi-line and out of scope.
+  assert.equal(codeMenuTarget(inlineCode({ pre: true }).event), null)
+  // The composer and the shortcut editor render code into a contenteditable.
+  assert.equal(codeMenuTarget(inlineCode({ editable: true }).event), null)
+  // An anchor already belongs to the off-origin link hand-off.
+  assert.equal(codeMenuTarget(inlineCode({ anchor: true }).event), null)
+  // Whitespace is not a snippet.
+  assert.equal(codeMenuTarget(inlineCode({ text: '   \n ' }).event), null)
+  // Outside markdown — a tool card, a settings page, another plugin's panel.
+  assert.equal(codeMenuTarget(inlineCode({ markdown: false }).event), null)
+  // A press that never reached a `code` at all.
+  assert.equal(codeMenuTarget(inlineCode({ node: false }).event), null)
+  assert.equal(codeMenuTarget({ target: { closest: () => null } }), null)
+  assert.equal(codeMenuTarget({ target: null }), null)
+  assert.equal(codeMenuTarget({}), null)
+  assert.equal(codeMenuTarget(undefined), null)
+})
+
+test('opening inline code activates the control the shell made clickable', async () => {
+  const { clickTargetOf, activateInlineCode } = (await load()).internals
+
+  // The shipped renderer puts the open handler on `code > button`, never on the
+  // `code` itself, so the click has to be dispatched at the button.
+  const mention = { nodeType: 1 }
+  const code = { nodeType: 1, querySelector: (selector) => (selector === 'button' ? mention : null) }
+  assert.equal(clickTargetOf(code), mention)
+  const plain = { nodeType: 1, querySelector: () => null }
+  assert.equal(clickTargetOf(plain), plain)
+  assert.equal(clickTargetOf(null), null)
+
+  const seen = []
+  const view = { MouseEvent: class MouseEvent { constructor(type, init) { this.type = type; this.init = init } } }
+  // A shell handler that calls preventDefault makes dispatchEvent answer false;
+  // the click was still dispatched, which is all this reports.
+  mention.dispatchEvent = (event) => { seen.push(event); return false }
+  assert.equal(activateInlineCode(code, view), true)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].type, 'click')
+  assert.deepEqual(seen[0].init, { bubbles: true, cancelable: true, view })
+  // No MouseEvent constructor is a refusal, never a throw.
+  assert.equal(activateInlineCode(code, {}), false)
+  assert.equal(activateInlineCode(null, view), false)
+})
+
+test('a context-menu press on inline code is claimed, and any other press is left alone', async () => {
+  const { handleCodeContextMenu } = (await load()).internals
+  const hit = inlineCode({ text: 'npm test' })
+  const claimed = {
+    ...hit.event,
+    clientX: 120,
+    clientY: 240,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { claimed.prevented += 1 },
+    stopPropagation() { claimed.stopped += 1 },
+  }
+  const opened = []
+  assert.equal(handleCodeContextMenu(claimed, { open: (menu) => opened.push(menu) }), true)
+  assert.deepEqual(opened, [{ x: 120, y: 240, text: 'npm test', element: hit.element }])
+  assert.equal(claimed.prevented, 1, 'the shell must not also open a menu')
+  assert.equal(claimed.stopped, 1)
+
+  const passed = {
+    target: { closest: () => null },
+    clientX: 0,
+    clientY: 0,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { passed.prevented += 1 },
+    stopPropagation() { passed.stopped += 1 },
+  }
+  assert.equal(handleCodeContextMenu(passed, { open: () => { throw new Error('nothing to open') } }), false)
+  assert.equal(passed.prevented, 0, 'a press that is not ours keeps the shell behaviour')
+  assert.equal(passed.stopped, 0)
+})
+
+test('readCodeMenuEnabled defaults to on and only an explicit false turns it off', async () => {
+  const { readCodeMenuEnabled } = (await load()).internals
+  assert.equal(readCodeMenuEnabled({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readCodeMenuEnabled({ getSnapshot: () => ({ value: { codeMenu: false } }) }), false)
+  assert.equal(readCodeMenuEnabled({ getSnapshot: () => ({ value: { codeMenu: true } }) }), true)
+  assert.equal(readCodeMenuEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+test('the inline-code listener exists only while the preference is on', async () => {
+  const module = await load()
+  const added = []
+  const removed = []
+  globalThis.document = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, remove() {} }),
+    head: { appendChild() {} },
+    addEventListener: (type, listener, capture) => added.push({ type, listener, capture }),
+    removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
+  }
+  try {
+    const form = fakeForm({ codeMenu: true })
+    module.apply(fakeContext([], [], { form }))
+    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true]])
+
+    // A Host echo that turns the feature off detaches the listener instead of
+    // leaving one behind that decides to do nothing.
+    form.publish({ codeMenu: false })
+    assert.deepEqual(removed, [{ type: 'contextmenu', listener: added[1].listener, capture: true }])
+    form.publish({ codeMenu: false })
+    assert.equal(removed.length, 1, 'an already detached listener is not removed twice')
+
+    // Turning it back on binds the listener again, and nothing else.
+    form.publish({ codeMenu: true })
+    assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'contextmenu'])
+    assert.equal(added[2].capture, true)
+  } finally {
+    delete globalThis.document
+  }
+})
+
+test('copyInlineCode reports both outcomes instead of failing quietly', async () => {
+  const { copyInlineCode } = (await load()).internals
+  const seen = []
+  const notify = (text, tone) => seen.push([text, tone])
+  const t = (key) => ({ 'codeMenu.done': '已复制行内代码', 'codeMenu.failed': '复制失败，剪贴板不可用' }[key])
+
+  assert.equal(await copyInlineCode({ text: 'npm test', write: (text) => text === 'npm test', notify, t }), true)
+  assert.deepEqual(seen, [['已复制行内代码', 'success']])
+  assert.equal(await copyInlineCode({ text: 'npm test', write: () => false, notify, t }), false)
+  assert.deepEqual(seen[1], ['复制失败，剪贴板不可用', 'warning'])
+  // A clipboard that throws is still a reported failure, never a rejection.
+  assert.equal(await copyInlineCode({ text: 'npm test', write: () => { throw new Error('denied') }, notify, t }), false)
+  assert.deepEqual(seen[2], ['复制失败，剪贴板不可用', 'warning'])
 })
 
 test('copySessionId reports both outcomes instead of failing quietly', async () => {
@@ -516,9 +701,24 @@ test('both dictionaries stay complete, copy included', async () => {
     assert.notEqual(flow.zh[key].length, 0, key)
     assert.equal(typeof flow.en[key], 'string', key)
   }
+  for (const key of [
+    'codeMenu.open',
+    'codeMenu.copy',
+    'codeMenu.done',
+    'codeMenu.failed',
+    'section.codeMenu.title',
+    'section.codeMenu.description',
+  ]) {
+    assert.equal(typeof flow.zh[key], 'string', key)
+    assert.notEqual(flow.zh[key].length, 0, key)
+    assert.equal(typeof flow.en[key], 'string', key)
+  }
   assert.equal(flow.zh['copy.menu'], '复制会话 ID')
   assert.equal(flow.zh['copy.done'], '已复制会话 ID')
   assert.equal(flow.zh['copy.failed'], '复制失败，剪贴板不可用')
+  assert.equal(flow.zh['codeMenu.open'], '打开')
+  assert.equal(flow.zh['codeMenu.copy'], '复制')
+  assert.equal(flow.zh['codeMenu.done'], '已复制行内代码')
 })
 
 test('readExternalLinkEnabled defaults to on and only an explicit false turns it off', async () => {
@@ -646,7 +846,7 @@ test('handleAnchorClick falls back to the page when the host cannot be reached',
   assert.deepEqual(fellBack, ['https://example.com/x'])
 })
 
-test('apply listens for anchor clicks in the capture phase, and stops on dispose', async () => {
+test('apply listens for anchor clicks and inline-code context menus in the capture phase, and stops on dispose', async () => {
   const module = await load()
   const listeners = []
   const removed = []
@@ -660,23 +860,46 @@ test('apply listens for anchor clicks in the capture phase, and stops on dispose
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true]])
+    // The link hand-off and the inline-code menu are two separate capture-phase
+    // listeners: neither can be reached through the other's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true]])
     assert.deepEqual(removed, [])
-    // The listener is registered by an effect, so the fiber owns its lifetime.
+    // Both listeners are registered by an effect, so the fiber owns their lifetime.
     for (const dispose of disposers) dispose()
-    assert.deepEqual(removed, [{ type: 'click', listener: listeners[0].listener }])
+    assert.deepEqual(removed, [
+      { type: 'click', listener: listeners[0].listener },
+      { type: 'contextmenu', listener: listeners[1].listener },
+    ])
   } finally {
     delete globalThis.document
   }
 })
 
 /** A client-root stub with exactly the services the module injects. */
-function fakeContext(registrations, effects, { served = true, commands = [], recorded = null, disposers = null } = {}) {
+/**
+ * A config form stub whose value the Host can republish, the way the settings
+ * projection does when a preference write lands.
+ */
+function fakeForm(value = {}) {
+  const listeners = new Set()
   const form = {
-    getSnapshot: () => ({ value: {}, writable: true }),
-    subscribe: () => () => {},
+    value,
+    getSnapshot: () => ({ value: form.value, writable: true }),
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
     set: async () => true,
+    /** Publish a new value: what the Host's own settings document echoes back. */
+    publish(next) {
+      form.value = next
+      for (const listener of [...listeners]) listener()
+    },
   }
+  return form
+}
+
+function fakeContext(registrations, effects, { served = true, commands = [], recorded = null, disposers = null, form = fakeForm() } = {}) {
   const slots = {
     inject: (key, callback) => {
       const dispose = callback()

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- 新增行内代码右键菜单：对话正文里的行内代码（markdown 的 `code`）点右键浮出「打开 / 复制」。打开复用壳自己的左键链路，复制把代码原文写进剪贴板并给顶部横幅；单击行为一个字没改，本功能只监听 `contextmenu`。
+- 「心流」页新增第四个开关控制它（宿主 Config 的 `flow.codeMenu`，默认开）；关闭时连监听都不注册，不是注册了再判断。
+- 菜单用壳 primitives 的 `Menu` / `MenuItemButton`：键盘漫游、`Esc`、点菜单外面关闭都是官方行为。`shell.overlay` 上新增第二个 cell（`flow.code-menu`），与复制提示的 `flow` 互不顶替。
+- 「打开」派发合成 click 的目标是 `code > button`，不是 `<code>` 本身：壳把解析成文件引用的行内代码渲染成那个 button，`<code>` 上没有处理器。这条是从运行中的实例实测出来的。
+- `scripts/verify-browser.mjs` 新增行内代码一段：先打开一个有内容的会话并等正文出现 `code`，再断言右键出菜单、复制得到原文、打开只派发一次合成 click、左键不弹菜单、`Esc` 与点外面关闭；开关那一段在旧宿主实例上报 `SKIP` 而不是假装通过。
+- 测试从 52 条增至 60 条。
+
 ## 0.4.0
 
 - 合并 `dsh-external-link` 的能力：非同源的 `http`/`https`/`mailto`/`tel` 链接改由宿主交给系统默认程序打开（macOS `open`、Windows `start`、Linux `xdg-open`），`http://localhost` 不再落进 Electron 壳的内置窗口。

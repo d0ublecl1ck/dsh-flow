@@ -48,8 +48,16 @@ test('the external-link switch defaults to on, and is volatile too', () => {
   assert.equal(field.type, 'boolean')
 })
 
+test('the inline-code menu switch defaults to on, and is volatile too', () => {
+  assert.equal(z.resolve({}, Config)[0].codeMenu.get(), true)
+  assert.equal(z.resolve({ codeMenu: false }, Config)[0].codeMenu.get(), false)
+  const field = Config.dict.codeMenu
+  assert.equal(field.meta.volatile, true)
+  assert.equal(field.type, 'boolean')
+})
+
 test('the toggles are volatile, which is what the settings form projects', () => {
-  for (const name of ['locateButton', 'copySessionId', 'externalLink']) {
+  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu']) {
     const field = Config.dict[name]
     assert.equal(field.meta.volatile, true, name)
     assert.equal(field.type, 'boolean', name)

@@ -39,10 +39,30 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **宿主答非 2xx 时浏览器半边回退到 `window.open`**：`fetch` 对 404/500 是 resolve 不是 reject，只看 reject 会把点击吞掉——客户端先更新、宿主还是旧版的那段窗口里，链接会变成「点了没反应」。这条回退是给那个窗口兜底的，别删。
 - **和 `dsh-external-link` 不能同时装**：那个插件在同一个节点上也挂了捕获监听，`stopPropagation()` 拦不住同节点的另一个监听，两边都会 POST、链接会被打开两次。合并进本插件之后应当把 `dsh-external-link` 从 profile 的 bundles 里去掉。
 
+## 行内代码的右键菜单（打开 / 复制）
+
+对话正文里的行内代码（`dsh-client-ui-primitives` 的 markdown 渲染器，`inlineCode` → `<code>`）右键浮出一个两项菜单。三件事必须同时成立，实现也就长成了现在的样子：
+
+- **只监听 `contextmenu`，绝不碰 `click`**：单击打开的链路是壳自己的（`MarkdownDelegateProvider` 注入 `openFile`），本插件对左键零介入。监听注册在 `document` 的捕获阶段，命中就 `preventDefault() + stopPropagation()` 把这次右键从壳手里拿走，没命中一行都不动。
+- **开关关闭时不注册监听**（不是注册了再判断）：`ctx.configForms` 的表单有 `subscribe`，把它当 Host 回声用 —— `readCodeMenuEnabled` 翻到 false 就 detach，翻回 true 再 attach。`tests/client.test.mjs` 有断言钉住这条：关闭后 `document` 上根本不存在 `contextmenu` 监听。
+- **「打开」是合成一次普通左键 `click`**，不自己调 RPC：这样「侧栏预览还是系统默认程序」的分叉留在壳里。
+
+**点击目标不是 `<code>` 本身。** 壳的渲染器把解析成文件引用的行内代码渲染成 `code > button._fileMention_*`，`onClick: mention.open` 挂在这个 button 上，`<code>` 自己没有任何处理器（实拉运行中的实例：某会话 89 个 `code`，带 button 的那一批才有打开动作）。所以 `clickTargetOf()` 先取 `element.querySelector('button')`，取不到才退回 `<code>` —— 往 `<code>` 上派发 `click` 不会触发 button 的 `onClick`（React 的合成事件按原生传播路径派发，button 不在路径里），症状是「菜单在，点打开没反应」。另外 `dispatchEvent` 的返回值是「事件没被取消」，壳的处理器通常会 `preventDefault`，别把它当成功信号。
+
+**菜单用壳的 `Menu`，不是 `MenuSurface`。** 键盘漫游（↑↓/Home/End）、`Esc`、点外面的 `pointerdown` 关闭全在 `Menu` 里；`MenuSurface` 只是它画的那张卡（`ComponentPropsWithoutRef<"div">` + `compact`，位置靠 `style`），直接用 surface 等于自己重写键盘处理。位置方面：`portal` 的列表挂在 `document.body` 下、由 `getAnchorRect` 给的矩形定位，所以右键点被表达成那个点的零尺寸矩形（`cursorRect`），列表浮在光标右下并自动夹在视口内。`autoFocus` 是必需的 —— 右键打开时焦点不在任何触发器上，没有它方向键走不起来。
+
+**`shell.overlay` 上是本插件的第二个 cell。** 槽合同里写得很明确：`id` 是 cell 键，新 id 加在已有条目旁边，复用已有 id 则**进入那个 cell 并替换它**。复制提示占着 `flow`，菜单因此用 `flow.code-menu`，两者互不顶替（`tests/client.test.mjs` 断言两条 `shell.overlay` 注册的 id 不同）。
+
+**范围判定 = 排除 + markdown 正向收窄**，不是「最近的会话容器」：
+
+- 排除：`pre` 内（多行代码块）、`[contenteditable]` 内（输入框与快捷键编辑器）、`<a href>` 内（链接已归外链接管）、文本 trim 后为空、目标不在 `code` 内。
+- 收窄：必须落在 `[class*="_markdown_"]` 祖先里。实拉运行中的实例，正文里的行内代码是 `code < li < ol < div._markdown_1ypvv_5 < div.hWmORq_body < …`；`_markdown_` 是 CSS module 的 local name（哈希会变），与本仓库既有的 `[class*="listArea"]` / `[class*="sectionHeader"]` 是同一类依赖，也让工具卡、设置页、别的插件面板里的 `code` 不被误接管。**不要**改去写 `hWmORq_root` 之类的会话容器选择器 —— 那是构建哈希。
+- 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`，它断言「打开」派发的合成 click 落在 `BUTTON` 上。
 ## 依赖的官方契约（脆弱点集中在这里）
 
-- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（复制提示的 `Toast` 宿主）。
+- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占两个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
+- DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
@@ -54,7 +74,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink })`，三个字段都是 `z.boolean().default(true).volatile()`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu })`，四个字段都是 `z.boolean().default(true).volatile()`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -67,7 +87,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 52 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 60 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
@@ -78,7 +98,8 @@ npm run assets           # 重新生成 assets/ 里的示意图（需要本机 C
 两处必须知道的边界：
 
 - `--client <path>` 把指定文件的浏览器半边在飞行中替换进**合并后的**插件包（`replaceSegment()` 按 `window.__ModuleLoader__.load(` 注册调用与 `\n;\n` 分隔符定位片段，不按字节数：官方包被包装过，本地 `link:` 包是原样拼进去的，两种形状都得认）。它**只替换浏览器半边**：新加的 Config 字段要被 settings 域投影、要能保存，实例激活的宿主半边也得是这份代码。实例加载的是旧宿主时，设置写入那一段会 `SKIP` 并附原因（页面上同时如实显示保存失败），不会假装通过；片段定位失败则直接 `FAIL`，不会静默跑回旧代码。
-- 右键手势要拆成两半：CDP 的真实右键按下 + 在行坐标上补发 `contextmenu`。无头 Chrome 不会把右键按下变成 `contextmenu`，而 `contextmenu` 是官方行处理器唯一的入口，不补发就永远测不到那个菜单。
+- 右键手势要拆成两半：CDP 的真实右键按下 + 在行坐标上补发 `contextmenu`。无头 Chrome 不会把右键按下变成 `contextmenu`，而 `contextmenu` 是官方行处理器与行内代码菜单共同的唯一入口，不补发就永远测不到那个菜单。
+- 行内代码那一段先挑一个**有内容**的会话行再断言：壳常常停在空草稿（「新会话」）上，那种会话的正文里 `code` 数为 0，直接断言会变成假红。`openContentSession()` 按行标签逐个试到正文出现 `code` 为止，段末再把运行开始时选中的会话点回去。
 - 每一次按压都先过 `aim()`：滚动到位、`elementFromPoint` 命中目标之后才按下。弹窗入场动画会把一帧前量到的中心点挪走，落空的按压看起来和「点了没反应」一模一样。
 - **验收脚本必须自己把起点状态归一到已知**（`ensureCopyOn()`）：偏好是持久化的，一次中断的跑会把它留在关闭态，下一次跑的「右键菜单里应该有那一行」就会因为**上一次的残留**而红 —— 症状是同一个脚本时红时绿、换一条断言红。同理，偏好写入是有界的 Host 往返，用轮询（`settled()`）而不是猜睡眠；关掉功能后按 `⇧⌘C` 事件不再被应用消费、会落到浏览器打开元素选择模式，后面那次按压会被它吞掉，所以要补一次 Esc。
 - **打开设置弹窗前必须先确认没有残留的弹窗，并等它停稳**（`openFlowTab()` + `waitForStill()`）：关闭是淡出而不是卸载，旧弹窗还在的那几帧足够让「弹窗已打开」的等待全部通过，而随后的按压落在 React 马上要移除的节点上 —— 症状正是「开关点了没反应」，看起来像产品缺陷。第三次因为这条红过之后才加的：`settled()` 只保证读回来的是新值，保证不了那一次按压真的落在了它测量的位置上。

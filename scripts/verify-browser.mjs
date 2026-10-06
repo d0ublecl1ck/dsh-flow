@@ -313,6 +313,205 @@ async function clickMenuEntry(cdp, sessionId, label) {
 }
 
 /**
+ * Click the one menu row whose label is exactly `label`.
+ *
+ * The shell's Session-row menu and this plugin's inline-code menu both render
+ * `[role="menuitem"]` rows, and one label is a prefix of the other ("复制"
+ * against "复制会话 ID"), so this matches exactly and presses the way every
+ * other gesture in this script does: measure, hit-test, then press.
+ *
+ * @param label - the row's exact text.
+ */
+async function clickExactMenuEntry(cdp, sessionId, label) {
+  const deadline = Date.now() + 4000
+  for (;;) {
+    await sleep(150)
+    const centre = await evaluate(cdp, sessionId, `(() => {
+      const item = [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent.trim() === ${JSON.stringify(label)});
+      if (item === undefined) return null;
+      const rect = item.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      const x = rect.x + rect.width / 2;
+      const y = rect.y + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === null || !(hit === item || item.contains(hit) || hit.contains(item))) return null;
+      return { x, y };
+    })()`)
+    if (centre !== null) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+      return
+    }
+    if (Date.now() > deadline) throw new Error('no menu entry labelled exactly ' + label)
+  }
+}
+
+/**
+ * Find one element by expression, hit-test its centre, and press it.
+ *
+ * `aim()` addresses a CSS selector; the inline-code legs need "the first code
+ * element this feature would claim", which is a predicate rather than a
+ * selector, so the same measure-then-press discipline is applied to an
+ * expression. When `contextMenu` is set, the press is followed by the
+ * `contextmenu` event headless Chrome never delivers on its own, dispatched at
+ * the element the press really hit.
+ *
+ * @param find - a page-side expression yielding the element, or null.
+ * @param options.contextMenu - dispatch a `contextmenu` at the pressed element.
+ * @param options.timeoutMs - how long to keep looking for something pressable.
+ * @returns the pressed centre and the element's text, or null when nothing was
+ * there to press.
+ */
+async function pressElement(cdp, sessionId, find, { contextMenu = false, timeoutMs = 6000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    await sleep(150)
+    const centre = await evaluate(cdp, sessionId, `(() => {
+      const target = ${find};
+      if (!(target instanceof Element)) return null;
+      // The press point is what has to be on screen, not the element: an inline code
+      // is one line tall, and a press a few pixels outside the viewport hits
+      // nothing at all.
+      const point = (r) => ({ x: r.x + Math.min(r.width / 2, 24), y: r.y + r.height / 2 });
+      const onScreen = (r) => { const p = point(r); return r.width > 0 && r.height > 0 && p.x > 0 && p.x < window.innerWidth && p.y > 0 && p.y < window.innerHeight };
+      let rect = target.getBoundingClientRect();
+      if (!onScreen(rect)) {
+        // The element's own scrollport, scrolled directly: this leaves the element
+        // placed before the next retry measures it, where a smooth or
+        // shell-managed scroll would not.
+        let scroller = target.parentElement;
+        while (scroller !== null && !(scroller.scrollHeight > scroller.clientHeight + 4)) scroller = scroller.parentElement;
+        if (scroller === null) {
+          target.scrollIntoView({ block: 'center' });
+        } else {
+          const box = scroller.getBoundingClientRect();
+          scroller.scrollTop += (rect.top - box.top) - (box.height - rect.height) / 2;
+        }
+        rect = target.getBoundingClientRect();
+      }
+      if (!onScreen(rect)) return null;
+      if (rect.width === 0 || rect.height === 0) return null;
+      const x = rect.x + Math.min(rect.width / 2, 24);
+      const y = rect.y + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === null || !(hit === target || target.contains(hit))) return null;
+      return { x, y, text: target.textContent.trim() };
+    })()`)
+    if (centre !== null) {
+      // A right press is what opens this menu; a left one would run the shell's
+      // own click on the way, which is a side effect this leg must not have.
+      const button = contextMenu ? 'right' : 'left'
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button, buttons: contextMenu ? 2 : 1, clickCount: 1 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button, buttons: 0, clickCount: 1 }, sessionId)
+      if (contextMenu) {
+        await sleep(200)
+        // The same point the press measured, on the element that press hit.
+        await evaluate(cdp, sessionId, `(() => {
+          const hit = document.elementFromPoint(${centre.x}, ${centre.y});
+          if (hit === null) return false;
+          hit.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, view: window, button: 2, buttons: 2, clientX: ${centre.x}, clientY: ${centre.y} }));
+          return true;
+        })()`)
+        await sleep(400)
+      }
+      return centre
+    }
+    if (Date.now() > deadline) return null
+  }
+}
+
+/**
+ * Open a Session whose conversation really renders inline code.
+ *
+ * The shell opens whatever Session was used last, and a fresh draft ("新会话")
+ * renders no body at all — which is exactly how a code-element count of zero
+ * turns into a false failure. So labelled rows are tried in order until the
+ * rendered conversation holds at least one `code`.
+ *
+ * @returns `{ok, rowKey, codes}`, or `{ok: false, rows}` when none did.
+ */
+async function openContentSession(cdp, sessionId) {
+  const rows = await evaluate(cdp, sessionId, `(() => [...document.querySelectorAll('[class*="listArea"] [data-row-key^="session:"]')]
+    .map((row) => ({ key: row.dataset.rowKey, label: (row.innerText || '').trim() })))()`)
+  const candidates = rows.filter((row) => row.label !== '' && !row.label.includes('新会话'))
+  const tried = []
+  // Two rounds: a long conversation can take seconds to render, and a first
+  // attempt that runs out of patience is worth one retry before it is called a
+  // missing body.
+  for (let round = 0; round < 2; round += 1) {
+    for (const row of candidates) {
+      try {
+        await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(row.key) + ']')
+      } catch {
+        continue
+      }
+      try {
+        await waitFor(cdp, sessionId, 'document.querySelectorAll("code").length > 0', 'inline code in ' + row.key, 20000)
+        return { ok: true, rowKey: row.key, codes: await evaluate(cdp, sessionId, 'document.querySelectorAll("code").length') }
+      } catch {
+        // The next row may be the one with a body; a row that never renders one
+        // is not an error, it is the reason this loop exists.
+        if (!tried.includes(row.key)) tried.push(row.key)
+      }
+    }
+  }
+  return { ok: false, rows: tried }
+}
+
+/**
+ * Wait for exactly `count` menus to be on screen, and report how many are.
+ *
+ * A menu is React state, not a synchronous consequence of the press: reading
+ * the count once a fixed sleep later is how a passing run and a failing one get
+ * told apart by timing. This never throws — the caller reports the number.
+ *
+ * @returns the number of menus on screen after the wait.
+ */
+async function settleMenus(cdp, sessionId, count, timeoutMs = 5000) {
+  try {
+    await waitFor(cdp, sessionId, `document.querySelectorAll('[role="menu"]').length === ${count}`, count + ' menus', timeoutMs)
+  } catch { /* the read-back below is the report */ }
+  return evaluate(cdp, sessionId, `document.querySelectorAll('[role="menu"]').length`)
+}
+
+/** Read the inline-code preference off the 心流 page's fourth row. */
+async function codeMenuSwitchState(cdp, sessionId) {
+  return evaluate(cdp, sessionId, `(() => {
+    const node = document.querySelector(${JSON.stringify(CODE_MENU_SWITCH)});
+    return node === null ? null : node.getAttribute('aria-checked');
+  })()`)
+}
+
+/**
+ * Drive the inline-code switch to `want` on the already-open 心流 page.
+ *
+ * The write is a Host round trip, so the switch is waited for instead of read
+ * after a guessed sleep; the answer says whether the preference really moved.
+ *
+ * @returns whether the switch reads back as `want`.
+ */
+async function setCodeMenu(cdp, sessionId, want) {
+  if (await codeMenuSwitchState(cdp, sessionId) === want) return true
+  await waitFor(
+    cdp,
+    sessionId,
+    `(() => { const node = document.querySelector(${JSON.stringify(CODE_MENU_SWITCH)}); return node !== null && node.disabled === false })()`,
+    'the code-menu switch to become pressable',
+  ).catch(() => { /* the read-back below reports it */ })
+  await click(cdp, sessionId, CODE_MENU_SWITCH)
+  await waitFor(
+    cdp,
+    sessionId,
+    `(() => { const node = document.querySelector(${JSON.stringify(CODE_MENU_SWITCH)}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`,
+    'the code-menu preference to settle at ' + want,
+    8000,
+  ).catch(() => { /* the read-back below reports it */ })
+  return await codeMenuSwitchState(cdp, sessionId) === want
+}
+
+/**
  * Stand in for the host clipboard, recording what a copy actually wrote.
  *
  * A headless page has no clipboard permission, and the write path is the
@@ -456,6 +655,101 @@ const COPY_PROBE = `(() => {
  * predicate rather than the role alone.
  */
 const NOTICE_VISIBLE = `[...document.querySelectorAll('[role="alert"]')].some((n) => n.textContent.includes('已复制会话 ID'))`
+
+/**
+ * The inline `code` elements this feature claims, in the shell's own DOM.
+ *
+ * A file mention — the inline code a left click opens — is `code > button`;
+ * everything else is plain text. Anchors, fenced blocks and codes outside a
+ * markdown body are never claimed, so no finder below returns one.
+ */
+const CODE_CLAIM = {
+  mention: 'c.querySelector("button") !== null',
+  plain: 'c.querySelector("button") === null && c.querySelector("a") === null',
+}
+
+/**
+ * The expression that finds one inline `code` this feature claims.
+ *
+ * A code already inside the viewport wins over one further up the transcript:
+ * scrolling the transcript is not free — the shell pages older turns in as it
+ * scrolls and re-renders the nodes underneath — and a right-click in real use
+ * lands on what is on screen anyway. The first claimed code is the fallback
+ * for a viewport that holds none.
+ */
+const codeFinder = (kind) => `(() => {
+  const claimed = [...document.querySelectorAll("code")].filter((c) => c.closest("pre") === null && c.closest("a[href]") === null && c.closest("[contenteditable]") === null && c.closest("[class*=\'_markdown_\']") !== null && (${CODE_CLAIM[kind]}));
+  const pressable = claimed.filter((c) => {
+    const r = c.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const x = r.x + Math.min(r.width / 2, 24);
+    const y = r.y + r.height / 2;
+    return x > 0 && x < window.innerWidth && y > 0 && y < window.innerHeight;
+  });
+  if (pressable.length > 0) return pressable[0];
+  // Nothing under the pointer right now: hand back the claimed code closest to
+  // the middle of the viewport, which is the one a scroll has to travel least to
+  // reach.
+  const middle = window.innerHeight / 2;
+  return claimed.slice().sort((a, b) => {
+    const da = Math.abs(a.getBoundingClientRect().top + a.getBoundingClientRect().height / 2 - middle);
+    const db = Math.abs(b.getBoundingClientRect().top + b.getBoundingClientRect().height / 2 - middle);
+    return da - db;
+  })[0] ?? null;
+})()`
+
+/** What the inline-code menu surfaces look like right now. */
+const CODE_PROBE = `(() => {
+  const labelled = (label) => [...document.querySelectorAll('[role="menuitem"]')].some((n) => n.textContent.trim() === label);
+  return {
+    codes: document.querySelectorAll('code').length,
+    menus: document.querySelectorAll('[role="menu"]').length,
+    items: [...document.querySelectorAll('[role="menuitem"]')].map((n) => n.textContent.trim()),
+    openItem: labelled('打开'),
+    copyItem: labelled('复制'),
+    copied: window.__copied ?? null,
+    clicks: (window.__codeClicks ?? []).slice(),
+    alerts: [...document.querySelectorAll('[role="alert"]')].map((n) => n.textContent),
+    sectionTitles: [...document.querySelectorAll('[role="dialog"] .flow-row__title')].map((n) => n.textContent),
+    switches: [...document.querySelectorAll('[role="dialog"] [role="switch"]')].map((n) => n.getAttribute('aria-checked')),
+    rowErrors: [...document.querySelectorAll('[role="dialog"] .flow-row')].map((n) => n.querySelector('.flow-row__error')?.textContent ?? null),
+  };
+})()`
+
+/**
+ * Why an inline code could not be pressed: what exists, and what is in the way.
+ *
+ * Included in the failure messages so the next red run says "nothing was found"
+ * or "something covered it" instead of only "nothing happened".
+ */
+const CODE_DIAGNOSTICS = `(() => {
+  const claimed = [...document.querySelectorAll('code')].filter((c) => c.closest('pre') === null && c.closest('[class*="_markdown_"]') !== null);
+  const at = (c) => {
+    const r = c.getBoundingClientRect();
+    const x = Math.round(r.x + Math.min(r.width / 2, 24));
+    const y = Math.round(r.y + r.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, w: Math.round(r.width), inside: x > 0 && x < window.innerWidth && y > 0 && y < window.innerHeight,
+      hit: hit === null ? null : (hit === c ? "code" : (c.contains(hit) ? "inside-code" : hit.tagName + (typeof hit.className === "string" && hit.className ? "." + String(hit.className).slice(0, 20) : ""))) };
+  };
+  let scroller = claimed[0] ?? null;
+  while (scroller !== null && !(scroller.scrollHeight > scroller.clientHeight + 4)) scroller = scroller.parentElement;
+  const conversation = document.querySelector('[slot="conversation.view"]');
+  return {
+    codes: document.querySelectorAll('code').length,
+    claimed: claimed.length,
+    viewport: [window.innerWidth, window.innerHeight],
+    pressable: claimed.filter((c) => { const i = at(c); return i.inside }).length,
+    pressablePlain: claimed.filter((c) => at(c).inside && c.querySelector("button") === null && c.querySelector("a") === null).length,
+    pressableMention: claimed.filter((c) => at(c).inside && c.querySelector("button") !== null).length,
+    first: claimed.length === 0 ? null : at(claimed[0]),
+    scroller: scroller === null ? null : { scrollTop: Math.round(scroller.scrollTop), scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight },
+    conversationRect: conversation === null ? null : { x: Math.round(conversation.getBoundingClientRect().x), w: Math.round(conversation.getBoundingClientRect().width) },
+  };
+})()`
+
+/** The 心流 page's fourth row: this feature's own switch. */
+const CODE_MENU_SWITCH = '[role="dialog"] .flow-row:nth-child(4) [role="switch"]'
 
 /**
  * Wait until one element's box has stopped moving.
@@ -1073,8 +1367,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接'])) {
-      pass('the 心流 page renders all three preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单'])) {
+      pass('the 心流 page renders all four preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -1142,13 +1436,193 @@ async function main() {
     // Leave the dialog closed; the toggle is already back where it started.
     await pressEscape(cdp, sessionId)
 
+    // ---- G. the inline-code right-click menu ----------------------------
+    // The conversation body only renders while a Session with content is open,
+    // and the shell often opens on an empty draft: a code-element count of zero
+    // there would make every assertion below a false failure. The legs
+    // therefore open a row that has something in it first.
+    await openFlowTab(cdp, sessionId)
+    const codeMenuStarted = await codeMenuSwitchState(cdp, sessionId)
+    // A run that died mid-way can leave this preference off; an off preference
+    // has no listener at all, so it is put back rather than allowed to fail the
+    // next run.
+    let codeMenuOn = codeMenuStarted === 'true'
+    if (!codeMenuOn) codeMenuOn = await setCodeMenu(cdp, sessionId, 'true')
+    await pressEscape(cdp, sessionId)
+    if (!codeMenuOn) {
+      skip('the inline-code menu legs need this checkout as the installed Host half; install it and restart the instance to run them here')
+    } else {
+      const content = await openContentSession(cdp, sessionId)
+      if (!content.ok) {
+        fail('no Session renders a conversation body to right-click: ' + JSON.stringify(content.rows))
+      } else {
+        pass('a conversation with rendered inline code is open (' + content.codes + ' code elements)')
+        await stubClipboard(cdp, sessionId)
+
+        // ① the menu, with both entries
+        const pressed = await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+        const menus = await settleMenus(cdp, sessionId, 1)
+        let code = await evaluate(cdp, sessionId, CODE_PROBE)
+        if (code.openItem && code.copyItem && menus === 1) {
+          pass('right-clicking inline code offers 打开 and 复制')
+        } else {
+          fail('no inline-code menu after a right-click: ' + JSON.stringify({ items: code.items, menus: code.menus }))
+        }
+        await shoot(cdp, sessionId, 'code-menu.png')
+
+        // ② 复制 writes the code's own text
+        await clickExactMenuEntry(cdp, sessionId, '复制')
+        try {
+          await waitFor(cdp, sessionId, 'window.__copied !== null', 'the inline-code clipboard write')
+        } catch { /* the assertion below is the report */ }
+        await sleep(300)
+        code = await evaluate(cdp, sessionId, CODE_PROBE)
+        // The expected value is the text of the element that was really pressed,
+        // captured in that same page-side measurement — re-finding "the first
+        // mention" here could pick a different one and make a correct copy look
+        // wrong.
+        const expectedText = pressed === null ? null : pressed.text
+        if (expectedText !== null && code.copied === expectedText) {
+          pass('复制 puts the inline code’s own text on the clipboard: ' + JSON.stringify(code.copied))
+        } else {
+          fail('the menu copied the wrong text: ' + JSON.stringify({ copied: code.copied, expected: expectedText }))
+        }
+        if (code.alerts.some((text) => text.includes('已复制行内代码'))) pass('the inline-code copy is announced, not silent')
+        else fail('no notice after copying inline code: ' + JSON.stringify(code.alerts))
+        if (await settleMenus(cdp, sessionId, 0) === 0) pass('choosing an entry closes the menu')
+        else fail('the menu stayed open after an entry was chosen')
+        await shoot(cdp, sessionId, 'code-copied.png')
+
+        // ③ 打开 runs the shell's own click, and nothing of this plugin's
+        await evaluate(cdp, sessionId, `(() => {
+          window.__codeClicks = [];
+          if (window.__codeClickRecorder === true) return true;
+          document.addEventListener('click', (event) => {
+            const code = event.target?.closest?.('code');
+            if (code === null || code === undefined) return;
+            window.__codeClicks.push({ tag: event.target.tagName, trusted: event.isTrusted === true });
+          }, true);
+          window.__codeClickRecorder = true;
+          return true;
+        })()`)
+        await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+        await settleMenus(cdp, sessionId, 1)
+        await clickExactMenuEntry(cdp, sessionId, '打开')
+        await sleep(800)
+        code = await evaluate(cdp, sessionId, CODE_PROBE)
+        const syntheticClicks = code.clicks.filter((click) => click.trusted === false)
+        if (syntheticClicks.length === 1 && syntheticClicks[0].tag === 'BUTTON') {
+          pass('打开 dispatches one synthetic left click at the shell’s own control')
+        } else {
+          fail('打开 did not run the shell’s own click path: ' + JSON.stringify(code.clicks))
+        }
+
+        // ④ the invariant this feature exists to keep: a left click is untouched
+        await evaluate(cdp, sessionId, 'window.__codeClicks = []')
+        // A plain code first: its left click has no other effect to trip over.
+        // When the turns on screen hold only file mentions, the same assertion runs
+        // on one of those — a mention's left click opens the file, which is exactly
+        // the behaviour that must not turn into a menu.
+        let leftClicked = await pressElement(cdp, sessionId, codeFinder('plain'), { timeoutMs: 1500 })
+        let leftKind = 'plain'
+        if (leftClicked === null) {
+          leftClicked = await pressElement(cdp, sessionId, codeFinder('mention'))
+          leftKind = 'mention'
+        }
+        await sleep(400)
+        code = await evaluate(cdp, sessionId, CODE_PROBE)
+        if (leftClicked === null) {
+          fail('nothing pressable to left-click: ' + JSON.stringify(await evaluate(cdp, sessionId, CODE_DIAGNOSTICS)))
+        } else if (code.menus === 0 && code.items.length === 0) {
+          pass('a plain left click on inline code opens no menu (' + leftKind + ')')
+        } else {
+          fail('a left click opened the inline-code menu: ' + JSON.stringify(code.items))
+        }
+        // The recorder only keeps clicks whose target is inside a code, so a real
+        // one here is the press itself: the shell received an untouched left
+        // click, not this plugin reacting to it. Its exact tag is the code for a
+        // plain snippet and the mention button inside it for a file reference.
+        if (code.clicks.some((click) => click.trusted === true)) {
+          pass('the left click reached the shell as itself, inside the code element')
+        } else {
+          fail('the left click never reached the code element: ' + JSON.stringify(code.clicks))
+        }
+        await shoot(cdp, sessionId, 'code-left-click.png')
+
+        // ⑤ Escape and a press outside close it — the shipped menu's own keys
+        await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+        const beforeEscape = await settleMenus(cdp, sessionId, 1)
+        await pressEscape(cdp, sessionId)
+        const afterEscape = await settleMenus(cdp, sessionId, 0)
+        if (beforeEscape === 1 && afterEscape === 0) pass('Escape closes the inline-code menu')
+        else fail('Escape did not close the menu: ' + JSON.stringify({ before: beforeEscape, after: afterEscape }))
+
+        await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+        const beforeOutside = await settleMenus(cdp, sessionId, 1)
+        // Dispatched rather than pressed: any point inside the conversation
+        // column can land on another inline code, and a second menu would make
+        // "did the first one close" unanswerable. The event is the one the
+        // shipped dismissal listens for, on a real element of the panel.
+        await evaluate(cdp, sessionId, `(() => {
+          const panel = document.querySelector('[slot="conversation.view"]') ?? document.body;
+          panel.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }));
+          return true;
+        })()`)
+        const afterOutside = await settleMenus(cdp, sessionId, 0)
+        if (beforeOutside === 1 && afterOutside === 0) pass('a pointer press outside the menu closes it')
+        else fail('the menu survived a press outside it: ' + JSON.stringify({ before: beforeOutside, after: afterOutside }))
+
+        // ⑥ the switch owns the listener, not just the menu
+        await openFlowTab(cdp, sessionId)
+        const switchedOff = await setCodeMenu(cdp, sessionId, 'false')
+        await pressEscape(cdp, sessionId)
+        if (!switchedOff) {
+          skip('switching the inline-code preference off needs this checkout as the installed Host half; install it and restart the instance to run that leg here')
+        } else {
+          await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+          // A negative assertion cannot be waited for: what bounds it is a fixed
+          // pause long enough for a menu that was going to open to have opened.
+          await sleep(800)
+          code = await evaluate(cdp, sessionId, CODE_PROBE)
+          if (code.menus === 0 && code.items.length === 0) pass('switched off, a right-click on inline code opens no menu')
+          else fail('the menu opened while the preference was off: ' + JSON.stringify(code.items))
+
+          await openFlowTab(cdp, sessionId)
+          const switchedBack = await setCodeMenu(cdp, sessionId, 'true')
+          await pressEscape(cdp, sessionId)
+          if (!switchedBack) {
+            fail('the inline-code preference did not come back')
+          } else {
+            await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+            const restored = await settleMenus(cdp, sessionId, 1)
+            code = await evaluate(cdp, sessionId, CODE_PROBE)
+            if (restored === 1 && code.openItem && code.copyItem) pass('switching it back on restores the menu')
+            else fail('the menu did not come back: ' + JSON.stringify(code.items))
+            await pressEscape(cdp, sessionId)
+          }
+        }
+      }
+      // The legs above opened another Session; put the one the run started on
+      // back, so a verification pass leaves the interface where it found it.
+      if (current !== null) {
+        await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(current) + ']').catch(() => {
+          // Best effort: the row may have been filtered out since.
+        })
+        await sleep(600)
+      }
+    }
+
     // ---- F. the 心流 switch owns the link hand-off ----------------------
     await stubOpenRoutes(cdp, sessionId)
     await openFlowTab(cdp, sessionId)
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
     const linkStarted = copy.switches[2] ?? null
+    // The default itself is asserted by the unit tests; what this leg needs is the
+    // preference ON. A run killed mid-way leaves it off, so finding it off is
+    // reported as a skip rather than read as a product defect — and the section
+    // normalizes it on below, exactly as the copy section does.
     if (linkStarted === 'true') pass('the link preference starts on by default')
-    else fail('the link preference did not start on: ' + JSON.stringify(linkStarted))
+    else skip('the link preference was off at the start (an interrupted run leaves it off); it is switched back on for these legs')
 
     // The link preference is persisted exactly like the copy one, so the same
     // two rules apply: this run normalizes the start state itself, and the write
@@ -1219,8 +1693,11 @@ async function main() {
     }
 
     await openFlowTab(cdp, sessionId)
-    const restoredLink = await setLink(linkStarted)
-    if (restoredLink) pass('the link preference is back where the run found it: ' + JSON.stringify(linkStarted))
+    // Left on, the way the copy section leaves its switch: the default is what a
+    // verification run has to leave behind, and `linkStarted` may itself be the
+    // residue of a run that was killed mid-way.
+    const restoredLink = await setLink('true')
+    if (restoredLink) pass('the link preference is left on')
     else fail('the link preference was not restored: ' + JSON.stringify(await evaluate(cdp, sessionId, COPY_PROBE)))
     await pressEscape(cdp, sessionId)
     await removeProbeAnchors(cdp, sessionId)

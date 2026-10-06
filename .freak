@@ -2,6 +2,13 @@
 
 `dsh-flow` 历次洁癖审查留下的待核查线索。只记「下次该优先看哪里」，权威结论在 `README.md` / `AGENTS.md`。
 
+- [ ] 行内代码右键菜单的「开关关闭」那一段（`scripts/verify-browser.mjs` 里 ⑥）**本轮没在真浏览器里跑过**：运行中实例激活的宿主半边不是本 checkout（没有 `flow.codeMenu`），`--client` 只替换浏览器半边，设置写入会被拒，那一段照约定记 `SKIP`。要让 ⑥ 真跑，得让实例激活本 checkout 的 `index.js`（`remove` 再 `add`，实例在跑会话时不要做）。`readCodeMenuEnabled` 的默认值与「关闭时不注册监听」由 `tests/client.test.mjs` 钉住。记录：`2026-10-07`
+- [ ] 「打开」把合成 click 派发到 `code > button`（文件引用的行内代码），**不是** `<code>` 本身；依据是运行实例实拉 + primitives 里 `onClick: mention.open` 挂在该 button 上。官方若改成 `<code>` 自身带 `onClick`，症状是「右键菜单在、点打开没反应」，不报错。记录：`2026-10-07`
+- [ ] 行内代码范围的正向收窄依赖 `[class*="_markdown_"]` 这个 CSS module local name；本机另一个第三方插件（实拉客户端清单里）也在用同一选择器，说明它是当前实例上的稳定点，但它仍是脆弱契约。记录：`2026-10-07`
+- [ ] 行内代码那一段的按压目标必须**先取视口内的 `code`**：这个会话的正文有 200–450 个 `code`，DOM 里第一个在视口上方几千像素处，而壳的「跟随尾部」会把 `scrollIntoView`/`scrollTop` 顶回去。实测数据：`{"codes":445,"pressable":28,"first":{"y":-6213},"scroller":{"scrollTop":6558,"scrollHeight":7295}}` —— 用「第一个」去找，症状是右键/左键都「什么都没发生」。改成按「按压点落在视口内」筛选、取不到再按距视口中心最近排序，并优先选能按的那种 `code`。记录：`2026-10-07`
+- [ ] 同一段里「左键不弹菜单」这一条：可见的那几轮若只有文件引用（`code > button`）没有普通行内代码，就退回用文件引用断言，并按「点击落在 `code` 内且 `isTrusted === true`」判定，不再要求 `event.target.tagName === "CODE"`。记录：`2026-10-07`
+- [ ] 「心流」页的开关是持久化的，**外链接管那一个原本没有归一化**：`scripts/verify-browser.mjs` 曾经把 `linkStarted` 原样写回，于是一次被强杀在 F 段中间的验收会把「在系统默认程序中打开链接」留在关闭态，下一次跑就报「the link preference did not start on」——本轮踩到并修掉（与复制开关一样归一化到开、结束时留在开）。记录：`2026-10-07`
+- [ ] 基线遗留：`scripts/verify-browser.mjs` 的两条定位断言（把当前会话行推出列表座位再按定位/快捷键）在本机侧栏内容不够长时恒红 —— `pushRowAboveSeat()` 加了 `scrollTop` 后该行仍在座位内。与本插件功能无关，改造前就红；下次动这段前先确认真实原因。记录：`2026-10-07`
 - [ ] `client.js` 的 DOM 契约（`[class*="sectionHeader"]` / `[class*="searchSlot"]` / `[class*="listArea"]` / `[data-row-key="session:<id>"]` / `workspace:<key>` 的 `aria-expanded` / `overflow:<key>`）全是从运行时产物里测出来的，官方任何一个改名都会变成静默失效（按钮不出现或定位不动作，控制台不报错）。DSH Desktop 升级后先跑 `npm run verify:browser`，再决定要不要改选择器。记录：`2026-10-04`
 - [ ] 快捷键注册表有**保留键**：`bindingIssue()` 在任何非 macOS/Windows 的 shell 上把「主修饰键 + `KeyC`/`KeyV`/`KeyX`/`KeyZ`/`KeyY`/`KeyQ`/`KeyH`」判成 `reserved`，加 `Shift` 也不会变合法。给复制功能声明 `desktop:linux` 时，症状是整个客户端半边不挂载（按钮和心流页一起消失），控制台只有一行 `Reserved shortcut default: flow.copySessionId`。macOS/Windows 两个 runtime 因为先命中 `isWebBindingAllowed()` 的 `Mod+Shift` 分支而免受影响。`tests/client.test.mjs` 有断言钉住这条。记录：`2026-10-06`
 - [ ] `scripts/verify-browser.mjs` 的 `--client <path>` 只替换浏览器半边。实例激活的宿主半边若不是这份代码，新增的 Config 字段不会被 settings 域投影，心流页里的开关点了会显示「偏好没有保存成功」——脚本对那一段报 `SKIP` 而不是 `FAIL`，所以**旧宿主实例上跑不出完整绿灯**。要让宿主也换新，必须 `remove` 再 `add` 该插件（改 `index.js` 光刷新页面没用），实例在跑当前会话时不要这么做。记录：`2026-10-06`

@@ -25,11 +25,19 @@
  *    also covers `http://localhost`, the address the Electron shell otherwise
  *    keeps in an in-app window; everything else — same-origin links, other
  *    schemes, a host that cannot answer — stays with the shell.
- *  - `settings.section` — the 心流 page, holding the three preferences that turn
- *    the button, the copy and the link hand-off off. They live in this plugin's
- *    Host Config namespace (`flow.locateButton` / `flow.copySessionId` /
- *    `flow.externalLink`), reached through `ctx.configForms`, so they are a
- *    durable part of the settings document rather than page-local state.
+ *  - inline `code` in a conversation's markdown — a right-click opens a menu
+ *    with 「打开」 and 「复制」. Only `contextmenu` is listened for, in the capture
+ *    phase and only while the preference is on; `click` is never registered or
+ *    intercepted, so a plain left click keeps doing exactly what it does today.
+ *    「打开」 dispatches one ordinary left-button `click` at the control the shell
+ *    itself made clickable, so the choice between an in-app preview and the OS
+ *    opener stays where it already lives.
+ *  - `settings.section` — the 心流 page, holding the four preferences that turn
+ *    the button, the copy, the link hand-off and the inline-code menu off. They
+ *    live in this plugin's Host Config namespace (`flow.locateButton` /
+ *    `flow.copySessionId` / `flow.externalLink` / `flow.codeMenu`), reached
+ *    through `ctx.configForms`, so they are a durable part of the settings
+ *    document rather than page-local state.
  *
  * The header is not a slot: the shell's browsing region is a single-occupant
  * slot (`sidebar.workspaces`) whose header declares no hole beside the search
@@ -53,6 +61,7 @@ window.__ModuleLoader__.load({
     const {
       IconCopyOutlineRegular,
       IconWarningOutlineRegular,
+      Menu,
       MenuItemButton,
       Switch,
       Toast,
@@ -498,6 +507,224 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The inline `code` a context-menu press landed in, with the text to copy.
+     *
+     * Every exclusion here is a place where a `code` element means something
+     * other than "a path or a snippet in the conversation": a fenced block
+     * (`pre > code`) is multi-line and out of scope, the composer and the
+     * shortcut editor are contenteditable, and an anchor already has an owner —
+     * the capture-phase click listener that hands off-origin URLs to the Host.
+     *
+     * The positive half of the scope is the markdown body itself. The shipped
+     * renderer wraps every message body in `div._markdown_<hash>`, and the
+     * CSS-module local name is the part that survives a rebuild; this is the same
+     * kind of dependency as `[class*="sectionHeader"]`, and it is why a `code`
+     * in a tool card, a settings page or another plugin's own panel is left
+     * alone. No attempt is made to name the surrounding conversation container:
+     * those classes are content hashes.
+     *
+     * @param event - the document `contextmenu` event.
+     * @returns `{element, text}`, or null when this press is not ours.
+     */
+    function codeMenuTarget(event) {
+      const target = event?.target
+      if (!isElement(target) || typeof target.closest !== 'function') return null
+      const element = target.closest('code')
+      if (!isElement(element) || typeof element.closest !== 'function') return null
+      if (element.closest('pre') !== null) return null
+      if (element.closest('[contenteditable]') !== null) return null
+      if (element.closest('a[href]') !== null) return null
+      if (element.closest('[class*="_markdown_"]') === null) return null
+      // An empty `code` has nothing to offer either entry of the menu.
+      const text = String(element.textContent ?? '').trim()
+      if (text === '') return null
+      return { element, text }
+    }
+
+    /**
+     * The control the shell itself made clickable inside one inline `code`.
+     *
+     * The shipped renderer turns an inline code it resolved as a file mention
+     * into `code > button._fileMention_*` and puts the open handler on that
+     * button — the `<code>` carries no handler at all (measured in the running
+     * instance: one sample conversation rendered 64 inline codes, 14 of them as
+     * that button).
+     * A click dispatched at the `code` therefore never reaches the handler, which
+     * is why the shell's own chain is entered at the button when there is one and
+     * at the `code` otherwise.
+     *
+     * @param element - the `<code>` element.
+     * @returns the button to activate, or the element itself.
+     */
+    function clickTargetOf(element) {
+      if (typeof element?.querySelector !== 'function') return null
+      const button = element.querySelector('button')
+      return isElement(button) ? button : element
+    }
+
+    /**
+     * Run the shell's own activation for one inline `code`.
+     *
+     * This is the whole of "打开": one ordinary, bubbling, cancelable left-button
+     * `click` dispatched at the control the shell wired up, so whatever the shell
+     * does with a real click today — in-app preview, file manager, OS opener — is
+     * exactly what happens here. Nothing is called directly.
+     *
+     * `dispatchEvent` answers whether the event was *not* cancelled, which a
+     * handler that calls `preventDefault` turns into `false` on success; the
+     * return value here is therefore "a click was dispatched", never "the shell
+     * accepted it".
+     *
+     * @param element - the `<code>` element the press landed in.
+     * @param view - the window whose `MouseEvent` constructor to use.
+     * @returns whether a click was dispatched.
+     */
+    function activateInlineCode(element, view) {
+      const target = clickTargetOf(element)
+      if (target === null || typeof target.dispatchEvent !== 'function') return false
+      const scope = view ?? element?.ownerDocument?.defaultView
+      const Ctor = scope?.MouseEvent
+      if (typeof Ctor !== 'function') return false
+      target.dispatchEvent(new Ctor('click', { bubbles: true, cancelable: true, view: scope }))
+      return true
+    }
+
+    /**
+     * Copy one inline code and report the outcome.
+     *
+     * The same contract as copying a Session id: the clipboard is asked first and
+     * the notice repeats its verdict, so a refused write reads as a refusal
+     * instead of as a copy that appeared to work.
+     *
+     * @param input.text - the code's exact text.
+     * @param input.write - the clipboard write, answering whether the host accepted it.
+     * @param input.notify - raise a notice.
+     * @param input.t - the plugin's localized copy.
+     * @returns whether the clipboard accepted the write.
+     */
+    function copyInlineCode(input) {
+      return Promise.resolve()
+        .then(() => input.write(input.text))
+        .then(
+          (accepted) => {
+            const copied = accepted === true
+            input.notify(copied ? input.t('codeMenu.done') : input.t('codeMenu.failed'), copied ? 'success' : 'warning')
+            return copied
+          },
+          () => {
+            input.notify(input.t('codeMenu.failed'), 'warning')
+            return false
+          },
+        )
+    }
+
+    /**
+     * Capture-phase `contextmenu` handler.
+     *
+     * Taking the press away from the shell is only done when the menu is really
+     * about to open; anything else — another element, a fenced block, a
+     * contenteditable — is passed through untouched, so the shell's own row menus
+     * and native menus still work.
+     *
+     * @param event - the document `contextmenu` event.
+     * @param input.open - place the menu: `({x, y, text, element}) => void`.
+     * @returns whether this press was claimed.
+     */
+    function handleCodeContextMenu(event, input) {
+      const hit = codeMenuTarget(event)
+      if (hit === null) return false
+      event.preventDefault()
+      event.stopPropagation()
+      input.open({ x: event.clientX, y: event.clientY, text: hit.text, element: hit.element })
+      return true
+    }
+
+    /**
+     * The one-slot seat the inline-code menu renders from.
+     *
+     * A press that lands on another `code` while the menu is open replaces the
+     * snapshot, and every open mints a new object carrying a new sequence: React
+     * compares snapshots by identity, so re-opening a menu at the very same
+     * coordinates still re-renders and re-places it.
+     *
+     * @returns the store the capture listener writes and the overlay entry reads.
+     */
+    function createCodeMenuStore() {
+      let snapshot = null
+      let seq = 0
+      const listeners = new Set()
+      const emit = () => {
+        for (const listener of [...listeners]) listener()
+      }
+      return {
+        /** @returns the menu on screen, or null. */
+        getSnapshot: () => snapshot,
+        /**
+         * @param listener - called on every change.
+         * @returns a disposer removing only this listener.
+         */
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        /**
+         * Show one menu at one press point.
+         * @param input.x - viewport x of the press.
+         * @param input.y - viewport y of the press.
+         * @param input.text - the code's exact text.
+         * @param input.element - the `<code>` element the press landed in.
+         */
+        open: (input) => {
+          seq += 1
+          snapshot = { seq, x: input.x, y: input.y, text: input.text, element: input.element }
+          emit()
+        },
+        /** Retire the menu on screen; an empty seat is not a change. */
+        close: () => {
+          if (snapshot === null) return
+          snapshot = null
+          emit()
+        },
+      }
+    }
+
+    /**
+     * The zero-size box the menu hangs from: the press point.
+     *
+     * `Menu` places a portaled list from a DOMRect-shaped box, so the cursor is
+     * expressed as the box it would have measured had it been a control. The list
+     * then opens just below and right of the pointer and is clamped inside the
+     * viewport by the shipped placement code.
+     *
+     * @param x - viewport x.
+     * @param y - viewport y.
+     * @returns the rect.
+     */
+    function cursorRect(x, y) {
+      return { x, y, left: x, top: y, right: x, bottom: y, width: 0, height: 0 }
+    }
+
+    /**
+     * Read the inline-code menu preference off the plugin's config form.
+     *
+     * The default is on, and an unreadable form keeps that default: a Host that
+     * does not project the field yet must not silently take the feature away.
+     *
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether a right-click on inline code opens the menu.
+     */
+    function readCodeMenuEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.codeMenu !== false
+    }
+
+    /**
      * Create the one-slot seat the mounted button and the plugin-scope command
      * share.
      *
@@ -543,6 +770,17 @@ window.__ModuleLoader__.load({
      * fork 300, archive 400) and opens the group with a separator.
      */
     const MENU_ORDER = 500
+
+    /**
+     * Cell key of the inline-code menu's own entry in `shell.overlay`.
+     *
+     * `shell.overlay` is a list slot and its `id` is the cell key: a fresh id is
+     * added beside the entries already in the slot, while reusing one puts this
+     * plugin into that entry's cell and replaces what it renders. The copy
+     * notice already owns the `flow` cell, so the menu takes a second one instead
+     * of sharing it — two surfaces, two lifespans.
+     */
+    const CODE_MENU_ID = 'flow.code-menu'
 
     /**
      * Every profile that admits a `Mod+Shift+<letter>` default, and the reason
@@ -674,6 +912,7 @@ window.__ModuleLoader__.load({
 .flow-locate:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,140,.12))}
 .flow-locate:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,currentColor);outline-offset:-2px}
 .flow-locate[data-miss="true"]{color:var(--dsw-alias-state-warning-primary,currentColor)}
+.flow-code-menu-anchor{display:none}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -712,6 +951,10 @@ window.__ModuleLoader__.load({
       'copy.done': '已复制会话 ID',
       'copy.failed': '复制失败，剪贴板不可用',
       'copy.noSession': '当前没有打开的会话',
+      'codeMenu.open': '打开',
+      'codeMenu.copy': '复制',
+      'codeMenu.done': '已复制行内代码',
+      'codeMenu.failed': '复制失败，剪贴板不可用',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
       'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
@@ -719,6 +962,8 @@ window.__ModuleLoader__.load({
       'section.copy.description': '在会话行的右键菜单里加上「复制会话 ID」，并用 `⇧⌘C`（Windows/Linux 为 Ctrl+Shift+C）复制当前会话的 ID。快捷键可在 设置 → 通用 → 快捷键 里改。',
       'section.external.title': '在系统默认程序中打开链接',
       'section.external.description': '点击非本站的 http、https、mailto、tel 链接时，交给操作系统的默认应用打开（macOS 用 open、Windows 用 start、Linux 用 xdg-open），包括本来会开在内置窗口里的 localhost 地址。关闭后恢复壳自身的打开方式。',
+      'section.codeMenu.title': '行内代码右键菜单',
+      'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：打开与左键单击走同一条链路，复制把代码原文写进剪贴板。单击行为不受影响；关闭后右键恢复壳自身的行为。',
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -734,6 +979,10 @@ window.__ModuleLoader__.load({
       'copy.done': 'Session ID copied',
       'copy.failed': 'Copy failed: the clipboard rejected the write',
       'copy.noSession': 'No Session is open',
+      'codeMenu.open': 'Open',
+      'codeMenu.copy': 'Copy',
+      'codeMenu.done': 'Inline code copied',
+      'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
       'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
@@ -741,6 +990,8 @@ window.__ModuleLoader__.load({
       'section.copy.description': 'Add “Copy Session ID” to a Session row’s right-click menu, and bind `⇧⌘C` (Ctrl+Shift+C on Windows/Linux) to copying the open Session’s ID. Rebind it under Settings → General → Shortcuts.',
       'section.external.title': 'Open links in the system default app',
       'section.external.description': 'Off-origin http, https, mailto and tel links open in the operating system’s default application (open on macOS, start on Windows, xdg-open on Linux), including the localhost addresses that would otherwise open in an in-app window. Switching this off restores the shell’s own behaviour.',
+      'section.codeMenu.title': 'Inline code right-click menu',
+      'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Open runs the same path a left click already takes, Copy puts the code’s text on the clipboard. Left-clicking is unaffected; switching this off restores the shell’s own right-click behaviour.',
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -985,6 +1236,89 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Observe the inline-code menu's one slot.
+     *
+     * @param store - `createCodeMenuStore()`.
+     * @returns the menu on screen, or null.
+     */
+    function useCodeMenuSnapshot(store) {
+      const subscribe = useCallback((listener) => store.subscribe(listener), [store])
+      const snapshot = useCallback(() => store.getSnapshot(), [store])
+      return useSyncExternalStore(subscribe, snapshot, snapshot)
+    }
+
+    /**
+     * The inline-code menu itself: 「打开」 and 「复制」, floating at the press.
+     *
+     * It is the shell's own `Menu` rather than a surface built here, so the
+     * keyboard walk (↑↓/Home/End, Enter), Escape, and dismissal on an outside
+     * pointerdown are the shipped ones. `Menu` owns exactly those behaviours;
+     * `MenuSurface` is only the card it paints, with no keys of its own, so using
+     * the surface directly would mean writing the keyboard handling this feature
+     * deliberately does not own.
+     *
+     * The list is portaled under `document.body` and placed from `getAnchorRect`,
+     * because the overlay slot cannot be measured at a pointer: the rect handed
+     * back is the zero-size box at the press point (:func:`cursorRect`).
+     * `autoFocus` puts the keyboard on the first row, which is what makes the
+     * arrow keys work from a right-click that had no focused trigger.
+     *
+     * @param props - the seat, the config form, the clipboard writer, and the localized copy.
+     */
+    function CodeMenu(props) {
+      const { store, config, t } = props
+      // Every Hook runs before the preference is consulted, so the entry keeps
+      // one call order across a toggle.
+      const enabled = useConfigValue(config, readCodeMenuEnabled)
+      const menu = useCodeMenuSnapshot(store)
+      props.useLocaleRevision()
+      const anchorRect = useCallback(
+        () => cursorRect(menu?.x ?? 0, menu?.y ?? 0),
+        [menu?.x, menu?.y],
+      )
+
+      if (!enabled || menu === null) return null
+
+      return h(
+        Menu,
+        {
+          open: true,
+          portal: true,
+          autoFocus: true,
+          anchor: h('span', { className: 'flow-code-menu-anchor' }),
+          getAnchorRect: anchorRect,
+          onClose: () => { store.close() },
+        },
+        h(
+          MenuItemButton,
+          {
+            key: 'open',
+            onSelect: () => {
+              // Closing first keeps the menu's own dismissal out of the way of
+              // the click this is about to dispatch.
+              const { element } = menu
+              store.close()
+              activateInlineCode(element, window)
+            },
+          },
+          t('codeMenu.open'),
+        ),
+        h(
+          MenuItemButton,
+          {
+            key: 'copy',
+            onSelect: () => {
+              const { text } = menu
+              store.close()
+              copyInlineCode({ text, write: props.write, notify: props.notify, t })
+            },
+          },
+          t('codeMenu.copy'),
+        ),
+      )
+    }
+
+    /**
      * One settings row: a title, a description, a switch, and its own save state.
      *
      * The write state belongs to the row, not to the page: a refused write on one
@@ -1033,7 +1367,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The 心流 settings page: the three preferences this plugin owns.
+     * The 心流 settings page: the four preferences this plugin owns.
      *
      * @param props - localized copy and the plugin's config form.
      */
@@ -1066,6 +1400,15 @@ window.__ModuleLoader__.load({
           read: readExternalLinkEnabled,
           title: t('section.external.title'),
           description: t('section.external.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
+          field: 'codeMenu',
+          read: readCodeMenuEnabled,
+          title: t('section.codeMenu.title'),
+          description: t('section.codeMenu.description'),
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
@@ -1126,6 +1469,37 @@ window.__ModuleLoader__.load({
           document.addEventListener('click', onClick, true)
           return () => { document.removeEventListener('click', onClick, true) }
         }, 'flow: external links')
+        // The inline-code menu: one capture-phase listener for the whole page,
+        // and only while the preference is on. An off feature adds no listener
+        // at all rather than a listener that decides to do nothing, and the
+        // form's own subscription is what makes a toggle take effect without
+        // anything being re-registered by hand.
+        const codeMenu = createCodeMenuStore()
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          let detach = null
+          const sync = () => {
+            if (!readCodeMenuEnabled(config)) {
+              // Turning the feature off also retires a menu it left open.
+              codeMenu.close()
+              detach?.()
+              detach = null
+              return
+            }
+            if (detach !== null) return
+            const onContextMenu = (event) => {
+              handleCodeContextMenu(event, { open: (hit) => { codeMenu.open(hit) } })
+            }
+            document.addEventListener('contextmenu', onContextMenu, true)
+            detach = () => { document.removeEventListener('contextmenu', onContextMenu, true) }
+          }
+          sync()
+          const unsubscribe = config.subscribe(sync)
+          return () => {
+            if (typeof unsubscribe === 'function') unsubscribe()
+            detach?.()
+          }
+        }, 'flow: inline code menu')
         // One notice seat for both copy entry points: the row menu and the
         // command copy the same text and report through the same place.
         const notice = createNoticeStore()
@@ -1183,6 +1557,16 @@ window.__ModuleLoader__.load({
           inject: () => ({ hooks: { notice }, dismiss: () => { notice.clear() } }),
         }, CopyNotice)), 'flow: copy notice')
 
+        // The inline-code menu is a second cell in the same list slot: the
+        // shipped contract adds a fresh id beside the existing entries, and the
+        // `flow` cell already carries the copy notice.
+        ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: CODE_MENU_ID,
+          locale: ENTRY_ID,
+          inject: () => ({ store: codeMenu, config, write: writeClipboard, notify, useLocaleRevision }),
+        }, CodeMenu)), 'flow: inline code menu overlay')
+
         // The page follows the Host's own namespace: a deployment that never
         // served `flow` shows no trace of the section.
         ctx.effect(() => forms.whileServed([ENTRY_ID], () => ctx.slots.inject(
@@ -1225,6 +1609,15 @@ window.__ModuleLoader__.load({
         copyCommand,
         copySessionId,
         createNoticeStore,
+        CODE_MENU_ID,
+        codeMenuTarget,
+        clickTargetOf,
+        activateInlineCode,
+        copyInlineCode,
+        handleCodeContextMenu,
+        createCodeMenuStore,
+        cursorRect,
+        readCodeMenuEnabled,
       },
     }
   },
