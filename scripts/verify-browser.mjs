@@ -359,6 +359,78 @@ async function ensureCopyOn(cdp, sessionId) {
   await pressEscape(cdp, sessionId)
 }
 
+/**
+ * Answer the plugin open routes inside the page, and record every call.
+ *
+ * Letting one through would launch this machine's default browser mid-run, so
+ * both routes are answered locally. Recording the route as well as the body is
+ * what makes "which plugin took this click" an assertion instead of a guess: a
+ * second plugin that opens external links may still be installed beside this
+ * one, and its calls must not be mistaken for this plugin's.
+ */
+async function stubOpenRoutes(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    window.__openCalls = [];
+    if (window.__openRoutesStubbed === true) return true;
+    const real = window.fetch.bind(window);
+    const answer = (route, init) => {
+      window.__openCalls.push({ route, body: init?.body ?? null });
+      return Promise.resolve(new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }));
+    };
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : (input?.url ?? '');
+      if (url.endsWith('/flow/open-external') || url.endsWith('/external-link/open')) return answer(url, init);
+      return real(input, init);
+    };
+    window.__openRoutesStubbed = true;
+    return true;
+  })()`)
+}
+
+/**
+ * Put the two probe anchors on the page, above everything else.
+ *
+ * One is off-origin (the case the feature owns), one is same-origin (the case it
+ * must never take). A bubble-phase guard prevents any navigation nothing else
+ * prevented, so a leg where both plugins decline the click still cannot move the
+ * page off the application.
+ */
+async function installProbeAnchors(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    for (const stale of document.querySelectorAll('[data-flow-probe]')) stale.remove();
+    const make = (key, href, bottom) => {
+      const anchor = document.createElement('a');
+      anchor.href = href;
+      anchor.dataset.flowProbe = key;
+      anchor.textContent = 'flow probe ' + key;
+      anchor.style.cssText = 'position:fixed;left:8px;bottom:' + bottom + 'px;z-index:2147483647;'
+        + 'background:#fff;color:#000;padding:2px 6px;font:12px monospace';
+      document.body.appendChild(anchor);
+    };
+    make('off-origin', 'http://127.0.0.1:9/flow-probe', 8);
+    make('same-origin', location.origin + '/flow-probe-same-origin', 40);
+    if (window.__flowProbeGuard !== true) {
+      document.addEventListener('click', (event) => {
+        const anchor = event.target?.closest?.('[data-flow-probe]');
+        if (anchor !== null && anchor !== undefined) event.preventDefault();
+      }, false);
+      window.__flowProbeGuard = true;
+    }
+    return true;
+  })()`)
+}
+
+/** Take the probe anchors back off the page. */
+async function removeProbeAnchors(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    for (const stale of document.querySelectorAll('[data-flow-probe]')) stale.remove();
+    return true;
+  })()`)
+}
+
+/** Every call the two open routes have taken so far. */
+const OPEN_PROBE = `(() => ({ calls: (window.__openCalls ?? []).map((call) => ({ route: call.route, body: call.body })) }))()`
+
 /** What the copy surfaces look like right now. */
 const COPY_PROBE = `(() => {
   const items = [...document.querySelectorAll('[role="menuitem"]')];
@@ -657,6 +729,40 @@ async function main() {
     await waitFor(cdp, sessionId, 'document.querySelector(\'[data-flow-host="locate"]\') !== null', 'the locate container')
     pass('signed browser session accepted at ' + config.url)
 
+    // ---- the open route, over HTTP --------------------------------------
+    // None of these probes reaches the platform opener: a GET is not the
+    // method, an unauthenticated call is fenced, and a file:// URL is refused
+    // before the opener is consulted. A valid URL is deliberately never posted
+    // here — that would launch this machine's default browser.
+    //
+    // "Is the route even mounted" is asked with an authenticated GET. An
+    // unmounted path is answered by the SPA fallback — 404 for a GET and a bare
+    // 405 for anything else — so the mounted route's own 405 with
+    // `allow: POST` is the only positive signal; a POST probe cannot tell the
+    // two apart, because both answer 405 when unauthenticated.
+    const probeRoute = async (init) => {
+      const response = await fetch(config.url + '/flow/open-external', init)
+      return { status: response.status, allow: response.headers.get('allow') }
+    }
+    const mounted = await probeRoute({ method: 'GET', headers: { cookie: cookie.name + '=' + cookie.value } })
+    if (mounted.status === 404) {
+      skip('the open route is not mounted here: the Host half this instance activated predates it')
+    } else if (mounted.status === 405 && mounted.allow === 'POST') {
+      pass('the open route answers POST only (405, allow: POST)')
+      const unauthenticated = await probeRoute({ method: 'POST', body: JSON.stringify({ url: 'https://example.com' }) })
+      if (unauthenticated.status === 401) pass('the open route refuses an unauthenticated call (401)')
+      else fail('the open route answered an unauthenticated POST with ' + unauthenticated.status)
+      const badScheme = await probeRoute({
+        method: 'POST',
+        headers: { cookie: cookie.name + '=' + cookie.value, 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'file:///etc/passwd' }),
+      })
+      if (badScheme.status === 400) pass('the open route refuses a scheme the opener must not receive (400)')
+      else fail('the open route answered a file:// URL with ' + badScheme.status)
+    } else {
+      fail('unexpected answer from the open route: ' + JSON.stringify(mounted))
+    }
+
     // The list, and the main column's own reference to one of its rows, arrive
     // after the region mounts: locating needs both.
     await waitFor(
@@ -921,8 +1027,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID'])) {
-      pass('the 心流 page renders both preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接'])) {
+      pass('the 心流 page renders all three preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -989,6 +1095,89 @@ async function main() {
     }
     // Leave the dialog closed; the toggle is already back where it started.
     await pressEscape(cdp, sessionId)
+
+    // ---- F. the 心流 switch owns the link hand-off ----------------------
+    await stubOpenRoutes(cdp, sessionId)
+    await openFlowTab(cdp, sessionId)
+    copy = await evaluate(cdp, sessionId, COPY_PROBE)
+    const linkStarted = copy.switches[2] ?? null
+    if (linkStarted === 'true') pass('the link preference starts on by default')
+    else fail('the link preference did not start on: ' + JSON.stringify(linkStarted))
+
+    // The link preference is persisted exactly like the copy one, so the same
+    // two rules apply: this run normalizes the start state itself, and the write
+    // is read back on a bounded wait rather than a guessed sleep.
+    const linkRow = '[role="dialog"] .flow-row:nth-child(3) [role="switch"]'
+    const linkChecked = () => evaluate(cdp, sessionId, `(() => {
+      const node = document.querySelector(${JSON.stringify(linkRow)});
+      return node === null ? null : node.getAttribute('aria-checked');
+    })()`)
+    const setLink = async (want) => {
+      if (await linkChecked() === want) return true
+      await waitFor(
+        cdp,
+        sessionId,
+        `(() => { const node = document.querySelector(${JSON.stringify(linkRow)}); return node !== null && node.disabled === false })()`,
+        'the link switch to become pressable',
+      ).catch(() => { /* the read-back below reports it */ })
+      await click(cdp, sessionId, linkRow)
+      await waitFor(
+        cdp,
+        sessionId,
+        `(() => { const node = document.querySelector(${JSON.stringify(linkRow)}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`,
+        'the link preference to settle at ' + want,
+        8000,
+      ).catch(() => { /* the read-back below reports it */ })
+      return await linkChecked() === want
+    }
+    const ourCalls = (opened) => opened.calls.filter((call) => call.route.endsWith('/flow/open-external'))
+
+    const onDuty = await setLink('true')
+    if (!onDuty) skip('the link switch legs need this checkout as the installed Host half; install it and restart the instance to run them here')
+    await pressEscape(cdp, sessionId)
+    await installProbeAnchors(cdp, sessionId)
+
+    await evaluate(cdp, sessionId, 'window.__openCalls = []')
+    await click(cdp, sessionId, '[data-flow-probe="off-origin"]')
+    await sleep(400)
+    let opened = await evaluate(cdp, sessionId, OPEN_PROBE)
+    if (onDuty && ourCalls(opened).length === 1 && String(ourCalls(opened)[0].body).includes('http://127.0.0.1:9/flow-probe')) {
+      pass('an off-origin link is handed to the Host open route: ' + ourCalls(opened)[0].route)
+    } else if (onDuty) {
+      fail('the off-origin link did not reach the open route: ' + JSON.stringify(opened.calls))
+    }
+
+    // The application's own navigation is the one gesture this feature must
+    // never take: a capture listener that answers it would break every in-app
+    // link.
+    await evaluate(cdp, sessionId, 'window.__openCalls = []')
+    await click(cdp, sessionId, '[data-flow-probe="same-origin"]')
+    await sleep(400)
+    opened = await evaluate(cdp, sessionId, OPEN_PROBE)
+    if (ourCalls(opened).length === 0) pass('a same-origin link is left to the application')
+    else fail('a same-origin link was handed to the open route: ' + JSON.stringify(ourCalls(opened)))
+
+    await openFlowTab(cdp, sessionId)
+    const offDuty = await setLink('false')
+    await pressEscape(cdp, sessionId)
+    await evaluate(cdp, sessionId, 'window.__openCalls = []')
+    await click(cdp, sessionId, '[data-flow-probe="off-origin"]')
+    await sleep(400)
+    opened = await evaluate(cdp, sessionId, OPEN_PROBE)
+    if (offDuty && ourCalls(opened).length === 0) {
+      pass('switched off, an off-origin link keeps the shell’s own behaviour')
+    } else if (offDuty) {
+      fail('the open route was still called while switched off: ' + JSON.stringify(ourCalls(opened)))
+    } else {
+      skip('switching the link preference off could not be saved by the installed Host half')
+    }
+
+    await openFlowTab(cdp, sessionId)
+    const restoredLink = await setLink(linkStarted)
+    if (restoredLink) pass('the link preference is back where the run found it: ' + JSON.stringify(linkStarted))
+    else fail('the link preference was not restored: ' + JSON.stringify(await evaluate(cdp, sessionId, COPY_PROBE)))
+    await pressEscape(cdp, sessionId)
+    await removeProbeAnchors(cdp, sessionId)
   } finally {
     socket?.close()
     await shutdown(chrome, profile)

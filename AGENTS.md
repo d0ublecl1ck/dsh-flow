@@ -1,12 +1,12 @@
 # dsh-flow
 
-DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`），以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
+DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
 
 ## 结构与约定
 
 - **零构建**：`client.js` 就是浏览器产物本体，直接由 `window.__ModuleLoader__.load` 装载；没有 TS、没有 esbuild、没有 `lib/`。改 `client.js` 刷新页面即生效。
 - **一个客户端入口**：模块 id 必须等于包名 `dsh-flow`。不要再挂第二个 `dsh.client` 入口。
-- **宿主半边只有两件事**：声明 `Config` 与注册 `configure({ auto: false }, ctx.fiber)`。不要往 `index.js` 塞业务逻辑。
+- **宿主半边只有三件事**：声明 `Config`、注册 `configure({ auto: false }, ctx.fiber)`、把 `POST /flow/open-external` 挂到 `webServer` 上。除此之外不要往 `index.js` 塞业务逻辑：判断「这次点击算不算外链」是浏览器半边的事。
 - **命名空间 = bundle row id = locale 命名空间 = `flow`**，三处同名；改 row id 会让 Host 不再服务命名空间、设置页静默消失。包名与 row id 是两件事：改包名不必改 row id。
 - **纯逻辑必须可从测试触达**：通过 factory 返回的 `internals` 暴露（`tests/client.test.mjs` 用假 `window.__ModuleLoader__` 装载），不要在 `apply` 里做无法单测的判断。
 - **README 只写使用者口径**，架构理由、官方契约、缓存规则、上架流程都留在本文件。
@@ -30,6 +30,15 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 - 复制命令 id `flow.copySessionId`，默认键 `primary+shift+KeyC`，**只声明四个 profile**（`desktop:macos`、`desktop:windows`、`web:macos`、`web:windows`）。两个 Linux profile 都不能声明：注册表的 `bindingIssue()` 把「主修饰键 + `KeyC`」判成 `reserved`（浏览器自己的复制），任何非 macOS/Windows 的 shell 都会命中，声明即抛错、整个半边挂掉 —— 这是本仓库踩过的一次真实事故，`tests/client.test.mjs` 里现在有断言钉住它。macOS/Windows 两个 runtime 之所以没事，是因为它们先走 `isWebBindingAllowed()` 的 `Mod+Shift` 分支直接 return null，压根走不到保留列表。
 - 复制的两个入口各自独立：菜单项自己持有 `copySessionId()`，快捷键命令在 `resolve()` 里用 `currentSessionId()` 取当前会话；两者写同一个 notice seat，因此在哪边复制都有一致的提示。
 
+## 外链为什么走宿主路由
+
+DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自家页面，锚点点击会落进一个内置窗口，`window.open` 也到不了系统浏览器。所以浏览器半边在**捕获阶段**拦下点击，POST 给宿主，由宿主 spawn 平台打开器（macOS `open`、Windows `cmd /c start ""`、Linux `xdg-open`）——这是唯一同时覆盖 localhost 的路径。
+
+- 浏览器半边：`document` 上的一个捕获监听（`capture: true`），每次都现读偏好，因此开关不需要重新绑定监听。它只认「锚点内 + `http`/`https`/`mailto`/`tel` + 非同源」这一个组合；同源链接、其它协议、非锚点点击一律放行。
+- 宿主半边：`ctx.inject(['webServer', 'connection'])` 的子 fiber 上注册 `{ kind: 'exact', path: '/flow/open-external' }`。先过 `connection.requestRejection`（未认证 401），再要求 `POST`（405）、限制 16KB 请求体（413）、只放行四种协议且长度 ≤ 8192（400），最后才 spawn。**只把 `new URL()` 解析后的 `href` 交给打开器**，原始字符串永不出现在命令行参数里。
+- **宿主答非 2xx 时浏览器半边回退到 `window.open`**：`fetch` 对 404/500 是 resolve 不是 reject，只看 reject 会把点击吞掉——客户端先更新、宿主还是旧版的那段窗口里，链接会变成「点了没反应」。这条回退是给那个窗口兜底的，别删。
+- **和 `dsh-external-link` 不能同时装**：那个插件在同一个节点上也挂了捕获监听，`stopPropagation()` 拦不住同节点的另一个监听，两边都会 POST、链接会被打开两次。合并进本插件之后应当把 `dsh-external-link` 从 profile 的 bundles 里去掉。
+
 ## 依赖的官方契约（脆弱点集中在这里）
 
 - 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（复制提示的 `Toast` 宿主）。
@@ -37,7 +46,7 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
-- 服务：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts`。
+- 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts`；宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
 - 模块：`@deepseek-ai/dsh-client-ui-primitives` 是动态客户端包的隐式 baseline external，本轮用到 `MenuItemButton` / `Toast` / `writeClipboard`（同一个 `require`）。`writeClipboard` 只出现在导出清单里，官方 README 没写它 —— 它不存在时症状是复制永远报失败，所以改动后要跑真浏览器验收，不能只看单测。
 - 复制行直接用官方包里的 `IconCopyOutlineRegular`，**没有**内联进本仓库，因此 `THIRD-PARTY-NOTICES.md` 不需要新增条目；`LocateIcon` 的内联约定不受影响。
 - CSS-module 的 local name（`sectionHeader` 等）比构建哈希稳定，这是唯一被依赖的脆弱点。官方改这些名字中的任何一个，症状都是**静默失效**（按钮不出现、定位不动作、设置行消失），所以每次动完必须跑 `npm run verify:browser`，而不是只看单测。
@@ -45,7 +54,7 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton: z.boolean().default(true).volatile() })`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink })`，三个字段都是 `z.boolean().default(true).volatile()`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -58,7 +67,7 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 ## 验证
 
 ```sh
-npm test                 # 31 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 52 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
@@ -72,6 +81,7 @@ npm run assets           # 重新生成 assets/ 里的示意图（需要本机 C
 - 右键手势要拆成两半：CDP 的真实右键按下 + 在行坐标上补发 `contextmenu`。无头 Chrome 不会把右键按下变成 `contextmenu`，而 `contextmenu` 是官方行处理器唯一的入口，不补发就永远测不到那个菜单。
 - 每一次按压都先过 `aim()`：滚动到位、`elementFromPoint` 命中目标之后才按下。弹窗入场动画会把一帧前量到的中心点挪走，落空的按压看起来和「点了没反应」一模一样。
 - **验收脚本必须自己把起点状态归一到已知**（`ensureCopyOn()`）：偏好是持久化的，一次中断的跑会把它留在关闭态，下一次跑的「右键菜单里应该有那一行」就会因为**上一次的残留**而红 —— 症状是同一个脚本时红时绿、换一条断言红。同理，偏好写入是有界的 Host 往返，用轮询（`settled()`）而不是猜睡眠；关掉功能后按 `⇧⌘C` 事件不再被应用消费、会落到浏览器打开元素选择模式，后面那次按压会被它吞掉，所以要补一次 Esc。
+- 外链那几段在页面里替换掉 `window.fetch`，把 `/flow/open-external` 与 `/external-link/open` 都就地应答并记账：真放过去会在这台机器上弹出用户的默认浏览器。探针锚点自己造（一个非同源、一个同源），并挂一个冒泡阶段的兜底 `preventDefault`——两个插件都拒绝这次点击时，页面也不会被导航走。宿主路由另走 HTTP 探针（GET 405 + `allow: POST`、未认证 401、`file://` 400），**故意不发一个合法 URL**：那会真的打开浏览器；路由没挂载时那一段记 `SKIP`，不记 `FAIL`。
 
 若怀疑运行中的实例没加载本插件，先看清单而不是猜：
 

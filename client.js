@@ -1,7 +1,7 @@
 /**
  * dsh-flow — browser half.
  *
- * Two surfaces, one entry:
+ * Three surfaces, one entry:
  *
  *  - the 「定位当前会话」 button, sitting in the workspace browser's section
  *    header immediately to the right of the search control — the seat JetBrains
@@ -18,11 +18,18 @@
  *    the "..." menu. The same copy is `flow.copySessionId` (`⇧⌘C`), which copies
  *    the Session the conversation column holds. Both report through one notice
  *    seat (`shell.overlay` + the shipped `Toast`), so a copy is never silent.
- *  - `settings.section` — the 心流 page, holding the two preferences that turn
- *    the button and the copy off. They live in this plugin's Host Config
- *    namespace (`flow.locateButton` / `flow.copySessionId`), reached through
- *    `ctx.configForms`, so they are a durable part of the settings document
- *    rather than page-local state.
+ *  - off-origin links — a document-level capture listener takes an
+ *    `http`/`https`/`mailto`/`tel` click away from the shell while the
+ *    preference is on, and posts the URL to the Host's `/flow/open-external`
+ *    route so the OS default application opens it. That is the only path which
+ *    also covers `http://localhost`, the address the Electron shell otherwise
+ *    keeps in an in-app window; everything else — same-origin links, other
+ *    schemes, a host that cannot answer — stays with the shell.
+ *  - `settings.section` — the 心流 page, holding the three preferences that turn
+ *    the button, the copy and the link hand-off off. They live in this plugin's
+ *    Host Config namespace (`flow.locateButton` / `flow.copySessionId` /
+ *    `flow.externalLink`), reached through `ctx.configForms`, so they are a
+ *    durable part of the settings document rather than page-local state.
  *
  * The header is not a slot: the shell's browsing region is a single-occupant
  * slot (`sidebar.workspaces`) whose header declares no hole beside the search
@@ -72,6 +79,12 @@ window.__ModuleLoader__.load({
     /** Retry pacing while the shell re-renders an expansion: 40ms, then +40ms each pass. */
     const RETRY_BASE_MS = 40
     const RETRY_ATTEMPTS = 8
+
+    /** Exact Host route that hands one URL to the platform opener. */
+    const OPEN_ROUTE = '/flow/open-external'
+
+    /** The schemes the OS opener is allowed to receive. */
+    const OPENABLE = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
     // #region pure DOM/model logic
 
@@ -312,6 +325,102 @@ window.__ModuleLoader__.load({
       }
       if (value === null || typeof value !== 'object') return true
       return value.copySessionId !== false
+    }
+
+    /**
+     * Read the external-link preference off the plugin's config form.
+     *
+     * The default is on: the feature is the reason this plugin owns the route at
+     * all, and a click the host cannot answer falls back to the shell rather than
+     * being swallowed, so an unreadable form cannot break links.
+     *
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether off-origin links leave through the platform opener.
+     */
+    function readExternalLinkEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.externalLink !== false
+    }
+
+    /**
+     * The off-origin, openable URL behind a click, or null.
+     *
+     * Everything else — a click that is not inside a link, a scheme the opener
+     * must not receive, and the application's own navigation — is not this
+     * plugin's to take.
+     *
+     * @param event - the document click event.
+     * @param base - `location.href`, what a relative `href` resolves against.
+     * @param origin - `location.origin`, what counts as this application.
+     * @returns the absolute href to open, or null when this click is not one.
+     */
+    function linkOf(event, base, origin) {
+      const target = event?.target
+      const anchor = target !== null && target !== undefined && typeof target.closest === 'function'
+        ? target.closest('a[href]')
+        : null
+      if (anchor === null || anchor === undefined) return null
+      let url
+      try {
+        url = new URL(anchor.href, base)
+      } catch {
+        return null
+      }
+      if (!OPENABLE.has(url.protocol)) return null
+      if (url.origin === origin) return null
+      return url.href
+    }
+
+    /**
+     * Ask the host to hand one URL to the platform opener.
+     *
+     * @param url - the URL to open.
+     * @param impl - the fetch to use, so the caller's page owns the transport.
+     * @returns the host's answer; a non-2xx status is a refusal, not a success.
+     */
+    function openExternal(url, impl) {
+      return Promise.resolve().then(() => impl(OPEN_ROUTE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url }),
+      }))
+    }
+
+    /**
+     * Capture-phase anchor handler.
+     *
+     * Off-origin links leave through the host; everything else — a click that is
+     * not a link, a scheme the opener must not receive, the application's own
+     * navigation, or a preference that is off — keeps the shell's behaviour
+     * untouched. A host that refuses or cannot be reached falls back to the
+     * page's own `window.open`, because a swallowed click is the one outcome a
+     * link must not have.
+     *
+     * @param event - the document click event.
+     * @param input.enabled - whether the preference still wants the feature.
+     * @param input.base - `location.href`.
+     * @param input.origin - `location.origin`.
+     * @param input.fetch - the transport for the host route.
+     * @param input.fallback - open the URL the page's own way.
+     * @returns whether this click was taken.
+     */
+    function handleAnchorClick(event, input) {
+      if (!input.enabled()) return false
+      const url = linkOf(event, input.base, input.origin)
+      if (url === null) return false
+      event.preventDefault()
+      event.stopPropagation()
+      void openExternal(url, input.fetch).then(
+        (response) => { if (response?.ok === false) input.fallback(url) },
+        () => { input.fallback(url) },
+      )
+      return true
     }
 
     /**
@@ -608,6 +717,8 @@ window.__ModuleLoader__.load({
       'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
       'section.copy.title': '复制会话 ID',
       'section.copy.description': '在会话行的右键菜单里加上「复制会话 ID」，并用 `⇧⌘C`（Windows/Linux 为 Ctrl+Shift+C）复制当前会话的 ID。快捷键可在 设置 → 通用 → 快捷键 里改。',
+      'section.external.title': '在系统默认程序中打开链接',
+      'section.external.description': '点击非本站的 http、https、mailto、tel 链接时，交给操作系统的默认应用打开（macOS 用 open、Windows 用 start、Linux 用 xdg-open），包括本来会开在内置窗口里的 localhost 地址。关闭后恢复壳自身的打开方式。',
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -628,6 +739,8 @@ window.__ModuleLoader__.load({
       'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
       'section.copy.title': 'Copy Session ID',
       'section.copy.description': 'Add “Copy Session ID” to a Session row’s right-click menu, and bind `⇧⌘C` (Ctrl+Shift+C on Windows/Linux) to copying the open Session’s ID. Rebind it under Settings → General → Shortcuts.',
+      'section.external.title': 'Open links in the system default app',
+      'section.external.description': 'Off-origin http, https, mailto and tel links open in the operating system’s default application (open on macOS, start on Windows, xdg-open on Linux), including the localhost addresses that would otherwise open in an in-app window. Switching this off restores the shell’s own behaviour.',
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -920,7 +1033,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The 心流 settings page: the two preferences this plugin owns.
+     * The 心流 settings page: the three preferences this plugin owns.
      *
      * @param props - localized copy and the plugin's config form.
      */
@@ -944,6 +1057,15 @@ window.__ModuleLoader__.load({
           read: readCopyEnabled,
           title: t('section.copy.title'),
           description: t('section.copy.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
+          field: 'externalLink',
+          read: readExternalLinkEnabled,
+          title: t('section.external.title'),
+          description: t('section.external.description'),
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
@@ -986,6 +1108,24 @@ window.__ModuleLoader__.load({
         // page reads and writes it.
         const forms = ctx.configForms
         const config = forms.get(ENTRY_ID)
+        // One capture-phase listener for the whole page: it has to run before the
+        // shell's own handlers to take a link away from them, and it reads the
+        // preference per click rather than per registration, so the settings
+        // switch takes effect without re-binding anything.
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          const onClick = (event) => {
+            handleAnchorClick(event, {
+              enabled: () => readExternalLinkEnabled(config),
+              base: location.href,
+              origin: location.origin,
+              fetch: (route, init) => fetch(route, init),
+              fallback: (url) => { window.open(url, '_blank', 'noopener,noreferrer') },
+            })
+          }
+          document.addEventListener('click', onClick, true)
+          return () => { document.removeEventListener('click', onClick, true) }
+        }, 'flow: external links')
         // One notice seat for both copy entry points: the row menu and the
         // command copy the same text and report through the same place.
         const notice = createNoticeStore()
@@ -1061,6 +1201,7 @@ window.__ModuleLoader__.load({
         FOOTER_ORDER,
         SECTION_ORDER,
         MENU_ORDER,
+        OPEN_ROUTE,
         LOCATE_COMMAND,
         LOCATE_DEFAULTS,
         COPY_COMMAND,
@@ -1077,6 +1218,10 @@ window.__ModuleLoader__.load({
         attachLocateHost,
         readLocateEnabled,
         readCopyEnabled,
+        readExternalLinkEnabled,
+        linkOf,
+        openExternal,
+        handleAnchorClick,
         copyCommand,
         copySessionId,
         createNoticeStore,

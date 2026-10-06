@@ -509,6 +509,8 @@ test('both dictionaries stay complete, copy included', async () => {
     'copy.noSession',
     'section.copy.title',
     'section.copy.description',
+    'section.external.title',
+    'section.external.description',
   ]) {
     assert.equal(typeof flow.zh[key], 'string', key)
     assert.notEqual(flow.zh[key].length, 0, key)
@@ -519,8 +521,157 @@ test('both dictionaries stay complete, copy included', async () => {
   assert.equal(flow.zh['copy.failed'], '复制失败，剪贴板不可用')
 })
 
+test('readExternalLinkEnabled defaults to on and only an explicit false turns it off', async () => {
+  const { readExternalLinkEnabled } = (await load()).internals
+  assert.equal(readExternalLinkEnabled({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readExternalLinkEnabled({ getSnapshot: () => ({ value: { externalLink: false } }) }), false)
+  assert.equal(readExternalLinkEnabled({ getSnapshot: () => ({ value: { externalLink: true } }) }), true)
+  assert.equal(readExternalLinkEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+/** An event whose target sits inside one anchor. */
+function clickOn(href) {
+  const event = {
+    target: { closest: (selector) => (selector === 'a[href]' ? { href } : null) },
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { event.prevented += 1 },
+    stopPropagation() { event.stopped += 1 },
+  }
+  return event
+}
+
+const BASE = 'http://127.0.0.1:43129/'
+const ORIGIN = 'http://127.0.0.1:43129'
+
+test('linkOf claims an off-origin anchor on an opener scheme, and nothing else', async () => {
+  const { linkOf } = (await load()).internals
+  assert.equal(linkOf(clickOn('http://127.0.0.1:5173/app'), BASE, ORIGIN), 'http://127.0.0.1:5173/app')
+  assert.equal(linkOf(clickOn('https://example.com/a?b=1'), BASE, ORIGIN), 'https://example.com/a?b=1')
+  // mailto and tel have no origin at all, so they are off-origin by definition.
+  assert.equal(linkOf(clickOn('mailto:someone@example.com'), BASE, ORIGIN), 'mailto:someone@example.com')
+  assert.equal(linkOf(clickOn('tel:+8613800138000'), BASE, ORIGIN), 'tel:+8613800138000')
+
+  // The application's own navigation must never be captured.
+  assert.equal(linkOf(clickOn('/sessions/1'), BASE, ORIGIN), null)
+  assert.equal(linkOf(clickOn('http://127.0.0.1:43129/sessions/1'), BASE, ORIGIN), null)
+  // Schemes the platform opener must not be handed.
+  assert.equal(linkOf(clickOn('file:///etc/passwd'), BASE, ORIGIN), null)
+  assert.equal(linkOf(clickOn('javascript:alert(1)'), BASE, ORIGIN), null)
+  assert.equal(linkOf(clickOn('data:text/html,x'), BASE, ORIGIN), null)
+  // A value the URL parser refuses is not a link either.
+  assert.equal(linkOf(clickOn('http://['), BASE, ORIGIN), null)
+
+  // Clicks that are not inside an anchor never reach the capture path.
+  assert.equal(linkOf({ target: { closest: () => null } }, BASE, ORIGIN), null)
+  assert.equal(linkOf({ target: null }, BASE, ORIGIN), null)
+  assert.equal(linkOf({}, BASE, ORIGIN), null)
+})
+
+/** The fetch stub the click tests record through. */
+function recordingFetch(calls, answer = () => Promise.resolve({ ok: true })) {
+  return (route, init) => { calls.push({ route, init }); return answer() }
+}
+
+test('handleAnchorClick takes an off-origin click and hands it to the host', async () => {
+  const { handleAnchorClick, OPEN_ROUTE } = (await load()).internals
+  const event = clickOn('https://example.com/x')
+  const calls = []
+  const handled = handleAnchorClick(event, {
+    enabled: () => true,
+    base: BASE,
+    origin: ORIGIN,
+    fetch: recordingFetch(calls),
+    fallback: () => { throw new Error('a served click needs no fallback') },
+  })
+  assert.equal(handled, true)
+  assert.equal(event.prevented, 1)
+  assert.equal(event.stopped, 1)
+  // The post rides a promise turn, so that a transport that throws is still a
+  // refusal to report rather than an exception out of a click listener.
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].route, OPEN_ROUTE)
+  assert.equal(calls[0].init.method, 'POST')
+  assert.equal(calls[0].init.headers['content-type'], 'application/json')
+  assert.deepEqual(JSON.parse(calls[0].init.body), { url: 'https://example.com/x' })
+})
+
+test('handleAnchorClick leaves the click to the application while the preference is off', async () => {
+  const { handleAnchorClick } = (await load()).internals
+  const event = clickOn('https://example.com/x')
+  const calls = []
+  const handled = handleAnchorClick(event, {
+    enabled: () => false,
+    base: BASE,
+    origin: ORIGIN,
+    fetch: recordingFetch(calls),
+    fallback: () => { throw new Error('a feature that is off must not open anything') },
+  })
+  assert.equal(handled, false)
+  // Handing the gesture back is the point: the shell's own behaviour is intact.
+  assert.equal(event.prevented, 0)
+  assert.equal(event.stopped, 0)
+  assert.deepEqual(calls, [])
+})
+
+test('handleAnchorClick leaves a link it does not own alone', async () => {
+  const { handleAnchorClick } = (await load()).internals
+  const calls = []
+  const event = clickOn('/sessions/1')
+  assert.equal(handleAnchorClick(event, {
+    enabled: () => true,
+    base: BASE,
+    origin: ORIGIN,
+    fetch: recordingFetch(calls),
+    fallback: () => {},
+  }), false)
+  assert.equal(event.prevented, 0)
+  assert.deepEqual(calls, [])
+})
+
+test('handleAnchorClick falls back to the page when the host cannot be reached', async () => {
+  const { handleAnchorClick } = (await load()).internals
+  const fellBack = []
+  const event = clickOn('https://example.com/x')
+  assert.equal(handleAnchorClick(event, {
+    enabled: () => true,
+    base: BASE,
+    origin: ORIGIN,
+    fetch: () => Promise.reject(new Error('host unreachable')),
+    fallback: (url) => fellBack.push(url),
+  }), true)
+  // The fallback rides the rejection, so it is a later turn by construction.
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(fellBack, ['https://example.com/x'])
+})
+
+test('apply listens for anchor clicks in the capture phase, and stops on dispose', async () => {
+  const module = await load()
+  const listeners = []
+  const removed = []
+  globalThis.document = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, remove() {} }),
+    head: { appendChild() {} },
+    addEventListener: (type, listener, capture) => listeners.push({ type, listener, capture }),
+    removeEventListener: (type, listener) => removed.push({ type, listener }),
+  }
+  try {
+    const disposers = []
+    module.apply(fakeContext([], [], { disposers }))
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true]])
+    assert.deepEqual(removed, [])
+    // The listener is registered by an effect, so the fiber owns its lifetime.
+    for (const dispose of disposers) dispose()
+    assert.deepEqual(removed, [{ type: 'click', listener: listeners[0].listener }])
+  } finally {
+    delete globalThis.document
+  }
+})
+
 /** A client-root stub with exactly the services the module injects. */
-function fakeContext(registrations, effects, { served = true, commands = [], recorded = null } = {}) {
+function fakeContext(registrations, effects, { served = true, commands = [], recorded = null, disposers = null } = {}) {
   const form = {
     getSnapshot: () => ({ value: {}, writable: true }),
     subscribe: () => () => {},
@@ -548,7 +699,9 @@ function fakeContext(registrations, effects, { served = true, commands = [], rec
     effect: (callback) => {
       effects.push(callback)
       const dispose = callback()
-      return typeof dispose === 'function' ? dispose : () => {}
+      const settled = typeof dispose === 'function' ? dispose : () => {}
+      disposers?.push(settled)
+      return settled
     },
     inject: (names, callback) => {
       const child = { ...ctx, slots }

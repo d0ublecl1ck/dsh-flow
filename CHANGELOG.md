@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- 合并 `dsh-external-link` 的能力：非同源的 `http`/`https`/`mailto`/`tel` 链接改由宿主交给系统默认程序打开（macOS `open`、Windows `start`、Linux `xdg-open`），`http://localhost` 不再落进 Electron 壳的内置窗口。
+- 宿主新增 `POST /flow/open-external`：先过 DSH 的连接信任栅栏（未认证 401），只接受 POST（405），请求体上限 16KB（413），协议白名单 + URL 长度上限 8192（400），只把 `new URL()` 解析后的 `href` 交给打开器。
+- 「心流」页新增第三个开关控制外链接管（宿主 Config 的 `flow.externalLink`，默认开）。宿主答非 2xx 时点击回退到页面自己的 `window.open`，不会变成「点了没反应」。
+- `scripts/verify-browser.mjs` 新增外链两段：页面内替换 `fetch` 就地应答两个开链路由（避免真的弹出用户的浏览器），用自造的同源/非同源探针锚点断言开关的开与关；宿主路由另走四条 HTTP 探针。
+- 测试从 31 条增至 52 条。
+
 ## 0.3.0
 
 - 新增「复制会话 ID」：会话行的右键菜单（与行尾 `...` 是同一份菜单）多一条，复制该行的会话 ID。
