@@ -714,6 +714,8 @@ test('both dictionaries stay complete, copy included', async () => {
     'codeMenu.failed',
     'section.codeMenu.title',
     'section.codeMenu.description',
+    'section.sendKey.title',
+    'section.sendKey.description',
   ]) {
     assert.equal(typeof flow.zh[key], 'string', key)
     assert.notEqual(flow.zh[key].length, 0, key)
@@ -1096,4 +1098,178 @@ test("a press this plugin does not own costs nothing", async () => {
   assert.equal(press.prevented, 0)
   assert.equal(press.stopped, 0)
   assert.deepEqual(spy.opened, [])
+})
+/** One keydown stub carrying the two cancels the seat is required to make. */
+function press(key, { altKey = false, metaKey = false, ctrlKey = false, shiftKey = false, isComposing = false, keyCode = 0 } = {}) {
+  return {
+    key,
+    altKey,
+    metaKey,
+    ctrlKey,
+    shiftKey,
+    isComposing,
+    keyCode,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { this.prevented += 1 },
+    stopImmediatePropagation() { this.stopped += 1 },
+  }
+}
+
+test('readModEnterSend is off unless the Host explicitly turns it on', async () => {
+  const { readModEnterSend } = (await load()).internals
+  assert.equal(readModEnterSend({ getSnapshot: () => ({ value: {} }) }), false)
+  assert.equal(readModEnterSend({ getSnapshot: () => ({ value: { modEnterSend: true } }) }), true)
+  assert.equal(readModEnterSend({ getSnapshot: () => ({ value: { modEnterSend: false } }) }), false)
+  // An unreadable form keeps the shell's own Enter: a Host that does not
+  // project the field yet must not silently take the composer over.
+  assert.equal(readModEnterSend({ getSnapshot: () => { throw new Error('no host') } }), false)
+})
+
+test('isComposerTarget claims the shipped composer and nothing else', async () => {
+  const { isComposerTarget } = (await load()).internals
+  const inside = node({ tag: 'div' })
+  inside.closest = (selector) => (selector === '[data-composer-input]' ? inside : null)
+  assert.equal(isComposerTarget(inside), true)
+  const outside = node({ tag: 'input' })
+  outside.closest = () => null
+  assert.equal(isComposerTarget(outside), false)
+  assert.equal(isComposerTarget(null), false)
+  assert.equal(isComposerTarget({}), false)
+})
+
+test('composerEnterRewrite swaps Enter and the primary-modifier chord', async () => {
+  const { composerEnterRewrite } = (await load()).internals
+  const base = { enabled: true, key: 'Enter', inComposer: true }
+  // Plain Enter becomes the newline gesture, and so does Shift+Enter.
+  assert.deepEqual(composerEnterRewrite(base), { shiftKey: true, primary: false })
+  assert.deepEqual(composerEnterRewrite({ ...base, shiftKey: true }), { shiftKey: true, primary: false })
+  // Cmd/Ctrl+Enter becomes the plain submit gesture, so it delivers exactly
+  // what Enter delivers today.
+  assert.deepEqual(composerEnterRewrite({ ...base, metaKey: true }), { shiftKey: false, primary: false })
+  assert.deepEqual(composerEnterRewrite({ ...base, ctrlKey: true }), { shiftKey: false, primary: false })
+  // The complementary chord survives the swap: dropping Shift keeps the
+  // primary modifier, which is the gesture the shell calls "accelerated".
+  assert.deepEqual(composerEnterRewrite({ ...base, metaKey: true, shiftKey: true }), { shiftKey: false, primary: true })
+  assert.deepEqual(composerEnterRewrite({ ...base, ctrlKey: true, shiftKey: true }), { shiftKey: false, primary: true })
+})
+
+test('composerEnterRewrite leaves every other key, chord and context alone', async () => {
+  const { composerEnterRewrite } = (await load()).internals
+  const base = { enabled: true, key: 'Enter', inComposer: true }
+  assert.equal(composerEnterRewrite({ ...base, enabled: false }), null, 'the preference is off')
+  assert.equal(composerEnterRewrite({ ...base, key: 'a' }), null, 'not Enter')
+  assert.equal(composerEnterRewrite({ ...base, composing: true }), null, 'inside an IME composition')
+  assert.equal(composerEnterRewrite({ ...base, altKey: true }), null, 'an Alt chord belongs to the shell')
+  assert.equal(composerEnterRewrite({ ...base, inComposer: false }), null, 'not the composer')
+  assert.equal(composerEnterRewrite({ ...base, menuOwnsEnter: true }), null, 'the trigger menu picks with Enter')
+  assert.equal(composerEnterRewrite({}), null)
+})
+
+test('the send-key seat consumes what it rewrites, once', async () => {
+  const { createComposerSendKey } = (await load()).internals
+  const seen = []
+  const seat = createComposerSendKey({
+    enabled: () => true,
+    inComposer: () => true,
+    menuOwnsEnter: () => false,
+    replay: (_event, plan) => seen.push(plan),
+  })
+  const claimed = press('Enter')
+  assert.equal(seat.handle(claimed), true)
+  assert.equal(claimed.prevented, 1, 'the shell must not also submit')
+  assert.equal(claimed.stopped, 1, 'no other listener gets to act on it')
+  assert.deepEqual(seen, [{ shiftKey: true, primary: false }])
+
+  const passed = press('a')
+  assert.equal(seat.handle(passed), false)
+  assert.equal(passed.prevented, 0)
+  assert.equal(passed.stopped, 0)
+})
+
+test('the gesture the seat dispatches is never rewritten again', async () => {
+  const { createComposerSendKey } = (await load()).internals
+  const reentered = []
+  const seat = createComposerSendKey({
+    enabled: () => true,
+    inComposer: () => true,
+    menuOwnsEnter: () => false,
+    replay: () => { reentered.push(seat.handle(press('Enter'))) },
+  })
+  assert.equal(seat.handle(press('Enter')), true)
+  assert.deepEqual(reentered, [false], 'the replayed keydown must pass straight through')
+})
+
+test('the default replay dispatches one synthetic Enter at the composer', async () => {
+  const { createComposerSendKey } = (await load()).internals
+  const sent = []
+  const target = { nodeType: 1, dispatchEvent: (event) => { sent.push(event); return true } }
+  function FakeKeyboardEvent(type, init) { this.type = type; Object.assign(this, init) }
+  const seat = createComposerSendKey({
+    enabled: () => true,
+    inComposer: () => true,
+    menuOwnsEnter: () => false,
+    KeyboardEvent: FakeKeyboardEvent,
+  })
+
+  const swapped = Object.assign(press('Enter'), { target })
+  seat.handle(swapped)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].type, 'keydown')
+  assert.equal(sent[0].key, 'Enter')
+  assert.equal(sent[0].shiftKey, true, 'plain Enter replays as the newline gesture')
+  assert.equal(sent[0].metaKey, false)
+  assert.equal(sent[0].ctrlKey, false)
+  assert.equal(sent[0].bubbles, true, 'the shell listens on the editor, not on document')
+  assert.equal(sent[0].cancelable, true)
+
+  // Cmd+Enter replays as plain Enter; Shift+Cmd+Enter keeps the modifier.
+  seat.handle(Object.assign(press('Enter', { metaKey: true }), { target }))
+  seat.handle(Object.assign(press('Enter', { metaKey: true, shiftKey: true }), { target }))
+  assert.deepEqual(
+    sent.slice(1).map((event) => [event.shiftKey, event.metaKey, event.ctrlKey]),
+    [[false, false, false], [false, true, false]],
+  )
+})
+
+test('the composer listener exists only while the preference is on', async () => {
+  const module = await load()
+  const added = []
+  const removed = []
+  globalThis.document = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, remove() {} }),
+    head: { appendChild() {} },
+    addEventListener: (type, listener, capture) => added.push({ type, listener, capture }),
+    removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
+  }
+  try {
+    const form = fakeForm({ modEnterSend: false })
+    module.apply(fakeContext([], [], { form }))
+    // Only this feature's own listener is asserted: the other capture listeners
+    // belong to the link hand-off and the inline-code press, and each of those
+    // has its own assertion elsewhere.
+    const keydowns = () => added.filter((entry) => entry.type === 'keydown')
+    assert.deepEqual(keydowns(), [], 'an off feature adds no keydown listener')
+
+    form.publish({ modEnterSend: true })
+    assert.deepEqual(keydowns().map((entry) => entry.capture), [true])
+    // A press in the composer is claimed; the same press outside it is not.
+    const composer = { nodeType: 1, closest: (selector) => (selector === '[data-composer-input]' ? composer : null), dispatchEvent: () => true }
+    const inside = Object.assign(press('Enter'), { target: composer })
+    assert.equal(keydowns()[0].listener(inside), undefined)
+    assert.equal(inside.prevented, 1)
+    const outside = Object.assign(press('Enter'), { target: { nodeType: 1, closest: () => null } })
+    assert.equal(outside.prevented, 0)
+
+    form.publish({ modEnterSend: false })
+    assert.deepEqual(removed, [{ type: 'keydown', listener: keydowns()[0].listener, capture: true }])
+    form.publish({ modEnterSend: false })
+    assert.equal(removed.length, 1, 'an already detached listener is not removed twice')
+
+    form.publish({ modEnterSend: true })
+    assert.deepEqual(keydowns().map((entry) => entry.capture), [true, true])
+  } finally {
+    delete globalThis.document
+  }
 })

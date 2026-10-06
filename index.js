@@ -4,10 +4,10 @@
  * Owns three facts:
  *
  *  - the plugin's preference surface. `locateButton`, `copySessionId`,
- *    `externalLink` and `codeMenu` are volatile Config fields, which is what
- *    makes the settings provider project them into the namespace named by this
- *    row's id (`flow`); the browser half reads and writes that namespace through
- *    `ctx.configForms`.
+ *    `externalLink`, `codeMenu` and `modEnterSend` are volatile Config fields,
+ *    which is what makes the settings provider project them into the namespace
+ *    named by this row's id (`flow`); the browser half reads and writes that
+ *    namespace through `ctx.configForms`.
  *  - the presentation policy: this bundle ships its own settings page (the 心流
  *    section the browser half registers), so the settings provider must not also
  *    auto-generate one from the schema. The policy is registered on an optional
@@ -42,12 +42,14 @@ export const name = 'flow'
  * @property {boolean} copySessionId - whether a Session row offers "copy Session ID", by right-click menu and by shortcut.
  * @property {boolean} externalLink - whether off-origin links leave through the platform opener instead of the shell.
  * @property {boolean} codeMenu - whether right-clicking inline code in a conversation offers "open" and "copy".
+ * @property {boolean} modEnterSend - whether Cmd/Ctrl+Enter sends and a plain Enter inserts a newline, instead of the shipped Enter-sends pair.
  */
 export const Config = z.object({
   locateButton: z.boolean().default(true).volatile(),
   copySessionId: z.boolean().default(true).volatile(),
   externalLink: z.boolean().default(true).volatile(),
   codeMenu: z.boolean().default(true).volatile(),
+  modEnterSend: z.boolean().default(false).volatile(),
 })
 
 /** Exact route the browser half posts an off-origin link to. */

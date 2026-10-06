@@ -2,6 +2,7 @@
 
 `dsh-flow` 历次洁癖审查留下的待核查线索。只记「下次该优先看哪里」，权威结论在 `README.md` / `AGENTS.md`。
 
+- [ ] **发送键对调（`flow.modEnterSend`）的 H 段还没在真浏览器里跑过**：与下面那条同一个根因 —— 实例激活的宿主半边不是本 checkout，`--client` 只换浏览器半边，`modEnterSend` 不会被 settings 域投影，开关写不进去，H 段照约定记 `SKIP`。要在真浏览器里跑到它，必须让实例激活本 checkout 的 `index.js`（`remove` 再 `add`，必要时重启 DSH Desktop），再跑 `npm run verify:browser --client ./client.js`。合成手势本身的可行性已经用临时探针实测过（真 Enter 变 「+1 换行且草稿保留」，⌘Enter 命中提交判定且不换行）。记录：`2026-10-07`
 - [ ] 行内代码右键菜单的「开关关闭」那一段（`scripts/verify-browser.mjs` 里 ⑥）**本轮没在真浏览器里跑过**：运行中实例激活的宿主半边不是本 checkout（没有 `flow.codeMenu`），`--client` 只替换浏览器半边，设置写入会被拒，那一段照约定记 `SKIP`。要让 ⑥ 真跑，得让实例激活本 checkout 的 `index.js`（`remove` 再 `add`，实例在跑会话时不要做）。`readCodeMenuEnabled` 的默认值与「关闭时不注册监听」由 `tests/client.test.mjs` 钉住。记录：`2026-10-07`
 - [ ] 「打开」把合成 click 派发到 `code > button`（文件引用的行内代码），**不是** `<code>` 本身；依据是运行实例实拉 + primitives 里 `onClick: mention.open` 挂在该 button 上。官方若改成 `<code>` 自身带 `onClick`，症状是「右键菜单在、点打开没反应」，不报错。记录：`2026-10-07`
 - [ ] 行内代码范围的正向收窄依赖 `[class*="_markdown_"]` 这个 CSS module local name；本机另一个第三方插件（实拉客户端清单里）也在用同一选择器，说明它是当前实例上的稳定点，但它仍是脆弱契约。记录：`2026-10-07`
@@ -27,5 +28,8 @@
 - [ ] 设置弹窗的按压仍然靠「先量后按」：`aim()` 只保证测量那一刻 `elementFromPoint` 命中的是目标，量完到按下之间布局若还在动仍会落空。本轮在 `openFlowTab()` 里补了「等盒子连续两次测量不动」，但那只是收敛到一个入口；若以后再出现「开关点了没反应」，先把这段稳定性等待推广到 `aim()`，再怀疑产品。记录：`2026-10-06`
 - [ ] **左键接管的顺序不能反：先接管、再探测**（2026-10-07 实测踩到并修掉）。`preventDefault()` 只在事件派发期间有效，而存在性探测是宿主往返，所以必须是「捕获阶段接管 → 探测 → 存在就 `activateInlineCode()` 重新派发」。两处必须记住：① 反过来写（先 await 再 preventDefault）是无效实现；② **重新派发出去的那次合成 click 必须不被自己再接管**（判定用 `event.isTrusted === false` 跳过），否则「接管 → 重新派发 → 又被接管」会无限循环，症状是页面卡死、无头验收报 `CDP timeout: Input.dispatchMouseEvent`。这条是 `npm run verify:browser` 抓出来的，单测抓不到。记录：`2026-10-07`
 - [ ] 探测接口 `workspaceFiles.stat(sessionId, path, signal)` **会返回 `{ok,value}|{ok,error}` 信封而不是抛错**，「不存在」是值不是异常；判定只认 not-found 一类错误码/消息，其余（宿主不在、超时、其它失败）一律 fail open 交给壳。宁可保留壳那个难看的弹窗，也不能把存在的路径判成不存在。记录：`2026-10-07`
+- [ ] **官方快捷键表里 11 行是只读的，解不开，只能绕**：`发送消息 Enter`/`换行 ⇧Enter`/`使用互补方式 ⌘Enter`/`打开命令菜单 /`/`打开引用菜单 @`/`停止生成 Esc Esc`（ui-conversation 的 `registerFixed`）+ `移动菜单选择 ↑↓`/`选择菜单项 Enter`/`关闭菜单或顶层弹窗 Esc`（ui-shortcuts 的 `fixed.*`）+ 审批区域的 `允许一次 Enter`/`拒绝 Esc`。`effectiveShortcuts` 用 `filter(row => row.fixed === void 0)` 把它们整体排除在覆盖解析之外，且真实按键处理在各自组件里（composer 的 Lexical keymap、Menu 原语、审批弹层），**改注册表只会让设置页撒谎**。下次再有人问「能不能解开全部快捷键」，从这条开始，不要重新调研。记录：`2026-10-07`
+- [ ] 发送键的两个 DOM 契约都是**静默失效型**：输入框根 `[data-composer-input]`（类名是构建哈希，别依赖）、`/``@` 菜单的 `[data-trigger-menu] [role="listbox"][aria-activedescendant]`。官方改名/改渲染形状后症状只是「开关开了但 Enter 还是发送」，控制台不报错。改完必须跑真浏览器验收。记录：`2026-10-07`
+- [ ] `scripts/verify-browser.mjs` 的 E 段**逐字断言「心流」页的行标题列表**：加一个偏好就必须同步那一行，否则整段 E 会红（本次加发送键开关时踩到）。同理 `FlowSection` 的行序决定 `script` 里的 `.flow-row:nth-child(N)` 选择器。记录：`2026-10-07`
 - [ ] `assets/` 下现在有三张手绘示意图（`locate-flow` 三步定位、`code-menu` 行内代码右键菜单、`link-open` 链接去向与宿主路由边界）与 `screenshots.json`，全部由 `scripts/render-assets.mjs` 生成。改按钮图标、改流程措辞或改路由边界数字时，必须重跑 `npm run assets` 并**逐张肉眼过一遍**（脚本只保证能渲染，不保证仍然说得对）。图里**不得**出现真实会话名、工作区名或账号信息。记录：`2026-10-07`
 - [ ] `render-assets.mjs` 的清理路径有两个只有跑起来才暴露的坑（2026-10-07 实测踩到并修掉）：① 目标 PNG **必须先删**，否则上一轮留下的文件会让「等截图出现」瞬间通过，旧图被当作新图发布；② `chrome.kill` 之后立刻 `rmSync(profile)` 会输给 Chrome 的收尾写入，抛 `ENOTEMPTY` 让一次已经产出全部的运行以非零码结束。脚本现已等进程退出 + 重试删除，但**改这段必须真的跑一遍**。记录：`2026-10-07`

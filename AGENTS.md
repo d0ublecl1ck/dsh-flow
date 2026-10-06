@@ -1,6 +1,6 @@
 # dsh-flow
 
-DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
+DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由、对话输入框里把 Enter 与 ⌘/Ctrl+Enter 对调的发送键开关，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
 
 ## 结构与约定
 
@@ -60,11 +60,21 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 排除：`pre` 内（多行代码块）、`[contenteditable]` 内（输入框与快捷键编辑器）、`<a href>` 内（链接已归外链接管）、文本 trim 后为空、目标不在 `code` 内。
 - 收窄：必须落在 `[class*="_markdown_"]` 祖先里。实拉运行中的实例，正文里的行内代码是 `code < li < ol < div._markdown_1ypvv_5 < div.hWmORq_body < …`；`_markdown_` 是 CSS module 的 local name（哈希会变），与本仓库既有的 `[class*="listArea"]` / `[class*="sectionHeader"]` 是同一类依赖，也让工具卡、设置页、别的插件面板里的 `code` 不被误接管。**不要**改去写 `hWmORq_root` 之类的会话容器选择器 —— 那是构建哈希。
 - 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`，它断言「打开」派发的合成 click 落在 `BUTTON` 上。
-## 依赖的官方契约（脆弱点集中在这里）
+## 发送键对调（为什么是「换手势」而不是「改快捷键」）
+
+设置 → 心流 → 「⌘+Enter 发送」打开后，对话输入框里 Enter 换行、⌘/Ctrl+Enter 发送。实现只有一条：**document 捕获阶段的 keydown 监听 + 合成官方本来就认的另一个手势**。
+
+- **官方那 11 行只读快捷键解不开，这里也不去解。** 官方注册表把这类行走 registerFixed，并在 effectiveShortcuts 里用 filter(row => row.fixed === void 0) 整体排除在覆盖解析之外（@deepseek-ai/dsh-client-shortcuts），设置页也只给非 fixed 行渲染录制按钮；而「发送／换行」的真身在 ui-conversation 的 Lexical keymap 里（shiftKey === true 提前 return false 落到换行，否则 submit(ctrlKey || metaKey)）。所以本插件既不改注册表、也不动官方设置页，改的是**按下的那个键**。
+- **合成事件走的是官方自己的分支**：要换行就补发 shiftKey: true 的 Enter，要发送就补发裸 Enter。提交判定（含 busy 时 queue/steer 的 resolveSubmitMode）、撤销历史、IME 记账因此全部留在官方代码里；插件的改动面只有键位。实测（无头 Chrome，真事件）：开关打开后输入框里按 Enter 只多出一个换行、草稿保留、不发送。
+- **四条必须保持的放行**：目标不在 [data-composer-input] 内、IME 组字中（isComposing 或 keyCode === 229）、altKey 组合，一律不介入；[data-trigger-menu] [role="listbox"][aria-activedescendant] 存在（/ 或 @ 菜单有高亮候选）时也必须放行，否则 Enter 就选不中候选。
+- **重入锁是必需的**：合成的事件会再次经过同一个捕获监听，没有 replaying 标志就会无限改写。
+- **⇧⌘Enter 保留加速档**：换行分支丢掉 Shift 会顺手丢掉「另一种发送方式」，所以 ⇧⌘Enter 补发的是**保留主修饰键**的 Enter。这是刻意的补偿，不是漏改。
+- **监听只在偏好打开时存在**（与行内代码菜单同一范式）：表单的 subscribe 当 Host 回声用，翻到 false 就 detach，翻回来再 attach；关掉时 document 上根本没有 keydown 监听。设置页的开关文案与这条实现一一对应。
 
 - 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占两个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
+- DOM（发送键）：对话输入框根 `[data-composer-input]`（实拉时它的类名是 `uV2eYG_input` —— 构建哈希，不要依赖；属性 `data-composer-input` 才是契约，带 contenteditable 与 Lexical 的 `__lexicalEditor`）、触发菜单容器 `[data-trigger-menu]` 与其中的 `[role="listbox"][aria-activedescendant]`。这两处都是**静默失效型**依赖：属性改名后症状只是「开关开了但 Enter 还是发送」，所以改完必须跑真浏览器验收。
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
@@ -77,7 +87,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu })`，四个字段都是 `z.boolean().default(true).volatile()`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, modEnterSend })`，五个字段都是 `z.boolean().volatile()` —— 前四个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -90,7 +100,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 60 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 74 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
@@ -106,6 +116,7 @@ npm run assets           # 重新生成 assets/ 里的示意图（需要本机 C
 - 每一次按压都先过 `aim()`：滚动到位、`elementFromPoint` 命中目标之后才按下。弹窗入场动画会把一帧前量到的中心点挪走，落空的按压看起来和「点了没反应」一模一样。
 - **验收脚本必须自己把起点状态归一到已知**（`ensureCopyOn()`）：偏好是持久化的，一次中断的跑会把它留在关闭态，下一次跑的「右键菜单里应该有那一行」就会因为**上一次的残留**而红 —— 症状是同一个脚本时红时绿、换一条断言红。同理，偏好写入是有界的 Host 往返，用轮询（`settled()`）而不是猜睡眠；关掉功能后按 `⇧⌘C` 事件不再被应用消费、会落到浏览器打开元素选择模式，后面那次按压会被它吞掉，所以要补一次 Esc。
 - **打开设置弹窗前必须先确认没有残留的弹窗，并等它停稳**（`openFlowTab()` + `waitForStill()`）：关闭是淡出而不是卸载，旧弹窗还在的那几帧足够让「弹窗已打开」的等待全部通过，而随后的按压落在 React 马上要移除的节点上 —— 症状正是「开关点了没反应」，看起来像产品缺陷。第三次因为这条红过之后才加的：`settled()` 只保证读回来的是新值，保证不了那一次按压真的落在了它测量的位置上。
+- 发送键那一段（H）**故意只在空草稿或纯空白草稿上按压**：壳自己拒绝发送这种草稿，所以「改写失效」的表现是「草稿没长出一个换行」，绝不会变成往当前会话里发一条消息。开/关两态各读一次草稿文本，关态断言 Enter 不改草稿、`⇧Enter` 长一个换行，开态断言 Enter 长一个换行、`⌘Enter` 不长换行。
 - 外链那几段在页面里替换掉 `window.fetch`，把 `/flow/open-external` 与 `/external-link/open` 都就地应答并记账：真放过去会在这台机器上弹出用户的默认浏览器。探针锚点自己造（一个非同源、一个同源），并挂一个冒泡阶段的兜底 `preventDefault`——两个插件都拒绝这次点击时，页面也不会被导航走。宿主路由另走 HTTP 探针（GET 405 + `allow: POST`、未认证 401、`file://` 400），**故意不发一个合法 URL**：那会真的打开浏览器；路由没挂载时那一段记 `SKIP`，不记 `FAIL`。
 
 若怀疑运行中的实例没加载本插件，先看清单而不是猜：

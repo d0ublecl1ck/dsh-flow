@@ -56,8 +56,19 @@ test('the inline-code menu switch defaults to on, and is volatile too', () => {
   assert.equal(field.type, 'boolean')
 })
 
+test('the send-key switch starts on the shell behaviour, and is volatile too', () => {
+  // Off is the shipped Enter: a fresh install must not silently swap the keys
+  // under someone who never asked for it.
+  assert.equal(z.resolve({}, Config)[0].modEnterSend.get(), false)
+  assert.equal(z.resolve({ modEnterSend: true }, Config)[0].modEnterSend.get(), true)
+  assert.equal(z.resolve({ modEnterSend: false }, Config)[0].modEnterSend.get(), false)
+  const field = Config.dict.modEnterSend
+  assert.equal(field.meta.volatile, true)
+  assert.equal(field.type, 'boolean')
+})
+
 test('the toggles are volatile, which is what the settings form projects', () => {
-  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu']) {
+  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'modEnterSend']) {
     const field = Config.dict[name]
     assert.equal(field.meta.volatile, true, name)
     assert.equal(field.type, 'boolean', name)

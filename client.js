@@ -1,7 +1,7 @@
 /**
  * dsh-flow — browser half.
  *
- * Three surfaces, one entry:
+ * Five surfaces, one entry:
  *
  *  - the 「定位当前会话」 button, sitting in the workspace browser's section
  *    header immediately to the right of the search control — the seat JetBrains
@@ -32,12 +32,22 @@
  *    「打开」 dispatches one ordinary left-button `click` at the control the shell
  *    itself made clickable, so the choice between an in-app preview and the OS
  *    opener stays where it already lives.
- *  - `settings.section` — the 心流 page, holding the four preferences that turn
- *    the button, the copy, the link hand-off and the inline-code menu off. They
- *    live in this plugin's Host Config namespace (`flow.locateButton` /
- *    `flow.copySessionId` / `flow.externalLink` / `flow.codeMenu`), reached
- *    through `ctx.configForms`, so they are a durable part of the settings
- *    document rather than page-local state.
+ *  - the composer's send key — with the preference on, a plain Enter inserts a
+ *    newline and ⌘/Ctrl+Enter sends, i.e. the shipped pair with its two halves
+ *    swapped. The shipped composer decides Enter inside its own keymap (a plain
+ *    Enter submits, `Shift+Enter` is the newline branch), so this plugin does not
+ *    reimplement either: it takes the press away in the capture phase and hands
+ *    the shell the *other* gesture as a synthetic keydown on the same element,
+ *    which keeps the submit adjudication, the undo history and the IME
+ *    bookkeeping exactly where they already are. A highlighted `/`-or-`@`
+ *    candidate, an IME composition and an Alt chord are all left alone.
+ *  - `settings.section` — the 心流 page, holding the five preferences that turn
+ *    the button, the copy, the link hand-off, the inline-code menu and the
+ *    swapped send key off. They live in this plugin's Host Config namespace
+ *    (`flow.locateButton` / `flow.copySessionId` / `flow.externalLink` /
+ *    `flow.codeMenu` / `flow.modEnterSend`), reached through `ctx.configForms`,
+ *    so they are a durable part of the settings document rather than page-local
+ *    state.
  *
  * The header is not a slot: the shell's browsing region is a single-occupant
  * slot (`sidebar.workspaces`) whose header declares no hole beside the search
@@ -730,6 +740,133 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether one press landed in the shipped composer.
+     *
+     * @param target - the event target.
+     * @returns whether the target sits inside `[data-composer-input]`.
+     */
+    function isComposerTarget(target) {
+      if (!isElement(target) || typeof target.closest !== 'function') return false
+      return target.closest(COMPOSER_INPUT) !== null
+    }
+
+    /**
+     * Decide what one Enter press in the composer has to become.
+     *
+     * The shipped composer treats a plain Enter as "submit" and Shift+Enter as
+     * "newline"; the two are separate branches of its own keymap, which is why
+     * this plugin does not have to know anything about Lexical: it only has to
+     * hand the shell the *other* gesture, with the same modifiers the shell
+     * already understands.
+     *
+     * @param input - the press and the context it happened in.
+     * @returns `{shiftKey, primary}` for the gesture to replay, or null to leave the press alone.
+     */
+    function composerEnterRewrite(input) {
+      if (input === null || typeof input !== 'object') return null
+      if (input.enabled !== true) return null
+      if (input.key !== 'Enter') return null
+      // An IME's Enter belongs to the IME, and an Alt chord belongs to whatever
+      // the shell already made of it (a dead key on macOS, for one).
+      if (input.composing === true) return null
+      if (input.altKey === true) return null
+      if (input.inComposer !== true) return null
+      // A highlighted trigger candidate is picked with Enter; that press is the
+      // menu's, not this plugin's.
+      if (input.menuOwnsEnter === true) return null
+      const primary = input.metaKey === true || input.ctrlKey === true
+      if (!primary) return { shiftKey: true, primary: false }
+      // The complementary chord keeps its primary modifier once Shift is gone,
+      // so the busy Queue/Steer pair still has both halves after the swap.
+      return { shiftKey: false, primary: input.shiftKey === true }
+    }
+
+    /**
+     * Hand one gesture back to the shell.
+     *
+     * The press is dispatched at the element the user actually typed into, and
+     * it bubbles: the composer's own keymap listens on that editor, so the
+     * replay takes exactly the path the real key would have taken — the same
+     * submit adjudication, the same undo history, the same IME bookkeeping.
+     *
+     * @param event - the press being replaced.
+     * @param plan - the gesture `composerEnterRewrite` decided on.
+     * @param KeyboardEvent - the constructor to mint it with.
+     * @returns whether a gesture could be dispatched.
+     */
+    function replayComposerEnter(event, plan, KeyboardEvent) {
+      const target = event?.target
+      if (typeof KeyboardEvent !== 'function') return false
+      if (!isElement(target) || typeof target.dispatchEvent !== 'function') return false
+      target.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        shiftKey: plan.shiftKey === true,
+        ctrlKey: plan.primary === true && event.ctrlKey === true,
+        metaKey: plan.primary === true && event.metaKey === true,
+        altKey: false,
+        repeat: false,
+      }))
+      return true
+    }
+
+    /**
+     * The swapped send key: one capture-phase listener's worth of behavior.
+     *
+     * The DOM is kept at arm's length — the decision, the replay and the
+     * re-entrancy guard are all driven through `input`, so the whole thing is
+     * asserted without a browser.
+     *
+     * @param input.enabled - reads the live preference.
+     * @param input.inComposer - `(event) => boolean`: the press landed in the composer.
+     * @param input.menuOwnsEnter - `() => boolean`: the trigger menu has a highlighted candidate.
+     * @param input.replay - dispatches the decided gesture; defaults to `replayComposerEnter`.
+     * @param input.KeyboardEvent - the constructor the default replay mints with.
+     * @returns the seat the document listener drives.
+     */
+    function createComposerSendKey(input) {
+      const replay = input.replay ?? ((event, plan) => replayComposerEnter(event, plan, input.KeyboardEvent ?? globalThis.KeyboardEvent))
+      // The gesture this seat dispatches comes back through the same
+      // capture-phase listener; without this flag it would be rewritten again.
+      let replaying = false
+      return {
+        /**
+         * Rewrite one press, or let it through.
+         *
+         * @param event - the document `keydown` event.
+         * @returns whether this press was taken away from the shell.
+         */
+        handle(event) {
+          if (replaying) return false
+          const plan = composerEnterRewrite({
+            enabled: input.enabled() === true,
+            key: event?.key,
+            composing: event?.isComposing === true || event?.keyCode === 229,
+            altKey: event?.altKey === true,
+            metaKey: event?.metaKey === true,
+            ctrlKey: event?.ctrlKey === true,
+            shiftKey: event?.shiftKey === true,
+            inComposer: input.inComposer(event) === true,
+            menuOwnsEnter: input.menuOwnsEnter() === true,
+          })
+          if (plan === null) return false
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          replaying = true
+          try {
+            replay(event, plan)
+          } finally {
+            replaying = false
+          }
+          return true
+        },
+      }
+    }
+
+    /**
      * The one-slot seat the inline-code menu renders from.
      *
      * A press that lands on another `code` while the menu is open replaces the
@@ -815,6 +952,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read the send-key preference off the plugin's config form.
+     *
+     * The default is off, and an unreadable form keeps that default: the shipped
+     * Enter-sends pair is what someone who never touched this setting expects,
+     * so a Host that does not project the field yet must not swap it.
+     *
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether Cmd/Ctrl+Enter sends and Enter breaks the line.
+     */
+    function readModEnterSend(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return false
+      return value.modEnterSend === true
+    }
+
+    /**
      * Create the one-slot seat the mounted button and the plugin-scope command
      * share.
      *
@@ -871,6 +1029,28 @@ window.__ModuleLoader__.load({
      * of sharing it — two surfaces, two lifespans.
      */
     const CODE_MENU_ID = 'flow.code-menu'
+
+    /**
+     * The shipped composer's editable root, which is the only place a swapped
+     * Enter belongs.
+     *
+     * Measured in the running instance: the composer is one
+     * `div[data-composer-input]` (contenteditable, carrying Lexical's
+     * `__lexicalEditor`), and it is the element the shell's keydown reaches.
+     * Every other Enter in the application — the Queue dock's editor input, the
+     * settings search box — lives outside it and is left untouched.
+     */
+    const COMPOSER_INPUT = '[data-composer-input]'
+
+    /**
+     * The `/` and `@` menu, while one of its candidates is highlighted.
+     *
+     * Enter is how that menu picks: the composer asks the trigger pipeline to
+     * arbitrate first, and the pipeline answers `pass` unless a candidate is
+     * highlighted. Rewriting the press while a highlight is up would take the
+     * pick away, so this plugin steps aside exactly then.
+     */
+    const TRIGGER_MENU_PICK = '[data-trigger-menu] [role="listbox"][aria-activedescendant]'
 
     /**
      * Every profile that admits a `Mod+Shift+<letter>` default, and the reason
@@ -1055,6 +1235,8 @@ window.__ModuleLoader__.load({
       'section.external.description': '点击非本站的 http、https、mailto、tel 链接时，交给操作系统的默认应用打开（macOS 用 open、Windows 用 start、Linux 用 xdg-open），包括本来会开在内置窗口里的 localhost 地址。关闭后恢复壳自身的打开方式。',
       'section.codeMenu.title': '行内代码右键菜单',
       'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：打开与左键单击走同一条链路，复制把代码原文写进剪贴板。单击行为不受影响；关闭后右键恢复壳自身的行为。',
+      'section.sendKey.title': '⌘+Enter 发送',
+      'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -1084,6 +1266,8 @@ window.__ModuleLoader__.load({
       'section.external.description': 'Off-origin http, https, mailto and tel links open in the operating system’s default application (open on macOS, start on Windows, xdg-open on Linux), including the localhost addresses that would otherwise open in an in-app window. Switching this off restores the shell’s own behaviour.',
       'section.codeMenu.title': 'Inline code right-click menu',
       'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Open runs the same path a left click already takes, Copy puts the code’s text on the clipboard. Left-clicking is unaffected; switching this off restores the shell’s own right-click behaviour.',
+      'section.sendKey.title': '⌘+Enter to send',
+      'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -1459,7 +1643,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The 心流 settings page: the four preferences this plugin owns.
+     * The 心流 settings page: the five preferences this plugin owns.
      *
      * @param props - localized copy and the plugin's config form.
      */
@@ -1501,6 +1685,15 @@ window.__ModuleLoader__.load({
           read: readCodeMenuEnabled,
           title: t('section.codeMenu.title'),
           description: t('section.codeMenu.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
+          field: 'modEnterSend',
+          read: readModEnterSend,
+          title: t('section.sendKey.title'),
+          description: t('section.sendKey.description'),
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
@@ -1631,6 +1824,36 @@ window.__ModuleLoader__.load({
             detach?.()
           }
         }, 'flow: inline code menu')
+        // The swapped send key: the same shape as the code-menu listener — one
+        // capture-phase listener for the whole page, present only while the
+        // preference is on — but it has to run before the *editor's* own
+        // handler rather than the shell's, because Enter is adjudicated there.
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          const sendKey = createComposerSendKey({
+            enabled: () => readModEnterSend(config),
+            inComposer: (event) => isComposerTarget(event?.target),
+            menuOwnsEnter: () => document.querySelector(TRIGGER_MENU_PICK) !== null,
+          })
+          let detach = null
+          const sync = () => {
+            if (!readModEnterSend(config)) {
+              detach?.()
+              detach = null
+              return
+            }
+            if (detach !== null) return
+            const onKeyDown = (event) => { sendKey.handle(event) }
+            document.addEventListener('keydown', onKeyDown, true)
+            detach = () => { document.removeEventListener('keydown', onKeyDown, true) }
+          }
+          sync()
+          const unsubscribe = config.subscribe(sync)
+          return () => {
+            if (typeof unsubscribe === 'function') unsubscribe()
+            detach?.()
+          }
+        }, 'flow: swapped send key')
         // One notice seat for both copy entry points: the row menu and the
         // command copy the same text and report through the same place.
         const notice = createNoticeStore()
@@ -1753,6 +1976,13 @@ window.__ModuleLoader__.load({
         codeOpenTarget,
         statVerdict,
         handleInlineCodeClick,
+        COMPOSER_INPUT,
+        TRIGGER_MENU_PICK,
+        isComposerTarget,
+        composerEnterRewrite,
+        replayComposerEnter,
+        createComposerSendKey,
+        readModEnterSend,
       },
     }
   },

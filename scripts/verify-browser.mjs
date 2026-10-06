@@ -511,6 +511,95 @@ async function setCodeMenu(cdp, sessionId, want) {
   return await codeMenuSwitchState(cdp, sessionId) === want
 }
 
+/** Read the send-key preference off the 心流 page's fifth row. */
+async function modEnterSwitchState(cdp, sessionId) {
+  return evaluate(cdp, sessionId, `(() => {
+    const node = document.querySelector(${JSON.stringify(MOD_ENTER_SWITCH)});
+    return node === null ? null : node.getAttribute('aria-checked');
+  })()`)
+}
+
+/**
+ * Drive the send-key switch to `want` on the already-open 心流 page.
+ *
+ * Same discipline as the inline-code switch: the write is a Host round trip, so
+ * the answer is waited for rather than read after a guessed sleep.
+ *
+ * @returns whether the switch reads back as `want`.
+ */
+async function setModEnter(cdp, sessionId, want) {
+  if (await modEnterSwitchState(cdp, sessionId) === want) return true
+  await waitFor(
+    cdp,
+    sessionId,
+    `(() => { const node = document.querySelector(${JSON.stringify(MOD_ENTER_SWITCH)}); return node !== null && node.disabled === false })()`,
+    'the send-key switch to become pressable',
+  ).catch(() => { /* the read-back below reports it */ })
+  await click(cdp, sessionId, MOD_ENTER_SWITCH)
+  await waitFor(
+    cdp,
+    sessionId,
+    `(() => { const node = document.querySelector(${JSON.stringify(MOD_ENTER_SWITCH)}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`,
+    'the send-key preference to settle at ' + want,
+    8000,
+  ).catch(() => { /* the read-back below reports it */ })
+  return await modEnterSwitchState(cdp, sessionId) === want
+}
+
+/** What the composer currently holds, and whether it would take a keystroke. */
+async function composerState(cdp, sessionId) {
+  return evaluate(cdp, sessionId, `(() => {
+    const node = document.querySelector('[data-composer-input]');
+    if (node === null) return null;
+    return {
+      editable: node.getAttribute('contenteditable'),
+      focused: document.activeElement === node || node.contains(document.activeElement),
+      text: node.innerText,
+    };
+  })()`)
+}
+
+/** Press the composer like a person, and wait for it to really hold focus. */
+async function focusComposer(cdp, sessionId) {
+  await click(cdp, sessionId, '[data-composer-input]')
+  await waitFor(
+    cdp,
+    sessionId,
+    `(() => { const n = document.querySelector('[data-composer-input]'); return n !== null && (document.activeElement === n || n.contains(document.activeElement)) })()`,
+    'the composer to take focus',
+    6000,
+  ).catch(() => { /* the assertions below report what they see */ })
+}
+
+/**
+ * Bring up a composer that really accepts a keystroke.
+ *
+ * The shell can open on the no-Session state, whose composer is mounted but
+ * inert; any Session row brings an editable one back. Labelled rows are tried
+ * first because they are the ones a person would click.
+ *
+ * @returns whether an editable composer is on screen.
+ */
+async function ensureEditableComposer(cdp, sessionId) {
+  const editable = `(() => { const n = document.querySelector('[data-composer-input]'); return n !== null && n.getAttribute('contenteditable') === 'true' })()`
+  if (await evaluate(cdp, sessionId, editable)) return true
+  const rows = await evaluate(cdp, sessionId, `(() => [...document.querySelectorAll('[class*="listArea"] [data-row-key^="session:"]')]
+    .map((row) => ({ key: row.dataset.rowKey, label: (row.innerText || '').trim() })))`)
+  const candidates = rows.filter((row) => row.label !== '' && !row.label.includes('新会话')).concat(rows)
+  for (const row of candidates) {
+    try {
+      await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(row.key) + ']')
+    } catch {
+      continue
+    }
+    try {
+      await waitFor(cdp, sessionId, editable, 'an editable composer for ' + row.key, 8000)
+      return true
+    } catch { /* the next row may be the one that opens an editable composer */ }
+  }
+  return false
+}
+
 /**
  * Stand in for the host clipboard, recording what a copy actually wrote.
  *
@@ -750,6 +839,9 @@ const CODE_DIAGNOSTICS = `(() => {
 
 /** The 心流 page's fourth row: this feature's own switch. */
 const CODE_MENU_SWITCH = '[role="dialog"] .flow-row:nth-child(4) [role="switch"]'
+
+/** The 心流 page's fifth row: the swapped send key. */
+const MOD_ENTER_SWITCH = '[role="dialog"] .flow-row:nth-child(5) [role="switch"]'
 
 /**
  * Wait until one element's box has stopped moving.
@@ -1367,8 +1459,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单'])) {
-      pass('the 心流 page renders all four preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '⌘+Enter 发送'])) {
+      pass('the 心流 page renders all five preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -1609,6 +1701,104 @@ async function main() {
           // Best effort: the row may have been filtered out since.
         })
         await sleep(600)
+      }
+    }
+
+    // ---- H. the 心流 switch owns the swapped send key -------------------
+    // The composer adjudicates Enter inside its own keymap, and the whole point
+    // of this leg is that a press really changes what the shipped code does —
+    // so it is read off the draft: with the switch on, a plain Enter has to
+    // grow the draft by one newline instead of submitting it.
+    //
+    // Every press below is made on an empty or whitespace-only draft, which the
+    // shell itself refuses to send. A rewrite that stopped working therefore
+    // shows up as "the draft did not grow", never as a message posted into the
+    // Session this run happens to be using.
+    await openFlowTab(cdp, sessionId)
+    const sendKeyStarted = await modEnterSwitchState(cdp, sessionId)
+    if (sendKeyStarted === null) {
+      skip('the 心流 page has no send-key row here: the Host half this instance activated predates it')
+    } else {
+      const switchedOff = await setModEnter(cdp, sessionId, 'false')
+      await pressEscape(cdp, sessionId)
+      if (!switchedOff) {
+        skip('the send-key preference would not move: install this checkout as the installed Host half and restart the instance to run these legs')
+      } else if (!await ensureEditableComposer(cdp, sessionId)) {
+        fail('no Session answers with an editable composer to type into')
+      } else {
+        await focusComposer(cdp, sessionId)
+        const offState = await composerState(cdp, sessionId)
+        if (offState === null || offState.editable !== 'true' || !offState.focused) {
+          fail('the composer never became the focused editable: ' + JSON.stringify(offState))
+        } else {
+          const beforeOff = offState.text
+          await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 0 })
+          const afterOffEnter = await composerState(cdp, sessionId)
+          if (afterOffEnter.text === beforeOff) {
+            pass('with the switch off a plain Enter leaves the shipped submit gesture alone')
+          } else {
+            fail('a plain Enter changed the draft while the switch was off: ' + JSON.stringify({ beforeOff, after: afterOffEnter.text }))
+          }
+          await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 8 })
+          const afterOffShift = await composerState(cdp, sessionId)
+          if (afterOffShift.text === beforeOff + '\n') {
+            pass('with the switch off Shift+Enter is still the newline')
+          } else {
+            fail('Shift+Enter did not insert one newline: ' + JSON.stringify({ beforeOff, after: afterOffShift.text }))
+          }
+
+          await openFlowTab(cdp, sessionId)
+          const switchedOn = await setModEnter(cdp, sessionId, 'true')
+          await pressEscape(cdp, sessionId)
+          if (!switchedOn) {
+            fail('the send-key preference would not switch on')
+          } else {
+            await focusComposer(cdp, sessionId)
+            const beforeOn = (await composerState(cdp, sessionId)).text
+            await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 0 })
+            const afterOnEnter = await composerState(cdp, sessionId)
+            if (afterOnEnter.text === beforeOn + '\n') {
+              pass('with the switch on a plain Enter inserts a newline instead of sending')
+            } else {
+              fail('a plain Enter did not insert a newline while the switch was on: ' + JSON.stringify({ beforeOn, after: afterOnEnter.text }))
+            }
+            // Cmd/Ctrl+Enter must take the *submit* gesture: on an empty or
+            // whitespace-only draft that means no newline and no message.
+            await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 4 })
+            const afterOnMeta = await composerState(cdp, sessionId)
+            if (afterOnMeta.text === afterOnEnter.text) {
+              pass('Cmd+Enter takes the submit gesture, not the newline one')
+            } else {
+              fail('Cmd+Enter inserted a newline instead of submitting: ' + JSON.stringify({ before: afterOnEnter.text, after: afterOnMeta.text }))
+            }
+            await shoot(cdp, sessionId, 'send-key.png')
+
+            // Put the preference back where the run found it, then take the
+            // draft back to empty. Clearing is best effort: the draft lives in
+            // this throwaway browser profile either way.
+            await openFlowTab(cdp, sessionId)
+            const restoredSendKey = await setModEnter(cdp, sessionId, sendKeyStarted)
+            await pressEscape(cdp, sessionId)
+            if (restoredSendKey) pass('the send-key preference is left as the run found it (' + sendKeyStarted + ')')
+            else fail('the send-key preference was not restored to ' + sendKeyStarted)
+            await click(cdp, sessionId, '[data-composer-input]')
+            await evaluate(cdp, sessionId, `(() => {
+              const node = document.querySelector('[data-composer-input]');
+              if (node === null) return false;
+              node.focus();
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              const selection = window.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(range);
+              return true;
+            })()`)
+            await pressShortcut(cdp, sessionId, { key: 'Backspace', code: 'Backspace', virtualKeyCode: 8, modifiers: 0 })
+            const cleaned = await composerState(cdp, sessionId)
+            if (cleaned !== null && cleaned.text === '') pass('the composer is left empty')
+            else console.log('  NOTE  the throwaway browser left a draft behind: ' + JSON.stringify(cleaned === null ? null : cleaned.text))
+          }
+        }
       }
     }
 
