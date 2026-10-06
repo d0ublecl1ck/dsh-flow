@@ -2,15 +2,19 @@
 /**
  * Render dsh-flow's documentation assets from source.
  *
- * Two outputs, one run:
+ * Three outputs, one run (all hand-drawn diagrams, never screenshots):
  *
  *  - `assets/locate-flow.svg` — the hand-drawn explainer the README shows and
  *    the plugin market uses as the entry image. It is a **diagram, not a
  *    screenshot**: nothing in it comes from a real session, a real workspace, or
  *    a real account, which is exactly why it is safe to publish.
- *  - `assets/locate-flow.png` — the same drawing rasterised at 2x through a
- *    headless Chrome, because several marketplaces and package pages do not
- *    render SVG.
+ *  - `assets/code-menu.svg` — the inline-code right-click menu: the press, the
+ *    two entries, and the three conditions a press must satisfy before the
+ *    feature takes it (see `client.js` `codeMenuTarget`).
+ *  - `assets/link-open.svg` — the same `http://localhost` click before and after
+ *    the plugin, plus the host route's contract (see `index.js` `openRequestHandler`).
+ *  - `assets/*.png` — each drawing rasterised at 2x through a headless Chrome,
+ *    because several marketplaces and package pages do not render SVG.
  *
  * The drawing is generated from the data below rather than hand-edited in a
  * vector editor, so the three steps it shows can be kept in step with the code:
@@ -244,18 +248,160 @@ function drawing() {
     + parts.join('') + '</svg>\n'
 }
 
+/** One inline-code chip, optionally ringed as the pressed target. */
+const chip = (x, y, w, label, hot) => rect(x, y - 14, w, 24, { fill: '#f1f2f4', stroke: 'none', radius: 5 })
+  + '<text x="' + (x + 7) + '" y="' + (y + 3) + '" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12.5" fill="' + INK + '">' + esc(label) + '</text>'
+  + (hot
+    ? '<rect x="' + (x - 4) + '" y="' + (y - 18) + '" width="' + (w + 8) + '" height="32" rx="8" fill="none" stroke="' + ACCENT + '" stroke-width="1.2" stroke-dasharray="4 3"/>'
+    : '')
+
+/** The shell-style menu surface the right-click opens. */
+const menuSurface = (x, y, items) => rect(x, y, 190, 12 + items.length * 32, { radius: 10 })
+  + items.map((item, index) => {
+    const iy = y + 6 + index * 32
+    return rect(x + 6, iy, 178, 28, { fill: index === 0 ? '#f2f3f5' : 'none', stroke: 'none', radius: 7 })
+      + text(x + 16, iy + 19, item.label, { size: 13 })
+      + (item.hint ? text(x + 180, iy + 19, item.hint, { size: 12, fill: MUTED, anchor: 'end' }) : '')
+  }).join('')
+
+/** A window frame; `kind` picks the shell-internal window or a real browser. */
+const frame = (x, y, w, h, kind) => {
+  const bar = rect(x, y, w, 30, { fill: kind === 'browser' ? '#eef1f5' : '#f4f5f7', stroke: 'none', radius: 10 })
+  const dots = [0, 1, 2].map((i) => '<circle cx="' + (x + 16 + i * 12) + '" cy="' + (y + 15) + '" r="3" fill="#d3d7dd"/>').join('')
+  const body = rect(x, y + 30, w, h - 30, { fill: '#ffffff', stroke: 'none', radius: 0 })
+  const outline = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="10" fill="none" stroke="' + LINE + '"/>'
+  const label = kind === 'browser'
+    ? text(x + w - 12, y + 21, '系统默认浏览器', { size: 11, fill: MUTED, anchor: 'end' })
+    : text(x + w - 12, y + 21, '壳的内置窗口', { size: 11, fill: MUTED, anchor: 'end' })
+  return bar + body + dots + label + outline
+}
+
+/**
+ * The inline-code menu explainer: what a right-click opens, what each entry does,
+ * and what the feature deliberately refuses to touch.
+ *
+ * @returns the SVG document.
+ */
+function codeMenuDrawing() {
+  const parts = []
+  parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
+  parts.push(text(28, 44, '行内代码右键菜单：打开 / 复制', { size: 22, weight: 600 }))
+  parts.push(text(28, 68, '想复制代码里的路径时，不用再怕手一抖把文件点开（示意图，非截图）', { size: 13, fill: MUTED }))
+  const capW = 108
+  parts.push(rect(WIDTH - 28 - capW, 26, capW, 44, { fill: PANEL, radius: 10 }))
+  parts.push(text(WIDTH - 28 - capW / 2 - 54, 54, '右键 · 两项', { size: 15, weight: 600, anchor: 'middle' }))
+
+  // A: the press itself, on a mock transcript line.
+  const ax = 28
+  const ay = 100
+  const aw = 560
+  const ah = 296
+  parts.push(rect(ax, ay, aw, ah, { radius: 12 }))
+  parts.push(text(ax + 20, ay + 32, '对话正文', { size: 13, weight: 600 }))
+  parts.push(text(ax + 20, ay + 58, '把仓库放到本机任意位置，然后', { size: 13 }))
+  parts.push(chip(ax + 240, ay + 54, 168, '~/dsh-external-link', true))
+  parts.push(text(ax + 416, ay + 58, '就是宿主半边。', { size: 13 }))
+  // the press marker
+  parts.push('<path d="M' + (ax + 404) + ' ' + (ay + 66) + ' l0 16 l4 -4 l3 7 l3 -1 l-3 -7 l6 -1 z" fill="' + INK + '"/>')
+  parts.push(menuSurface(ax + 300, ay + 96, [{ label: '打开' }, { label: '复制', hint: '⌘C' }]))
+  parts.push(text(ax + 20, ay + 250, '菜单浮在光标处，用壳自己的 Menu 组件', { size: 11, fill: MUTED }))
+  parts.push(text(ax + 20, ay + 270, '↑↓/Home/End 移动 · ↵ 执行 · Esc 或点外面关闭', { size: 11, fill: MUTED }))
+
+  // B: what the two entries do.
+  const bx = 604
+  const bw = 568
+  parts.push(rect(bx, ay, bw, ah, { radius: 12 }))
+  parts.push(text(bx + 20, ay + 32, '两个动作分别是什么', { size: 13, weight: 600 }))
+  parts.push(rect(bx + 16, ay + 48, bw - 32, 96, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
+  parts.push(text(bx + 32, ay + 76, '打开', { size: 13, weight: 600, fill: ACCENT }))
+  parts.push(text(bx + 32, ay + 98, '对同一个元素派发一次普通左键 click —— 完全是壳自己的链路；', { size: 12 }))
+  parts.push(text(bx + 32, ay + 118, '侧栏预览、文件管理器还是系统默认程序，由壳决定，本插件不插手。', { size: 12 }))
+  parts.push(rect(bx + 16, ay + 156, bw - 32, 96, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
+  parts.push(text(bx + 32, ay + 184, '复制', { size: 13, weight: 600, fill: ACCENT }))
+  parts.push(text(bx + 32, ay + 206, '把这段代码的原文写进剪贴板，成功或失败都有顶部横幅。', { size: 12 }))
+  parts.push(text(bx + 32, ay + 226, '剪贴板拒绝写入时如实报失败，不静默。', { size: 12 }))
+
+  // C: the boundary.
+  const cy = 424
+  parts.push(rect(ax, cy, WIDTH - 56, 168, { radius: 12 }))
+  parts.push(text(ax + 20, cy + 32, '命中条件（三条同时成立才接管这次右键）', { size: 13, weight: 600 }))
+  parts.push(text(ax + 20, cy + 58, '① 目标在 <code> 内，且祖先含 _markdown_（正文渲染出来的行内代码）', { size: 12 }))
+  parts.push(text(ax + 20, cy + 80, '② 不在 pre（多行代码块）/ [contenteditable]（输入框与快捷键编辑器）/ <a href>（链接另有归属）里', { size: 12 }))
+  parts.push(text(ax + 20, cy + 102, '③ 文本去掉空白后非空', { size: 12 }))
+  parts.push(rect(ax + 16, cy + 118, WIDTH - 88, 34, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(ax + 32, cy + 140, '只监听 contextmenu，绝不注册或拦截 click；开关关掉时连监听都不注册。', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(28, HEIGHT - 16, '单击行为一个字没改：壳自己的左键链路照旧；本功能只在右键上多给一个选择。', { size: 11, fill: MUTED }))
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：行内代码右键菜单的命中条件与两个动作">'
+    + parts.join('') + '</svg>\n'
+}
+
+/**
+ * The link-destination explainer: the same `http://localhost` click, before and
+ * after the plugin, plus the host route contract that makes it possible.
+ *
+ * @returns the SVG document.
+ */
+function linkDrawing() {
+  const parts = []
+  parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
+  parts.push(text(28, 44, '点链接：交给系统默认程序', { size: 22, weight: 600 }))
+  parts.push(text(28, 68, '重点是 http://localhost —— 壳本来会把它开进一个内置窗口（示意图，非截图）', { size: 13, fill: MUTED }))
+  const capW = 118
+  parts.push(rect(WIDTH - 28 - capW, 26, capW, 44, { fill: PANEL, radius: 10 }))
+  parts.push(text(WIDTH - 28 - capW / 2, 54, '零配置', { size: 15, weight: 600, anchor: 'middle' }))
+  const py = 104
+  const ph = 300
+  const pw = 520
+  // before
+  parts.push(rect(28, py, pw, ph, { radius: 12 }))
+  parts.push(text(48, py + 32, '壳默认：内置窗口', { size: 14, weight: 600, fill: MUTED }))
+  parts.push(chip(48, py + 68, 208, 'http://localhost:5173', false))
+  parts.push(frame(48, py + 92, pw - 40, 176, 'inapp'))
+  parts.push(text(64, py + 146, '光秃秃的一个窗口', { size: 12, fill: MUTED }))
+  parts.push(text(64, py + 168, '没有标签页、没有扩展、没有登录态', { size: 12, fill: MUTED }))
+  // arrow
+  parts.push(text(568, py + 150, '→', { size: 22, fill: MUTED, anchor: 'middle' }))
+  parts.push(text(568, py + 174, '宿主', { size: 11, fill: MUTED, anchor: 'middle' }))
+  // after
+  parts.push(rect(652, py, pw, ph, { radius: 12 }))
+  parts.push(text(672, py + 32, '装了本插件：系统默认程序', { size: 14, weight: 600, fill: ACCENT }))
+  parts.push(chip(672, py + 68, 208, 'http://localhost:5173', true))
+  parts.push(frame(672, py + 92, pw - 40, 176, 'browser'))
+  parts.push(text(688, py + 146, '你平时那个浏览器', { size: 12, fill: MUTED }))
+  parts.push(text(688, py + 168, '标签页、扩展、登录态都在', { size: 12, fill: MUTED }))
+  // contract
+  const cy = 428
+  parts.push(rect(28, cy, WIDTH - 56, 164, { radius: 12 }))
+  parts.push(text(48, cy + 32, '宿主路由 POST /flow/open-external 的边界', { size: 13, weight: 600 }))
+  parts.push(text(48, cy + 58, '只放行 http / https / mailto / tel；未认证 401；只接受 POST（405）；请求体 16KB（413）；URL ≤ 8192（400）', { size: 12 }))
+  parts.push(text(48, cy + 80, '只把 new URL() 解析后的 href 交给打开器（macOS open / Windows start / Linux xdg-open），原始字符串不进程命令行', { size: 12 }))
+  parts.push(text(48, cy + 102, '同源链接、其它协议（file: / javascript: / data: / 相对路径）一律放行，应用内跳转照旧', { size: 12 }))
+  parts.push(rect(44, cy + 118, WIDTH - 88, 32, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(60, cy + 139, '宿主答不了（旧版宿主 / 路由不可用）时，点击回退到页面自己的 window.open —— 不会变成「点了没反应」。', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(28, HEIGHT - 16, '插件自身不访问外部网络；唯一副作用是把一个 URL 交给操作系统的默认程序。', { size: 11, fill: MUTED }))
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：点链接交给系统默认程序（含 localhost）与宿主路由边界">'
+    + parts.join('') + '</svg>\n'
+}
 /**
  * Rasterise one local file through a throwaway headless Chrome.
  *
  * Chrome writes the screenshot and then, on this platform, sometimes keeps the
  * process alive instead of exiting; waiting only on `exit` hung a real run. So
  * the wait is bounded by the screenshot appearing on disk, and the process is
- * killed either way — the profile directory is removed unconditionally.
+ * killed either way. Two things this has to get right, both learned by running
+ * it: the destination is **deleted first**, or a PNG from an earlier run
+ * satisfies the wait before Chrome has written anything and the stale image
+ * ships; and the profile removal is **retried after the process is gone**,
+ * because a bare `rmSync` right after the kill loses the race and throws
+ * `ENOTEMPTY` out of a run that had already produced every asset.
  *
  * @param svgPath - the SVG source to render.
  * @param pngPath - destination PNG.
  */
 async function rasterise(svgPath, pngPath) {
+  rmSync(pngPath, { force: true })
   const profile = mkdtempSync(join(tmpdir(), 'dsh-flow-assets-'))
   const chrome = spawn(chromePath, [
     '--headless=new',
@@ -279,20 +425,40 @@ async function rasterise(svgPath, pngPath) {
       await new Promise((done) => setTimeout(done, 200))
     }
   } finally {
-    chrome.kill('SIGKILL')
-    rmSync(profile, { recursive: true, force: true })
+    if (chrome.exitCode === null) chrome.kill('SIGKILL')
+    const exited = Date.now() + 10000
+    while (chrome.exitCode === null && chrome.signalCode === null && Date.now() < exited) {
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        rmSync(profile, { recursive: true, force: true })
+        break
+      } catch {
+        await new Promise((done) => setTimeout(done, 200))
+      }
+    }
   }
 }
+
+/** Every asset this repo publishes, in the order it renders them. */
+const ASSETS = [
+  { name: 'locate-flow', draw: drawing },
+  { name: 'code-menu', draw: codeMenuDrawing },
+  { name: 'link-open', draw: linkDrawing },
+]
 
 async function main() {
   if (!existsSync(chromePath)) throw new Error('Chrome not found; pass --chrome <path>')
   mkdirSync(join(ROOT, 'assets'), { recursive: true })
-  const svgPath = join(ROOT, 'assets', 'locate-flow.svg')
-  const pngPath = join(ROOT, 'assets', 'locate-flow.png')
-  writeFileSync(svgPath, drawing())
-  console.log('wrote ' + svgPath)
-  await rasterise(svgPath, pngPath)
-  console.log('wrote ' + pngPath)
+  for (const asset of ASSETS) {
+    const svgPath = join(ROOT, 'assets', asset.name + '.svg')
+    const pngPath = join(ROOT, 'assets', asset.name + '.png')
+    writeFileSync(svgPath, asset.draw())
+    console.log('wrote ' + svgPath)
+    await rasterise(svgPath, pngPath)
+    console.log('wrote ' + pngPath)
+  }
 }
 
 await main()

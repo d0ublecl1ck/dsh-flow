@@ -122,7 +122,7 @@ curl -s -H "Cookie: <现签的会话 Cookie>" http://127.0.0.1:43129/ | grep -c 
 ## 发布与上架（2026-10-04 实拉门槛）
 
 - **包名已被占用，且已决定不改名**：npm `dsh-flow` 属另一位作者（`tudamu`，v0.0.1），插件市场里 `weibaohui/dsh-flow` 是执行流程图。因此本仓库**不发 npm**（`private: true` 保留，也顺带防止误发），用户在 npm 上搜到的 `dsh-flow` 不是本插件。
-- **唯一投稿仓库**：`awesome-dsh-plugin/awesome-dsh-plugin`。Fork 后只加一个文件 `data/plugins/<owner>__<repo>.yml`（每个 PR 最多 3 条），字段只有 `url` / `name` / `category` / `description.en` / `description.zh` / `tarball`；含 `: ` 的描述必须加引号。`dsh-market/dsh-market` 明文不收稿。
+- **唯一投稿仓库**：`awesome-dsh-plugin/awesome-dsh-plugin`。**一个文件就是全部投稿**：`data/plugins/<owner>__<repo>.yml`，字段只有 `url`（必须与仓库完全一致）/ `name`（列表里的链接文字）/ `category` / `description.en`（必填）/ `description.zh`（可选，缺了维护者会补）。**没有 `tarball` 字段**（2026-10-07 实拉 contributing.md 核对；本文件此前记的字段清单已过期）。含 `: ` 的描述必须加引号，否则 YAML 当成嵌套键。两个 README 由脚本从 `data/plugins/*.yml` 生成，**不要手工编辑**；`dsh-market/dsh-market` 明文不收稿。
 - **硬性门槛**：① `package.json` 必须声明 `dsh.bundle`（只声明 `dsh.client` 是最常见被拒原因）；② 仓库有真实代码；③ **仓库创建满 1 天**（CI 自动校验，无提交数门槛）；④ 加 `dsh-plugin` topic；⑤ 描述必须与代码核对属实，不带营销词；⑥ `category` 从 23 个枚举里挑最贴合的（本插件建议 `ui`）。CI 通过只是前置条件，合并前有人读仓库。
 - **peer 范围必须带显式预发布分支**：`^0.2.0-rc.2` 命中 `0.2.0-rc.2`，而看起来更宽的 `>=0.1.0-rc.1 <0.3.0-0` **不命中**（本机 semver 7.8.5 实测）——范围里必须有与目标 `major.minor.patch` 元组相同且自带预发布标签的比较符。本仓库的 peer 全标 `optional: true`，避免在不匹配的 harness 上硬失败。
 - **远端已建**（2026-10-07）：`git@github.com:d0ublecl1ck/dsh-flow`，公开仓库 + `dsh-plugin` topic，`package.json` 的 `repository` / `homepage` 已补。剩下的是「仓库创建满 1 天」这条 CI 门槛——到期后按上面格式提 PR 到 `awesome-dsh-plugin/awesome-dsh-plugin`。
