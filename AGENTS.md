@@ -43,7 +43,9 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 对话正文里的行内代码（`dsh-client-ui-primitives` 的 markdown 渲染器，`inlineCode` → `<code>`）右键浮出一个两项菜单。三件事必须同时成立，实现也就长成了现在的样子：
 
-- **只监听 `contextmenu`，绝不碰 `click`**：单击打开的链路是壳自己的（`MarkdownDelegateProvider` 注入 `openFile`），本插件对左键零介入。监听注册在 `document` 的捕获阶段，命中就 `preventDefault() + stopPropagation()` 把这次右键从壳手里拿走，没命中一行都不动。
+- **右键只监听 `contextmenu`；左键只在一种情况下接管**：路径存在时本插件对左键零介入，单击打开的链路仍是壳自己的（`MarkdownDelegateProvider` 注入的 `openFile`）；只有判定**路径不存在**时才 `preventDefault() + stopPropagation()`，换成一条不会打断操作的提示，替掉壳那个必须点掉的「path open failed」弹窗。两个监听都注册在 `document` 捕获阶段，没命中一行都不动。
+- **顺序不能反过来：先接管，再探测。** `preventDefault()` 只在事件还在派发时才有意义，而探测是宿主往返；所以按下先被接管，探测回来发现路径存在时用 `activateInlineCode()` **重新派发**壳的那次激活。试图「先 await 探测、不存在再 preventDefault」是无效实现——等探测回来事件早已派发完毕。
+- **fail open 是硬要求**：探测接口拿不到、抛错、超时、或返回的失败不是「不存在」那一类时，一律走「重新派发」这条路。宁可让用户继续看到壳的弹窗，也不允许把存在的路径判成不存在（那会让一个本来能打开的文件彻底点不开）。
 - **开关关闭时不注册监听**（不是注册了再判断）：`ctx.configForms` 的表单有 `subscribe`，把它当 Host 回声用 —— `readCodeMenuEnabled` 翻到 false 就 detach，翻回 true 再 attach。`tests/client.test.mjs` 有断言钉住这条：关闭后 `document` 上根本不存在 `contextmenu` 监听。
 - **「打开」是合成一次普通左键 `click`**，不自己调 RPC：这样「侧栏预览还是系统默认程序」的分叉留在壳里。
 
@@ -67,6 +69,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
 - 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts`；宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
+- 存在性探测：宿主 remote `workspaceFiles.stat(sessionId, path, signal)`（位置参数，第一个是会话 id，descriptor 里叫 `workspaceFileScope`）。**它返回 Result 信封** `{ok:true,value}` / `{ok:false,error}`，不是抛错——「不存在」是值不是异常，所以判定读 `error.code` / `error.message` 是否含 not-found 一类字样；其余失败归为 unknown。调用点原文见官方包 `workspaceFiles.stat(sessionId, path, signal)`。探测带 2s 上限，超时按 unknown 处理。
 - 模块：`@deepseek-ai/dsh-client-ui-primitives` 是动态客户端包的隐式 baseline external，本轮用到 `MenuItemButton` / `Toast` / `writeClipboard`（同一个 `require`）。`writeClipboard` 只出现在导出清单里，官方 README 没写它 —— 它不存在时症状是复制永远报失败，所以改动后要跑真浏览器验收，不能只看单测。
 - 复制行直接用官方包里的 `IconCopyOutlineRegular`，**没有**内联进本仓库，因此 `THIRD-PARTY-NOTICES.md` 不需要新增条目；`LocateIcon` 的内联约定不受影响。
 - CSS-module 的 local name（`sectionHeader` 等）比构建哈希稳定，这是唯一被依赖的脆弱点。官方改这些名字中的任何一个，症状都是**静默失效**（按钮不出现、定位不动作、设置行消失），所以每次动完必须跑 `npm run verify:browser`，而不是只看单测。

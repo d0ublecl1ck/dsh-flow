@@ -534,7 +534,7 @@ test('readCodeMenuEnabled defaults to on and only an explicit false turns it off
   assert.equal(readCodeMenuEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
 })
 
-test('the inline-code listener exists only while the preference is on', async () => {
+test('the inline-code listeners exist only while the preference is on', async () => {
   const module = await load()
   const added = []
   const removed = []
@@ -548,19 +548,25 @@ test('the inline-code listener exists only while the preference is on', async ()
   try {
     const form = fakeForm({ codeMenu: true })
     module.apply(fakeContext([], [], { form }))
-    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true]])
+    // `click` first is the off-origin link hand-off, which is a separate
+    // feature; the menu press and the path press are the two below it.
+    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true]])
 
-    // A Host echo that turns the feature off detaches the listener instead of
-    // leaving one behind that decides to do nothing.
+    // A Host echo that turns the feature off detaches both listeners instead of
+    // leaving ones behind that decide to do nothing.
     form.publish({ codeMenu: false })
-    assert.deepEqual(removed, [{ type: 'contextmenu', listener: added[1].listener, capture: true }])
+    assert.deepEqual(removed, [
+      { type: 'contextmenu', listener: added[1].listener, capture: true },
+      { type: 'click', listener: added[2].listener, capture: true },
+    ])
     form.publish({ codeMenu: false })
-    assert.equal(removed.length, 1, 'an already detached listener is not removed twice')
+    assert.equal(removed.length, 2, 'already detached listeners are not removed twice')
 
-    // Turning it back on binds the listener again, and nothing else.
+    // Turning it back on binds both again, and nothing else.
     form.publish({ codeMenu: true })
-    assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'contextmenu'])
-    assert.equal(added[2].capture, true)
+    assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'click', 'contextmenu', 'click'])
+    assert.equal(added[3].capture, true)
+    assert.equal(added[4].capture, true)
   } finally {
     delete globalThis.document
   }
@@ -846,7 +852,7 @@ test('handleAnchorClick falls back to the page when the host cannot be reached',
   assert.deepEqual(fellBack, ['https://example.com/x'])
 })
 
-test('apply listens for anchor clicks and inline-code context menus in the capture phase, and stops on dispose', async () => {
+test('apply listens for anchor clicks, inline-code context menus and path presses in the capture phase, and stops on dispose', async () => {
   const module = await load()
   const listeners = []
   const removed = []
@@ -860,15 +866,16 @@ test('apply listens for anchor clicks and inline-code context menus in the captu
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // The link hand-off and the inline-code menu are two separate capture-phase
-    // listeners: neither can be reached through the other's registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true]])
+    // Three separate capture-phase listeners: the link hand-off, the menu press,
+    // and the path press. None can be reached through another's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true]])
     assert.deepEqual(removed, [])
-    // Both listeners are registered by an effect, so the fiber owns their lifetime.
+    // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
     assert.deepEqual(removed, [
       { type: 'click', listener: listeners[0].listener },
       { type: 'contextmenu', listener: listeners[1].listener },
+      { type: 'click', listener: listeners[2].listener },
     ])
   } finally {
     delete globalThis.document
@@ -959,3 +966,134 @@ function fakeContext(registrations, effects, { served = true, commands = [], rec
   }
   return ctx
 }
+
+// --- 单击一个不存在的路径：接管这一下，改成非阻塞提示 ---------------------
+
+/** One inline `code` the shell wired a button into, plus its press. */
+function clickableCode({ text = "src/app.ts", ...options } = {}) {
+  const hit = inlineCode({ text, ...options })
+  const button = { nodeType: 1, tagName: "BUTTON" }
+  hit.element.querySelector = (selector) => (selector === "button" ? button : null)
+  hit.button = button
+  return hit
+}
+
+/** A plain left press that landed on one inline `code`. */
+function leftPress(hit, overrides = {}) {
+  const press = {
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { press.prevented += 1 },
+    stopPropagation() { press.stopped += 1 },
+    ...hit.event,
+    ...overrides,
+  }
+  return press
+}
+
+/** Collect the calls one handled press made. */
+function pressSpy(stat) {
+  const opened = []
+  const notices = []
+  return {
+    opened,
+    notices,
+    input: {
+      stat,
+      open: (element) => { opened.push(element) },
+      notify: (text, tone) => { notices.push({ text, tone }) },
+      t: (key) => key,
+    },
+  }
+}
+
+test("an openable inline code is the only thing a plain left press is probed for", async () => {
+  const { codeOpenTarget } = (await load()).internals
+  const hit = clickableCode({ text: "  src/app.ts\n" })
+  assert.deepEqual(codeOpenTarget(leftPress(hit)), { element: hit.element, text: "src/app.ts" })
+
+  // A fenced block, the composer, an anchor and a whitespace-only code are out of scope.
+  assert.equal(codeOpenTarget(leftPress(clickableCode({ pre: true }))), null)
+  assert.equal(codeOpenTarget(leftPress(clickableCode({ editable: true }))), null)
+  assert.equal(codeOpenTarget(leftPress(clickableCode({ anchor: true }))), null)
+  assert.equal(codeOpenTarget(leftPress(clickableCode({ text: "   " }))), null)
+  assert.equal(codeOpenTarget(leftPress(clickableCode({ markdown: false }))), null)
+  assert.equal(codeOpenTarget(leftPress(clickableCode({ node: false }))), null)
+  // A code the shell did not make clickable has nothing to open, so it must not
+  // cost a Host round trip.
+  const inert = inlineCode({ text: "npm test" })
+  inert.element.querySelector = () => null
+  assert.equal(codeOpenTarget(leftPress(inert)), null)
+  // Modified presses belong to the browser and to other gestures.
+  assert.equal(codeOpenTarget(leftPress(hit, { metaKey: true })), null)
+  assert.equal(codeOpenTarget(leftPress(hit, { ctrlKey: true })), null)
+  assert.equal(codeOpenTarget(leftPress(hit, { shiftKey: true })), null)
+  assert.equal(codeOpenTarget(leftPress(hit, { altKey: true })), null)
+  assert.equal(codeOpenTarget(leftPress(hit, { button: 1 })), null)
+  // A press the page dispatched itself — this plugin's own re-dispatch, or the
+  // menu's 「打开」 — is already an explicit instruction; claiming it again would
+  // claim the re-dispatch as well and never stop.
+  assert.equal(codeOpenTarget(leftPress(hit, { isTrusted: false })), null)
+})
+
+test("a press on a path that does not exist becomes a notice instead of the shell open", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const hit = clickableCode({ text: "data/plugins/missing.yml" })
+  const press = leftPress(hit)
+  const spy = pressSpy(() => Promise.resolve({ ok: false, error: { code: "workspace-files/not-found", message: "no such file" } }))
+
+  assert.equal(await handleInlineCodeClick(press, spy.input), "missing")
+  assert.equal(press.prevented, 1, "the shell must not be allowed to open a path that is not there")
+  assert.equal(press.stopped, 1)
+  assert.deepEqual(spy.opened, [], "nothing may be re-dispatched for a missing path")
+  assert.equal(spy.notices.length, 1)
+  assert.equal(spy.notices[0].tone, "warning")
+  assert.match(spy.notices[0].text, /data\/plugins\/missing\.yml/)
+})
+
+test("a press on a path that exists is handed straight back to the shell", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const hit = clickableCode({ text: "client.js" })
+  const press = leftPress(hit)
+  const spy = pressSpy(() => Promise.resolve({ ok: true, value: { absolutePath: "/w/client.js" } }))
+
+  assert.equal(await handleInlineCodeClick(press, spy.input), "open")
+  assert.equal(press.prevented, 1, "the press is taken first, because the probe is a round trip")
+  assert.deepEqual(spy.opened, [hit.element], "the shell activation is re-dispatched unchanged")
+  assert.deepEqual(spy.notices, [])
+})
+
+test("anything the probe cannot answer opens the shell path (never a false notice)", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const failures = [
+    () => Promise.resolve({ ok: false, error: { code: "gateway/internal", message: "host is away" } }),
+    () => Promise.resolve(undefined),
+    () => Promise.reject(new Error("the probe blew up")),
+  ]
+  for (const stat of failures) {
+    const hit = clickableCode({ text: "client.js" })
+    const press = leftPress(hit)
+    const spy = pressSpy(stat)
+    assert.equal(await handleInlineCodeClick(press, spy.input), "open")
+    assert.deepEqual(spy.notices, [], "an unknown verdict must never claim the path is missing")
+    assert.deepEqual(spy.opened, [hit.element])
+  }
+})
+
+test("a press this plugin does not own costs nothing", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const inert = inlineCode({ text: "npm test" })
+  inert.element.querySelector = () => null
+  const press = leftPress(inert)
+  const spy = pressSpy(() => { throw new Error("the probe must not run") })
+
+  assert.equal(await handleInlineCodeClick(press, spy.input), "pass")
+  assert.equal(press.prevented, 0)
+  assert.equal(press.stopped, 0)
+  assert.deepEqual(spy.opened, [])
+})

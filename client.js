@@ -639,6 +639,96 @@ window.__ModuleLoader__.load({
       return true
     }
 
+    /** Whether this press is a plain left click — the only gesture this feature may take. */
+    function isPlainLeftPress(event) {
+      if (event === null || typeof event !== "object") return false
+      if (event.button !== undefined && event.button !== 0) return false
+      if (event.metaKey === true || event.ctrlKey === true) return false
+      if (event.shiftKey === true || event.altKey === true) return false
+      return true
+    }
+
+    /**
+     * The inline `code` a plain left press is about to open.
+     *
+     * The same scope as the menu (`codeMenuTarget`), narrowed by one more fact:
+     * only a `code` the shipped renderer wired a control into has anything to
+     * open. An inert `code` — plain prose — keeps today's behaviour and costs no
+     * round trip at all.
+     *
+     * @param event - the document `click` event.
+     * @returns `{element, text}`, or null when this press is not ours to consider.
+     */
+    function codeOpenTarget(event) {
+      if (!isPlainLeftPress(event)) return null
+      // A press the page dispatched itself — this plugin's own re-dispatch, or
+      // the menu's 「打开」 — is already an explicit instruction. Claiming it
+      // again would claim the re-dispatch too, and that loop never ends.
+      if (event.isTrusted === false) return null
+      const hit = codeMenuTarget(event)
+      if (hit === null) return null
+      if (typeof hit.element.querySelector !== "function") return null
+      if (!isElement(hit.element.querySelector("button"))) return null
+      return hit
+    }
+
+    /**
+     * Read one answer from the workspace-files probe.
+     *
+     * The remote answers a Result envelope, so a path that is not there arrives as
+     * `{ok: false, error}` rather than as a rejection. Only a failure that *says*
+     * the path is absent counts as missing; every other answer — including a host
+     * that is away — stays unknown and is handed back to the shell, because this
+     * feature must never hide a path that exists.
+     *
+     * @param result - whatever the probe answered.
+     * @returns `present`, `missing`, or `unknown`.
+     */
+    function statVerdict(result) {
+      if (result !== null && typeof result === "object" && result.ok === true) return "present"
+      const error = result !== null && typeof result === "object" ? result.error : null
+      const code = String(error?.code ?? "")
+      const message = String(error?.message ?? "")
+      if (/not[-_ ]?found|enoent|no such file/i.test(code + " " + message)) return "missing"
+      return "unknown"
+    }
+
+    /**
+     * Handle one left press that landed on inline code.
+     *
+     * The press is taken *before* the probe, and that order is the whole design:
+     * `preventDefault` only means anything while the event is still being
+     * dispatched, while the probe is a Host round trip. So a press is claimed
+     * first and the shell activation is re-dispatched when the path turns out to
+     * exist — the click the user gets is the shipped one, one round trip later.
+     * A path that is definitely absent is the single case that becomes a notice
+     * instead, which replaces the shell's blocking "path open failed" dialog.
+     *
+     * @param event - the document `click` event.
+     * @param input.stat - `(text) => Promise<probe result>`.
+     * @param input.open - re-dispatch the shell activation for one element.
+     * @param input.notify - raise a notice.
+     * @param input.t - the plugin's localized copy.
+     * @returns `pass` (not ours), `missing` (noticed), or `open` (handed back).
+     */
+    function handleInlineCodeClick(event, input) {
+      const hit = codeOpenTarget(event)
+      if (hit === null) return Promise.resolve("pass")
+      event.preventDefault()
+      event.stopPropagation()
+      return Promise.resolve()
+        .then(() => input.stat(hit.text))
+        .then((result) => statVerdict(result), () => "unknown")
+        .then((verdict) => {
+          if (verdict === "missing") {
+            input.notify(input.t("linkMissing.notice") + " " + hit.text, "warning")
+            return "missing"
+          }
+          input.open(hit.element)
+          return "open"
+        })
+    }
+
     /**
      * The one-slot seat the inline-code menu renders from.
      *
@@ -955,6 +1045,7 @@ window.__ModuleLoader__.load({
       'codeMenu.copy': '复制',
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
+      'linkMissing.notice': '找不到这个路径',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
       'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
@@ -983,6 +1074,7 @@ window.__ModuleLoader__.load({
       'codeMenu.copy': 'Copy',
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
+      'linkMissing.notice': 'No such path',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
       'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
@@ -1469,6 +1561,28 @@ window.__ModuleLoader__.load({
           document.addEventListener('click', onClick, true)
           return () => { document.removeEventListener('click', onClick, true) }
         }, 'flow: external links')
+        // The existence probe behind the left-press takeover. The shell's own
+        // workspace-files remote answers a Result envelope, so "not there" is a
+        // value rather than an exception. A probe that cannot answer inside the
+        // deadline is treated as unknown, which re-dispatches the shell
+        // activation instead of hiding a path that may well exist.
+        const LINK_STAT_DEADLINE_MS = 2000
+        const readInlineCodeStat = (text) => {
+          const sessionId = currentSessionId(sessions.getSnapshot())
+          const stat = ctx.remote?.workspaceFiles?.stat
+          if (sessionId === null || typeof stat !== 'function') return Promise.resolve(null)
+          let timer = null
+          const deadline = new Promise((resolve) => {
+            timer = setTimeout(() => { resolve(null) }, LINK_STAT_DEADLINE_MS)
+          })
+          const probe = Promise.resolve()
+            .then(() => stat.call(ctx.remote.workspaceFiles, sessionId, text))
+            .then((result) => result, () => null)
+          return Promise.race([probe, deadline]).then((result) => {
+            if (timer !== null) clearTimeout(timer)
+            return result
+          })
+        }
         // The inline-code menu: one capture-phase listener for the whole page,
         // and only while the preference is on. An off feature adds no listener
         // at all rather than a listener that decides to do nothing, and the
@@ -1490,8 +1604,25 @@ window.__ModuleLoader__.load({
             const onContextMenu = (event) => {
               handleCodeContextMenu(event, { open: (hit) => { codeMenu.open(hit) } })
             }
+            // A left press on a file mention is claimed here, probed, and handed
+            // back to the shell when the path exists — see
+            // :func:`handleInlineCodeClick` for why the order is this way.
+            const onClick = (event) => {
+              handleInlineCodeClick(event, {
+                stat: (text) => readInlineCodeStat(text),
+                open: (element) => {
+                  activateInlineCode(element, element?.ownerDocument?.defaultView)
+                },
+                notify,
+                t,
+              })
+            }
             document.addEventListener('contextmenu', onContextMenu, true)
-            detach = () => { document.removeEventListener('contextmenu', onContextMenu, true) }
+            document.addEventListener('click', onClick, true)
+            detach = () => {
+              document.removeEventListener('contextmenu', onContextMenu, true)
+              document.removeEventListener('click', onClick, true)
+            }
           }
           sync()
           const unsubscribe = config.subscribe(sync)
@@ -1618,6 +1749,10 @@ window.__ModuleLoader__.load({
         createCodeMenuStore,
         cursorRect,
         readCodeMenuEnabled,
+        isPlainLeftPress,
+        codeOpenTarget,
+        statVerdict,
+        handleInlineCodeClick,
       },
     }
   },
