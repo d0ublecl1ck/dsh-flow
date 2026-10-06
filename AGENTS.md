@@ -125,7 +125,7 @@ curl -s -H "Cookie: <现签的会话 Cookie>" http://127.0.0.1:43129/ | grep -c 
 - **唯一投稿仓库**：`awesome-dsh-plugin/awesome-dsh-plugin`。Fork 后只加一个文件 `data/plugins/<owner>__<repo>.yml`（每个 PR 最多 3 条），字段只有 `url` / `name` / `category` / `description.en` / `description.zh` / `tarball`；含 `: ` 的描述必须加引号。`dsh-market/dsh-market` 明文不收稿。
 - **硬性门槛**：① `package.json` 必须声明 `dsh.bundle`（只声明 `dsh.client` 是最常见被拒原因）；② 仓库有真实代码；③ **仓库创建满 1 天**（CI 自动校验，无提交数门槛）；④ 加 `dsh-plugin` topic；⑤ 描述必须与代码核对属实，不带营销词；⑥ `category` 从 23 个枚举里挑最贴合的（本插件建议 `ui`）。CI 通过只是前置条件，合并前有人读仓库。
 - **peer 范围必须带显式预发布分支**：`^0.2.0-rc.2` 命中 `0.2.0-rc.2`，而看起来更宽的 `>=0.1.0-rc.1 <0.3.0-0` **不命中**（本机 semver 7.8.5 实测）——范围里必须有与目标 `major.minor.patch` 元组相同且自带预发布标签的比较符。本仓库的 peer 全标 `optional: true`，避免在不匹配的 harness 上硬失败。
-- **当前差距**：仓库还没有 GitHub 远端（`git remote -v` 为空），所以 ③ 与 ④ 只能等仓库建好之后；`repository` 字段也因此暂缺。下一位维护者：建仓库 → 加 topic → 次日提 PR。
+- **远端已建**（2026-10-07）：`git@github.com:d0ublecl1ck/dsh-flow`，公开仓库 + `dsh-plugin` topic，`package.json` 的 `repository` / `homepage` 已补。剩下的是「仓库创建满 1 天」这条 CI 门槛——到期后按上面格式提 PR 到 `awesome-dsh-plugin/awesome-dsh-plugin`。
 - **`@deepseek-ai/schemastery` 留在 `dependencies`**（不是 peer）：它是库、不是宿主服务，profile 里必须实际装到；同类已发布的 `dsh-session-radar` 同样处理。
 
 ## 与官方规则的边界
