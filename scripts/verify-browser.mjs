@@ -457,8 +457,53 @@ const COPY_PROBE = `(() => {
  */
 const NOTICE_VISIBLE = `[...document.querySelectorAll('[role="alert"]')].some((n) => n.textContent.includes('已复制会话 ID'))`
 
-/** Open 设置 → 心流 and wait for its body. */
+/**
+ * Wait until one element's box has stopped moving.
+ *
+ * A dialog slides in. A press measured mid-animation lands where the control no
+ * longer is, which is indistinguishable from a control that does nothing — the
+ * exact shape of the "the copy preference did not come back" red herring. The
+ * caller wants the layout to be still before anything measures it.
+ *
+ * @param selector - the element whose box must settle.
+ * @returns its last measured box, even if the wait ran out.
+ */
+async function waitForStill(cdp, sessionId, selector) {
+  const expression = `(() => {
+    const node = document.querySelector(${JSON.stringify(selector)});
+    if (node === null) return null;
+    const rect = node.getBoundingClientRect();
+    return { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) };
+  })()`
+  let previous = null
+  const deadline = Date.now() + 4000
+  for (;;) {
+    const box = await evaluate(cdp, sessionId, expression)
+    if (box !== null && previous !== null
+      && box.x === previous.x && box.y === previous.y && box.w === previous.w && box.h === previous.h) {
+      return box
+    }
+    previous = box
+    if (Date.now() > deadline) return box
+    await sleep(150)
+  }
+}
+
+/**
+ * Open 设置 → 心流 and wait for its body.
+ *
+ * The close path is a fade-out, not an unmount: a settings button pressed while
+ * the previous dialog is still going away closes the *new* one, and the body it
+ * leaves behind for a few frames is enough for every wait below to pass while
+ * the next press lands on a node React is about to remove. So a leftover dialog
+ * is dismissed first, and the one that opens has to stop moving before this
+ * returns.
+ */
 async function openFlowTab(cdp, sessionId) {
+  if (await evaluate(cdp, sessionId, 'document.querySelector(\'[role="dialog"]\') !== null')) {
+    await pressEscape(cdp, sessionId)
+    await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"]\') === null', 'the previous settings dialog to close').catch(() => {})
+  }
   await click(cdp, sessionId, '[data-slot="sidebar.settings"] button')
   await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"] nav button\') !== null', 'the settings dialog')
   const centre = await evaluate(cdp, sessionId, `(() => {
@@ -472,6 +517,7 @@ async function openFlowTab(cdp, sessionId) {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
   await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"] .flow-row__title\') !== null', 'the 心流 page body')
+  await waitForStill(cdp, sessionId, '[role="dialog"] .flow-row__title')
 }
 
 /** The call every plugin's browser half makes to register itself. */
