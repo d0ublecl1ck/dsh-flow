@@ -192,23 +192,45 @@ async function waitFor(cdp, sessionId, expression, label, timeoutMs = config.tim
 }
 
 /** Click an element the way a person does: hit-tested pointer events, not element.click(). */
-async function click(cdp, sessionId, selector) {
-  // A dialog body scrolls: bring the target into view the way a person would
-  // before measuring it, or the press lands on whatever is actually there.
+/**
+ * Aim at one element: scroll it in, then wait until a press at its centre would
+ * actually land on it.
+ *
+ * A dialog's entrance animation moves a control out from under a centre that was
+ * measured a frame earlier, and a press that lands on whatever is covering the
+ * target is indistinguishable from a press that did nothing. Measuring,
+ * hit-testing and retrying is what keeps a green run honest.
+ *
+ * @param selector - the element to aim at.
+ * @returns the hit-tested centre.
+ */
+async function aim(cdp, sessionId, selector) {
   await evaluate(cdp, sessionId, `(() => {
     const target = document.querySelector(${JSON.stringify(selector)});
     if (target !== null) target.scrollIntoView({ block: 'nearest' });
     return true;
   })()`)
-  await sleep(150)
-  const centre = await evaluate(cdp, sessionId, `(() => {
-    const target = document.querySelector(${JSON.stringify(selector)});
-    if (target === null) return null;
-    const rect = target.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return null;
-    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-  })()`)
-  if (centre === null) throw new Error('nothing clickable at ' + selector)
+  const deadline = Date.now() + 4000
+  for (;;) {
+    await sleep(150)
+    const centre = await evaluate(cdp, sessionId, `(() => {
+      const target = document.querySelector(${JSON.stringify(selector)});
+      if (target === null) return null;
+      const rect = target.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      const x = rect.x + rect.width / 2;
+      const y = rect.y + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === null || !(hit === target || target.contains(hit) || hit.contains(target))) return null;
+      return { x, y };
+    })()`)
+    if (centre !== null) return centre
+    if (Date.now() > deadline) throw new Error('nothing clickable at ' + selector)
+  }
+}
+
+async function click(cdp, sessionId, selector) {
+  const centre = await aim(cdp, sessionId, selector)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
@@ -216,20 +238,7 @@ async function click(cdp, sessionId, selector) {
 
 /** Open an element's own context menu with a real right press. */
 async function rightClick(cdp, sessionId, selector) {
-  await evaluate(cdp, sessionId, `(() => {
-    const target = document.querySelector(${JSON.stringify(selector)});
-    if (target !== null) target.scrollIntoView({ block: 'nearest' });
-    return true;
-  })()`)
-  await sleep(150)
-  const centre = await evaluate(cdp, sessionId, `(() => {
-    const target = document.querySelector(${JSON.stringify(selector)});
-    if (target === null) return null;
-    const rect = target.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return null;
-    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-  })()`)
-  if (centre === null) throw new Error('nothing to right-click at ' + selector)
+  const centre = await aim(cdp, sessionId, selector)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'right', buttons: 2, clickCount: 1 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'right', buttons: 0, clickCount: 1 }, sessionId)
@@ -277,16 +286,30 @@ async function openRowMenu(cdp, sessionId, rowKey) {
 }
 /** Click the Session row menu entry whose label contains `label`. */
 async function clickMenuEntry(cdp, sessionId, label) {
-  const centre = await evaluate(cdp, sessionId, `(() => {
-    const item = [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent.includes(${JSON.stringify(label)}));
-    if (item === undefined) return null;
-    const rect = item.getBoundingClientRect();
-    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-  })()`)
-  if (centre === null) throw new Error('no menu entry labelled ' + label)
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+  // Same discipline as aim(): the menu portals in, so the entry is pressed only
+  // once a press at its centre would really land on it.
+  const deadline = Date.now() + 4000
+  for (;;) {
+    await sleep(150)
+    const centre = await evaluate(cdp, sessionId, `(() => {
+      const item = [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent.includes(${JSON.stringify(label)}));
+      if (item === undefined) return null;
+      const rect = item.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      const x = rect.x + rect.width / 2;
+      const y = rect.y + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === null || !(hit === item || item.contains(hit) || hit.contains(item))) return null;
+      return { x, y };
+    })()`)
+    if (centre !== null) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+      return
+    }
+    if (Date.now() > deadline) throw new Error('no menu entry labelled ' + label)
+  }
 }
 
 /**
