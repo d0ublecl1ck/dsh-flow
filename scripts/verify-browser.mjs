@@ -1704,103 +1704,6 @@ async function main() {
       }
     }
 
-    // ---- H. the 心流 switch owns the swapped send key -------------------
-    // The composer adjudicates Enter inside its own keymap, and the whole point
-    // of this leg is that a press really changes what the shipped code does —
-    // so it is read off the draft: with the switch on, a plain Enter has to
-    // grow the draft by one newline instead of submitting it.
-    //
-    // Every press below is made on an empty or whitespace-only draft, which the
-    // shell itself refuses to send. A rewrite that stopped working therefore
-    // shows up as "the draft did not grow", never as a message posted into the
-    // Session this run happens to be using.
-    await openFlowTab(cdp, sessionId)
-    const sendKeyStarted = await modEnterSwitchState(cdp, sessionId)
-    if (sendKeyStarted === null) {
-      skip('the 心流 page has no send-key row here: the Host half this instance activated predates it')
-    } else {
-      const switchedOff = await setModEnter(cdp, sessionId, 'false')
-      await pressEscape(cdp, sessionId)
-      if (!switchedOff) {
-        skip('the send-key preference would not move: install this checkout as the installed Host half and restart the instance to run these legs')
-      } else if (!await ensureEditableComposer(cdp, sessionId)) {
-        fail('no Session answers with an editable composer to type into')
-      } else {
-        await focusComposer(cdp, sessionId)
-        const offState = await composerState(cdp, sessionId)
-        if (offState === null || offState.editable !== 'true' || !offState.focused) {
-          fail('the composer never became the focused editable: ' + JSON.stringify(offState))
-        } else {
-          const beforeOff = offState.text
-          await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 0 })
-          const afterOffEnter = await composerState(cdp, sessionId)
-          if (afterOffEnter.text === beforeOff) {
-            pass('with the switch off a plain Enter leaves the shipped submit gesture alone')
-          } else {
-            fail('a plain Enter changed the draft while the switch was off: ' + JSON.stringify({ beforeOff, after: afterOffEnter.text }))
-          }
-          await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 8 })
-          const afterOffShift = await composerState(cdp, sessionId)
-          if (afterOffShift.text === beforeOff + '\n') {
-            pass('with the switch off Shift+Enter is still the newline')
-          } else {
-            fail('Shift+Enter did not insert one newline: ' + JSON.stringify({ beforeOff, after: afterOffShift.text }))
-          }
-
-          await openFlowTab(cdp, sessionId)
-          const switchedOn = await setModEnter(cdp, sessionId, 'true')
-          await pressEscape(cdp, sessionId)
-          if (!switchedOn) {
-            fail('the send-key preference would not switch on')
-          } else {
-            await focusComposer(cdp, sessionId)
-            const beforeOn = (await composerState(cdp, sessionId)).text
-            await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 0 })
-            const afterOnEnter = await composerState(cdp, sessionId)
-            if (afterOnEnter.text === beforeOn + '\n') {
-              pass('with the switch on a plain Enter inserts a newline instead of sending')
-            } else {
-              fail('a plain Enter did not insert a newline while the switch was on: ' + JSON.stringify({ beforeOn, after: afterOnEnter.text }))
-            }
-            // Cmd/Ctrl+Enter must take the *submit* gesture: on an empty or
-            // whitespace-only draft that means no newline and no message.
-            await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 4 })
-            const afterOnMeta = await composerState(cdp, sessionId)
-            if (afterOnMeta.text === afterOnEnter.text) {
-              pass('Cmd+Enter takes the submit gesture, not the newline one')
-            } else {
-              fail('Cmd+Enter inserted a newline instead of submitting: ' + JSON.stringify({ before: afterOnEnter.text, after: afterOnMeta.text }))
-            }
-            await shoot(cdp, sessionId, 'send-key.png')
-
-            // Put the preference back where the run found it, then take the
-            // draft back to empty. Clearing is best effort: the draft lives in
-            // this throwaway browser profile either way.
-            await openFlowTab(cdp, sessionId)
-            const restoredSendKey = await setModEnter(cdp, sessionId, sendKeyStarted)
-            await pressEscape(cdp, sessionId)
-            if (restoredSendKey) pass('the send-key preference is left as the run found it (' + sendKeyStarted + ')')
-            else fail('the send-key preference was not restored to ' + sendKeyStarted)
-            await click(cdp, sessionId, '[data-composer-input]')
-            await evaluate(cdp, sessionId, `(() => {
-              const node = document.querySelector('[data-composer-input]');
-              if (node === null) return false;
-              node.focus();
-              const range = document.createRange();
-              range.selectNodeContents(node);
-              const selection = window.getSelection();
-              selection.removeAllRanges();
-              selection.addRange(range);
-              return true;
-            })()`)
-            await pressShortcut(cdp, sessionId, { key: 'Backspace', code: 'Backspace', virtualKeyCode: 8, modifiers: 0 })
-            const cleaned = await composerState(cdp, sessionId)
-            if (cleaned !== null && cleaned.text === '') pass('the composer is left empty')
-            else console.log('  NOTE  the throwaway browser left a draft behind: ' + JSON.stringify(cleaned === null ? null : cleaned.text))
-          }
-        }
-      }
-    }
 
     // ---- F. the 心流 switch owns the link hand-off ----------------------
     await stubOpenRoutes(cdp, sessionId)
@@ -1891,6 +1794,104 @@ async function main() {
     else fail('the link preference was not restored: ' + JSON.stringify(await evaluate(cdp, sessionId, COPY_PROBE)))
     await pressEscape(cdp, sessionId)
     await removeProbeAnchors(cdp, sessionId)
+
+    // ---- H. the 心流 switch owns the swapped send key -------------------
+    // The composer adjudicates Enter inside its own keymap, and the whole point
+    // of this leg is that a press really changes what the shipped code does —
+    // so it is read off the draft: with the switch on, a plain Enter has to
+    // grow the draft by one newline instead of submitting it.
+    //
+    // Every press below is made on an empty or whitespace-only draft, which the
+    // shell itself refuses to send. A rewrite that stopped working therefore
+    // shows up as "the draft did not grow", never as a message posted into the
+    // Session this run happens to be using.
+    await openFlowTab(cdp, sessionId)
+    const sendKeyStarted = await modEnterSwitchState(cdp, sessionId)
+    if (sendKeyStarted === null) {
+      skip('the 心流 page has no send-key row here: the Host half this instance activated predates it')
+    } else {
+      const switchedOff = await setModEnter(cdp, sessionId, 'false')
+      await pressEscape(cdp, sessionId)
+      if (!switchedOff) {
+        skip('the send-key preference would not move: install this checkout as the installed Host half and restart the instance to run these legs')
+      } else if (!await ensureEditableComposer(cdp, sessionId)) {
+        fail('no Session answers with an editable composer to type into')
+      } else {
+        await focusComposer(cdp, sessionId)
+        const offState = await composerState(cdp, sessionId)
+        if (offState === null || offState.editable !== 'true' || !offState.focused) {
+          fail('the composer never became the focused editable: ' + JSON.stringify(offState))
+        } else {
+          const beforeOff = offState.text
+          await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 0 })
+          const afterOffEnter = await composerState(cdp, sessionId)
+          if (afterOffEnter.text === beforeOff) {
+            pass('with the switch off a plain Enter leaves the shipped submit gesture alone')
+          } else {
+            fail('a plain Enter changed the draft while the switch was off: ' + JSON.stringify({ beforeOff, after: afterOffEnter.text }))
+          }
+          await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 8 })
+          const afterOffShift = await composerState(cdp, sessionId)
+          if (afterOffShift.text === beforeOff + '\n') {
+            pass('with the switch off Shift+Enter is still the newline')
+          } else {
+            fail('Shift+Enter did not insert one newline: ' + JSON.stringify({ beforeOff, after: afterOffShift.text }))
+          }
+
+          await openFlowTab(cdp, sessionId)
+          const switchedOn = await setModEnter(cdp, sessionId, 'true')
+          await pressEscape(cdp, sessionId)
+          if (!switchedOn) {
+            skip('turning the send key on needs this checkout as the installed Host half; install it and restart the instance to run the remaining legs here')
+          } else {
+            await focusComposer(cdp, sessionId)
+            const beforeOn = (await composerState(cdp, sessionId)).text
+            await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 0 })
+            const afterOnEnter = await composerState(cdp, sessionId)
+            if (afterOnEnter.text === beforeOn + '\n') {
+              pass('with the switch on a plain Enter inserts a newline instead of sending')
+            } else {
+              fail('a plain Enter did not insert a newline while the switch was on: ' + JSON.stringify({ beforeOn, after: afterOnEnter.text }))
+            }
+            // Cmd/Ctrl+Enter must take the *submit* gesture: on an empty or
+            // whitespace-only draft that means no newline and no message.
+            await pressShortcut(cdp, sessionId, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, modifiers: 4 })
+            const afterOnMeta = await composerState(cdp, sessionId)
+            if (afterOnMeta.text === afterOnEnter.text) {
+              pass('Cmd+Enter takes the submit gesture, not the newline one')
+            } else {
+              fail('Cmd+Enter inserted a newline instead of submitting: ' + JSON.stringify({ before: afterOnEnter.text, after: afterOnMeta.text }))
+            }
+            await shoot(cdp, sessionId, 'send-key.png')
+
+            // Put the preference back where the run found it, then take the
+            // draft back to empty. Clearing is best effort: the draft lives in
+            // this throwaway browser profile either way.
+            await openFlowTab(cdp, sessionId)
+            const restoredSendKey = await setModEnter(cdp, sessionId, sendKeyStarted)
+            await pressEscape(cdp, sessionId)
+            if (restoredSendKey) pass('the send-key preference is left as the run found it (' + sendKeyStarted + ')')
+            else fail('the send-key preference was not restored to ' + sendKeyStarted)
+            await click(cdp, sessionId, '[data-composer-input]')
+            await evaluate(cdp, sessionId, `(() => {
+              const node = document.querySelector('[data-composer-input]');
+              if (node === null) return false;
+              node.focus();
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              const selection = window.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(range);
+              return true;
+            })()`)
+            await pressShortcut(cdp, sessionId, { key: 'Backspace', code: 'Backspace', virtualKeyCode: 8, modifiers: 0 })
+            const cleaned = await composerState(cdp, sessionId)
+            if (cleaned !== null && cleaned.text === '') pass('the composer is left empty')
+            else console.log('  NOTE  the throwaway browser left a draft behind: ' + JSON.stringify(cleaned === null ? null : cleaned.text))
+          }
+        }
+      }
+    }
   } finally {
     socket?.close()
     await shutdown(chrome, profile)
