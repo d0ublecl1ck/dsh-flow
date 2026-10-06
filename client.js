@@ -12,10 +12,17 @@
  *    scrolls the row into view and flashes it. The sidebar reveals rows with
  *    `scrollIntoView({block:'nearest'})` on `[data-row-key="session:<id>"]`;
  *    every step here speaks that same shipped contract.
- *  - `settings.section` — the 心流 page, holding the one preference that turns
- *    the button off. The preference lives in this plugin's Host Config
- *    namespace (`flow.locateButton`), reached through `ctx.configForms`, so it
- *    is a durable part of the settings document rather than page-local state.
+ *  - 「复制会话 ID」 — right-clicking a Session row opens the shell's own row
+ *    menu, so the seat for this is that menu's item list rather than a context
+ *    menu of this plugin's own: one entry reaches both the right-click menu and
+ *    the "..." menu. The same copy is `flow.copySessionId` (`⇧⌘C`), which copies
+ *    the Session the conversation column holds. Both report through one notice
+ *    seat (`shell.overlay` + the shipped `Toast`), so a copy is never silent.
+ *  - `settings.section` — the 心流 page, holding the two preferences that turn
+ *    the button and the copy off. They live in this plugin's Host Config
+ *    namespace (`flow.locateButton` / `flow.copySessionId`), reached through
+ *    `ctx.configForms`, so they are a durable part of the settings document
+ *    rather than page-local state.
  *
  * The header is not a slot: the shell's browsing region is a single-occupant
  * slot (`sidebar.workspaces`) whose header declares no hole beside the search
@@ -36,7 +43,15 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { createPortal } = require('react-dom')
     const { useCallback, useEffect, useRef, useState, useSyncExternalStore } = React
-    const { Switch, Tooltip } = require('@deepseek-ai/dsh-client-ui-primitives')
+    const {
+      IconCopyOutlineRegular,
+      IconWarningOutlineRegular,
+      MenuItemButton,
+      Switch,
+      Toast,
+      Tooltip,
+      writeClipboard,
+    } = require('@deepseek-ai/dsh-client-ui-primitives')
 
     /** Row id of the bundle — also the settings namespace and the locale namespace. */
     const ENTRY_ID = 'flow'
@@ -284,6 +299,96 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read the copy preference off the plugin's config form.
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether the feature is on; an unreadable form keeps the default.
+     */
+    function readCopyEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.copySessionId !== false
+    }
+
+    /**
+     * The one notice seat both copy entry points report through.
+     *
+     * Every notice is a new snapshot carrying a new sequence: React compares
+     * snapshots by identity, and the Toast restarts its cycle when it remounts.
+     *
+     * @returns the store the notice overlay reads and both copiers write.
+     */
+    function createNoticeStore() {
+      let snapshot = null
+      let seq = 0
+      const listeners = new Set()
+      const emit = () => {
+        for (const listener of [...listeners]) listener()
+      }
+      return {
+        /** @returns the notice on display, or null. */
+        getSnapshot: () => snapshot,
+        /**
+         * @param listener - called on every change.
+         * @returns a disposer removing only this listener.
+         */
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        /**
+         * Raise one notice, replacing whatever is on screen.
+         * @param text - the localized sentence to show.
+         * @param tone - `success` for a deed done, `warning` for a refusal.
+         */
+        show: (text, tone) => {
+          seq += 1
+          snapshot = { seq, text, tone }
+          emit()
+        },
+        /** Retire the notice on screen; an empty seat is not a change. */
+        clear: () => {
+          if (snapshot === null) return
+          snapshot = null
+          emit()
+        },
+      }
+    }
+
+    /**
+     * Copy one Session id and report the outcome.
+     *
+     * A copy is never silent: the clipboard is asked first and the notice
+     * repeats its verdict, so a refused write reads as a refusal instead of as a
+     * copy that appeared to work.
+     *
+     * @param input.sessionId - the id to place on the clipboard.
+     * @param input.write - the clipboard write, answering whether the host accepted it.
+     * @param input.notify - raise a notice.
+     * @param input.t - the plugin's localized copy.
+     * @returns whether the clipboard accepted the write.
+     */
+    function copySessionId(input) {
+      return Promise.resolve()
+        .then(() => input.write(input.sessionId))
+        .then(
+          (accepted) => {
+            const copied = accepted === true
+            input.notify(copied ? input.t('copy.done') : input.t('copy.failed'), copied ? 'success' : 'warning')
+            return copied
+          },
+          () => {
+            input.notify(input.t('copy.failed'), 'warning')
+            return false
+          },
+        )
+    }
+
+    /**
      * Create the one-slot seat the mounted button and the plugin-scope command
      * share.
      *
@@ -317,27 +422,70 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Command id. It keys the stored key override, so it has to stay stable.
+     * Command ids. They key the stored key overrides, so they have to stay
+     * stable.
      */
     const LOCATE_COMMAND = 'flow.locateCurrent'
+    const COPY_COMMAND = 'flow.copySessionId'
 
     /**
-     * Per-profile default bindings: Mod+Shift+D everywhere a Web default is
-     * admissible.
+     * Order of this plugin's Session-row menu row: the shell's own recipe for a
+     * third-party row places it after the shipped actions (pin 100, rename 200,
+     * fork 300, archive 400) and opens the group with a separator.
+     */
+    const MENU_ORDER = 500
+
+    /**
+     * Every profile that admits a `Mod+Shift+<letter>` default, and the reason
+     * this plugin declares no other shape.
      *
      * macOS Desktop runs the Web shortcut path (its preload sets
      * `data-dsh-desktop-web-shortcuts`, so the runtime is `web`), where a bare
      * Command+letter is rejected as `unsupported-browser` and an Option
      * combination can die as a macOS dead key — Mod+Shift avoids both. Linux Web
-     * admits none of these shapes, so no default is declared for it.
+     * admits only Mod+Slash, Mod+Shift+Comma and Mod+Shift+Period, so it is left
+     * unbound rather than declared: the registry rejects a default it cannot
+     * honour by throwing, and a throw takes the whole client half down with it.
      */
-    const LOCATE_DEFAULTS = {
-      'desktop:macos': { code: 'KeyD', modifiers: ['primary', 'shift'] },
-      'desktop:windows': { code: 'KeyD', modifiers: ['primary', 'shift'] },
-      'desktop:linux': { code: 'KeyD', modifiers: ['primary', 'shift'] },
-      'web:macos': { code: 'KeyD', modifiers: ['primary', 'shift'] },
-      'web:windows': { code: 'KeyD', modifiers: ['primary', 'shift'] },
+    const MOD_SHIFT_PROFILES = [
+      'desktop:macos',
+      'desktop:windows',
+      'desktop:linux',
+      'web:macos',
+      'web:windows',
+    ]
+
+    /**
+     * Per-profile defaults for one command.
+     * @param code - the physical key code every profile binds.
+     * @param profiles - the shells to declare it for.
+     * @returns the default map `ctx.shortcuts.register` validates.
+     */
+    function primaryShiftDefaults(code, profiles) {
+      return Object.fromEntries(
+        profiles.map((profile) => [profile, { code, modifiers: ['primary', 'shift'] }]),
+      )
     }
+
+    /** Locating: ⇧⌘D. */
+    const LOCATE_DEFAULTS = primaryShiftDefaults('KeyD', MOD_SHIFT_PROFILES)
+
+    /**
+     * Copying: ⇧⌘C.
+     *
+     * The Linux shells are left out deliberately. The registry reserves a
+     * primary modifier together with `KeyC` — the browser's own copy — on every
+     * shell that is not macOS or Windows, and it validates a default for every
+     * declared profile at registration. Declaring one there does not merely lose
+     * the key: it throws, and the throw takes the whole client half with it.
+     * macOS and Windows are unaffected in both runtimes, because their Web
+     * branch admits a two-modifier Mod+Shift combination before the reservation
+     * list is consulted.
+     */
+    const COPY_DEFAULTS = primaryShiftDefaults(
+      'KeyC',
+      MOD_SHIFT_PROFILES.filter((profile) => !profile.endsWith(':linux')),
+    )
 
     /**
      * Build the locating command over the seat.
@@ -366,6 +514,45 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Build the copy-Session-id command.
+     *
+     * The menu row keeps its own click while the command owns the keyboard; both
+     * call the same `copy`, so the two entry points cannot drift apart.
+     *
+     * @param input.copy - copy one Session id.
+     * @param input.currentSessionId - the Session the conversation column holds, or null.
+     * @param input.enabled - whether the preference still wants the feature.
+     * @param input.notify - raise a notice: `(text, tone) => void`.
+     * @param input.label - localized command name shown in the shortcut reference.
+     * @param input.t - the plugin's localized copy.
+     * @returns the command definition for `ctx.shortcuts.register`.
+     */
+    function copyCommand(input) {
+      return {
+        id: COPY_COMMAND,
+        label: input.label,
+        aliases: ['copy session id', 'copy conversation id', '复制会话 ID'],
+        defaults: COPY_DEFAULTS,
+        regions: ['page', 'editable'],
+        modals: [],
+        resolve: () => {
+          // A preference that turned the feature off is not a refusal to report:
+          // passing leaves the combination to the browser or the platform rather
+          // than swallowing it.
+          if (!input.enabled()) return { status: 'pass' }
+          const sessionId = input.currentSessionId()
+          if (sessionId === null) {
+            // Never `blocked`: the shell drops a blocked reason on the floor, and
+            // a press that does nothing visible is the one outcome a copy must
+            // not have.
+            return { status: 'handled', run: () => { input.notify(input.t('copy.noSession'), 'warning') } }
+          }
+          return { status: 'handled', run: () => { input.copy(sessionId) } }
+        },
+      }
+    }
+
     // #endregion
 
     // #region styles
@@ -384,6 +571,7 @@ window.__ModuleLoader__.load({
 .flow-row__title{font-size:14px;line-height:20px}
 .flow-row__description{margin-top:4px;color:var(--dsw-alias-label-secondary,currentColor);font-size:12px;line-height:18px}
 .flow-row__error{margin-top:4px;color:var(--dsw-alias-state-error-primary,currentColor);font-size:12px;line-height:18px}
+.flow-row:last-child{border-bottom:none}
 `
 
     /** Inject the plugin's one stylesheet; the disposer removes it with the fiber. */
@@ -410,10 +598,17 @@ window.__ModuleLoader__.load({
       'locate.noSession': '当前没有打开的会话',
       'locate.missing': '当前会话不在侧边栏的筛选结果里',
       'locate.unmounted': '侧边栏已折叠，定位按钮当前不在界面上',
+      'copy.label': '复制会话 ID',
+      'copy.menu': '复制会话 ID',
+      'copy.done': '已复制会话 ID',
+      'copy.failed': '复制失败，剪贴板不可用',
+      'copy.noSession': '当前没有打开的会话',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
       'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
-      'section.locate.error': '偏好没有保存成功，请重试',
+      'section.copy.title': '复制会话 ID',
+      'section.copy.description': '在会话行的右键菜单里加上「复制会话 ID」，并用 `⇧⌘C`（Windows/Linux 为 Ctrl+Shift+C）复制当前会话的 ID。快捷键可在 设置 → 通用 → 快捷键 里改。',
+      'section.saveError': '偏好没有保存成功，请重试',
     }
 
     /** English dictionary, complete against the zh key set. */
@@ -423,10 +618,17 @@ window.__ModuleLoader__.load({
       'locate.noSession': 'No Session is open',
       'locate.missing': 'The current Session is outside the sidebar filter',
       'locate.unmounted': 'The sidebar is collapsed, so the locate button is not on screen',
+      'copy.label': 'Copy Session ID',
+      'copy.menu': 'Copy Session ID',
+      'copy.done': 'Session ID copied',
+      'copy.failed': 'Copy failed: the clipboard rejected the write',
+      'copy.noSession': 'No Session is open',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
       'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
-      'section.locate.error': 'The preference was not saved. Try again.',
+      'section.copy.title': 'Copy Session ID',
+      'section.copy.description': 'Add “Copy Session ID” to a Session row’s right-click menu, and bind `⇧⌘C` (Ctrl+Shift+C on Windows/Linux) to copying the open Session’s ID. Rebind it under Settings → General → Shortcuts.',
+      'section.saveError': 'The preference was not saved. Try again.',
     }
 
     // #endregion
@@ -530,7 +732,7 @@ window.__ModuleLoader__.load({
       const anchor = useRef(null)
       const [notice, setNotice] = useState(null)
       const [missed, setMissed] = useState(false)
-      const enabled = useConfigValue(props.config)
+      const enabled = useConfigValue(props.config, readLocateEnabled)
       // The locale revision is this component's only re-render trigger for copy.
       props.useLocaleRevision()
       const host = useLocateHost(enabled)
@@ -610,21 +812,86 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The 心流 settings page: the button's one preference.
+     * The 「复制会话 ID」 row of a Session row's menu.
      *
-     * @param props - localized copy and the plugin's config form.
+     * Right-clicking a Session row opens the shell's own row menu, so the seat
+     * for this is that menu's item list rather than a context menu of this
+     * plugin's own: one entry reaches the right-click menu and the "..." menu
+     * alike. The trailing key hint is read from the live shortcut catalog, so a
+     * rebound combination shows up here without this plugin knowing about it.
+     *
+     * @param props - the row identity, the shell's menu hooks, the plugin's
+     * config form, the clipboard writer, and the localized copy.
      */
-    function FlowSection(props) {
-      const { t, config } = props
+    function CopySessionIdMenuItem(props) {
+      const { sessionId, config, write, notify, t } = props
+      const [, setMenuOpen] = props.useMenuOpenState()
+      // Every Hook runs before the preference is consulted: the row stays
+      // mounted across a toggle and React keeps one call order.
+      const shortcut = props.useShortcuts((rows) => rows.find((row) => row.id === COPY_COMMAND))
+      const enabled = useConfigValue(config, readCopyEnabled)
+      props.useLocaleRevision()
+      if (!enabled) return null
+      return h(
+        MenuItemButton,
+        {
+          separatorBefore: true,
+          icon: h(IconCopyOutlineRegular, null),
+          shortcut,
+          onSelect: () => {
+            setMenuOpen(false)
+            copySessionId({ sessionId, write, notify, t })
+          },
+        },
+        t('copy.menu'),
+      )
+    }
+
+    /**
+     * The notice a finished copy reports through: the shell's own Toast, driven
+     * by this plugin's one notice seat.
+     *
+     * It hangs off the overlay layer rather than the Session row, because the
+     * row menu unmounts the moment its action is taken.
+     *
+     * @param props - the notice hook and the dismissal.
+     */
+    function CopyNotice(props) {
+      const notice = props.useNotice((current) => current)
+      if (notice === null) return null
+      return h(
+        Toast,
+        {
+          text: notice.text,
+          tone: notice.tone === 'success' ? 'success' : undefined,
+          icon: notice.tone === 'success' ? undefined : h(IconWarningOutlineRegular, null),
+          onDone: () => { props.dismiss() },
+        },
+        `flow-notice-${String(notice.seq)}`,
+      )
+    }
+
+    /**
+     * One settings row: a title, a description, a switch, and its own save state.
+     *
+     * The write state belongs to the row, not to the page: a refused write on one
+     * preference used to paint its error onto the other one as well, which reads
+     * as two failures where there is one.
+     *
+     * @param props - the config form, the preference's own field and reader, the
+     * localized copy, and the locale revision hook.
+     */
+    function SettingsRow(props) {
+      const { config, field, read, title, description, error } = props
       const [busy, setBusy] = useState(false)
       const [failed, setFailed] = useState(false)
-      const enabled = useConfigValue(config)
+      const checked = useConfigValue(config, read)
       props.useLocaleRevision()
 
       const write = (next) => {
         setFailed(false)
         setBusy(true)
-        Promise.resolve(config.set('locateButton', next))
+        Promise.resolve(config.set(field, next))
           .then((accepted) => {
             if (accepted === false) setFailed(true)
           }, () => {
@@ -635,32 +902,64 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'flow-section' },
+        { className: 'flow-row' },
         h(
           'div',
-          { className: 'flow-row' },
-          h(
-            'div',
-            null,
-            h('div', { className: 'flow-row__title' }, t('section.locate.title')),
-            h('div', { className: 'flow-row__description' }, t('section.locate.description')),
-            failed && h('div', { className: 'flow-row__error', role: 'alert' }, t('section.locate.error')),
-          ),
-          h(Switch, {
-            checked: enabled,
-            disabled: busy,
-            label: t('section.locate.title'),
-            onChange: write,
-          }),
+          null,
+          h('div', { className: 'flow-row__title' }, title),
+          h('div', { className: 'flow-row__description' }, description),
+          failed && h('div', { className: 'flow-row__error', role: 'alert' }, error),
         ),
+        h(Switch, {
+          checked,
+          disabled: busy,
+          label: title,
+          onChange: write,
+        }),
       )
     }
 
-    /** Observe the plugin's config form as the button/page preference. */
-    function useConfigValue(config) {
+    /**
+     * The 心流 settings page: the two preferences this plugin owns.
+     *
+     * @param props - localized copy and the plugin's config form.
+     */
+    function FlowSection(props) {
+      const { t, config } = props
+      return h(
+        'div',
+        { className: 'flow-section' },
+        h(SettingsRow, {
+          config,
+          field: 'locateButton',
+          read: readLocateEnabled,
+          title: t('section.locate.title'),
+          description: t('section.locate.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
+          field: 'copySessionId',
+          read: readCopyEnabled,
+          title: t('section.copy.title'),
+          description: t('section.copy.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+      )
+    }
+
+    /**
+     * Observe one preference on the plugin's config form.
+     *
+     * @param config - `ctx.configForms.get('flow')`.
+     * @param read - the preference's own reader, which owns its default.
+     */
+    function useConfigValue(config, read) {
       const subscribe = useCallback((listener) => config.subscribe(listener), [config])
-      const read = useCallback(() => readLocateEnabled(config), [config])
-      return useSyncExternalStore(subscribe, read, read)
+      const snapshot = useCallback(() => read(config), [config, read])
+      return useSyncExternalStore(subscribe, snapshot, snapshot)
     }
 
     // #endregion
@@ -687,13 +986,26 @@ window.__ModuleLoader__.load({
         // page reads and writes it.
         const forms = ctx.configForms
         const config = forms.get(ENTRY_ID)
-        // The command is plugin-scope while the locate itself lives in the
+        // One notice seat for both copy entry points: the row menu and the
+        // command copy the same text and report through the same place.
+        const notice = createNoticeStore()
+        const notify = (text, tone) => { notice.show(text, tone) }
+        const copy = (sessionId) => copySessionId({ sessionId, write: writeClipboard, notify, t })
+        // The locate command is plugin-scope while the locate itself lives in the
         // mounted button, so the two meet through one seat.
         const seat = createLocateSeat()
         ctx.effect(() => ctx.shortcuts.register(locateCommand(seat, () => t('locate.label'), {
           unmounted: () => t('locate.unmounted'),
           noSession: () => t('locate.noSession'),
         })), 'flow: locate command')
+        ctx.effect(() => ctx.shortcuts.register(copyCommand({
+          label: () => t('copy.label'),
+          enabled: () => readCopyEnabled(config),
+          currentSessionId: () => currentSessionId(sessions.getSnapshot()),
+          copy,
+          notify,
+          t,
+        })), 'flow: copy command')
 
         // The entry itself renders nothing: it is this plugin's lifecycle and
         // locale seat, and the button is portalled into the header instead.
@@ -712,6 +1024,25 @@ window.__ModuleLoader__.load({
           useLocaleRevision,
         }))), 'flow: locate button seat')
 
+        // The Session row menu is the shell's own: a right-click on the row opens
+        // it, so registering into its item list is what reaches both gestures.
+        ctx.effect(() => ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+          name: 'sidebar.workspaces.session.menu.item',
+          id: ENTRY_ID,
+          order: MENU_ORDER,
+          locale: ENTRY_ID,
+          inject: () => ({ config, write: writeClipboard, notify, useLocaleRevision }),
+        }, CopySessionIdMenuItem)), 'flow: copy menu row')
+
+        // The notice hangs off the overlay layer, not the row: the menu unmounts
+        // the moment its action is taken.
+        ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: ENTRY_ID,
+          locale: ENTRY_ID,
+          inject: () => ({ hooks: { notice }, dismiss: () => { notice.clear() } }),
+        }, CopyNotice)), 'flow: copy notice')
+
         // The page follows the Host's own namespace: a deployment that never
         // served `flow` shows no trace of the section.
         ctx.effect(() => forms.whileServed([ENTRY_ID], () => ctx.slots.inject(
@@ -729,8 +1060,11 @@ window.__ModuleLoader__.load({
         ENTRY_ID,
         FOOTER_ORDER,
         SECTION_ORDER,
+        MENU_ORDER,
         LOCATE_COMMAND,
         LOCATE_DEFAULTS,
+        COPY_COMMAND,
+        COPY_DEFAULTS,
         createLocateSeat,
         locateCommand,
         currentSessionId,
@@ -742,6 +1076,10 @@ window.__ModuleLoader__.load({
         resolveHeaderAnchors,
         attachLocateHost,
         readLocateEnabled,
+        readCopyEnabled,
+        copyCommand,
+        copySessionId,
+        createNoticeStore,
       },
     }
   },

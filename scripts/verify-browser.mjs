@@ -22,6 +22,13 @@
  * Usage:
  *   node scripts/verify-browser.mjs
  *   node scripts/verify-browser.mjs --url http://127.0.0.1:43129 --shots /tmp/dsh-flow
+ *   node scripts/verify-browser.mjs --client ./client.js
+ *
+ * `--client` serves that file as this plugin's browser half in place of the one
+ * the instance installed, by rewriting the combined plugin bundle in flight.
+ * That is what lets a worktree be verified against a running instance without
+ * repointing the installed plugin at the worktree. Without the flag, whatever
+ * the instance loaded is what gets tested.
  *
  * Preconditions: a DSH Web instance is running at --url, and Google Chrome is
  * installed at the default macOS path (override with --chrome).
@@ -39,6 +46,7 @@ const DEFAULTS = {
   home: process.env.DSH_HOME ?? join(homedir(), 'Library', 'Application Support', 'dsh-desktop', 'harness'),
   chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   shots: null,
+  client: null,
   timeoutMs: 30000,
 }
 
@@ -54,12 +62,15 @@ const config = {
   home: option('home', DEFAULTS.home),
   chrome: option('chrome', DEFAULTS.chrome),
   shots: option('shots', DEFAULTS.shots),
+  client: option('client', DEFAULTS.client),
 }
 
 const passes = []
 const failures = []
+const skips = []
 const pass = (message) => { passes.push(message); console.log('  PASS  ' + message) }
 const fail = (message) => { failures.push(message); console.log('  FAIL  ' + message) }
+const skip = (message) => { skips.push(message); console.log('  SKIP  ' + message) }
 
 const base64url = (value) => Buffer.from(value).toString('base64').replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -100,15 +111,33 @@ class Cdp {
     this.socket = socket
     this.nextId = 0
     this.pending = new Map()
+    this.handlers = new Map()
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data)
-      if (message.id === undefined) return
+      if (message.id === undefined) {
+        // Protocol events are the request/response stream's other half; a
+        // handler that throws must not take the socket listener down with it.
+        for (const handler of this.handlers.get(message.method) ?? []) {
+          Promise.resolve(handler(message.params, message.sessionId)).catch(() => {})
+        }
+        return
+      }
       const entry = this.pending.get(message.id)
       if (entry === undefined) return
       this.pending.delete(message.id)
       if (message.error) entry.reject(new Error(message.error.message))
       else entry.resolve(message.result)
     })
+  }
+
+  /**
+   * Subscribe to one protocol event.
+   * @param method - protocol method name.
+   * @param handler - called with the event params and its session id.
+   */
+  on(method, handler) {
+    if (!this.handlers.has(method)) this.handlers.set(method, [])
+    this.handlers.get(method).push(handler)
   }
 
   send(method, params = {}, sessionId) {
@@ -164,6 +193,14 @@ async function waitFor(cdp, sessionId, expression, label, timeoutMs = config.tim
 
 /** Click an element the way a person does: hit-tested pointer events, not element.click(). */
 async function click(cdp, sessionId, selector) {
+  // A dialog body scrolls: bring the target into view the way a person would
+  // before measuring it, or the press lands on whatever is actually there.
+  await evaluate(cdp, sessionId, `(() => {
+    const target = document.querySelector(${JSON.stringify(selector)});
+    if (target !== null) target.scrollIntoView({ block: 'nearest' });
+    return true;
+  })()`)
+  await sleep(150)
   const centre = await evaluate(cdp, sessionId, `(() => {
     const target = document.querySelector(${JSON.stringify(selector)});
     if (target === null) return null;
@@ -175,6 +212,176 @@ async function click(cdp, sessionId, selector) {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+}
+
+/** Open an element's own context menu with a real right press. */
+async function rightClick(cdp, sessionId, selector) {
+  await evaluate(cdp, sessionId, `(() => {
+    const target = document.querySelector(${JSON.stringify(selector)});
+    if (target !== null) target.scrollIntoView({ block: 'nearest' });
+    return true;
+  })()`)
+  await sleep(150)
+  const centre = await evaluate(cdp, sessionId, `(() => {
+    const target = document.querySelector(${JSON.stringify(selector)});
+    if (target === null) return null;
+    const rect = target.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`)
+  if (centre === null) throw new Error('nothing to right-click at ' + selector)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'right', buttons: 2, clickCount: 1 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'right', buttons: 0, clickCount: 1 }, sessionId)
+  await sleep(400)
+}
+
+
+/**
+ * Open one Session row's own menu.
+ *
+ * The press is a real, hit-tested right button event; the delivery that follows
+ * is not. Headless Chrome never turns a right press into `contextmenu`, so the
+ * event the browser would have delivered is dispatched at the row's real
+ * coordinates, on the element a person's press would have hit. Everything from
+ * the shell's row handler down is therefore the shipped code.
+ *
+ * A blank "new Session" row opens no menu by design, which is why callers ask
+ * the shell rather than assume.
+ *
+ * @param rowKey - the `data-row-key` of the row to open.
+ */
+async function openRowMenu(cdp, sessionId, rowKey) {
+  const selector = '[data-row-key=' + JSON.stringify(rowKey) + ']'
+  const inView = await evaluate(cdp, sessionId, `(() => {
+    const row = document.querySelector(${JSON.stringify(selector)});
+    if (row === null) return false;
+    row.scrollIntoView({ block: 'nearest' });
+    return true;
+  })()`)
+  if (!inView) throw new Error('no Session row ' + rowKey)
+  await sleep(250)
+  await rightClick(cdp, sessionId, selector)
+  await evaluate(cdp, sessionId, `(() => {
+    const row = document.querySelector(${JSON.stringify(selector)});
+    if (row === null) return false;
+    const rect = row.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    if (hit === null) return false;
+    hit.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, view: window, button: 2, buttons: 2, clientX: x, clientY: y }));
+    return true;
+  })()`)
+  await sleep(400)
+}
+/** Click the Session row menu entry whose label contains `label`. */
+async function clickMenuEntry(cdp, sessionId, label) {
+  const centre = await evaluate(cdp, sessionId, `(() => {
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent.includes(${JSON.stringify(label)}));
+    if (item === undefined) return null;
+    const rect = item.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`)
+  if (centre === null) throw new Error('no menu entry labelled ' + label)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+}
+
+/**
+ * Stand in for the host clipboard, recording what a copy actually wrote.
+ *
+ * A headless page has no clipboard permission, and the write path is the
+ * shipped `writeClipboard`, which prefers `navigator.clipboard.writeText`; the
+ * record is therefore the copy's real payload rather than a mock's echo.
+ */
+async function stubClipboard(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    window.__copied = null;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text) => { window.__copied = text } },
+    });
+    return true;
+  })()`)
+}
+
+/** What the copy surfaces look like right now. */
+const COPY_PROBE = `(() => {
+  const items = [...document.querySelectorAll('[role="menuitem"]')];
+  const copyItem = items.find((b) => b.textContent.includes('复制会话 ID'));
+  return {
+    menuItems: items.map((b) => b.textContent),
+    copyItem: copyItem !== undefined,
+    // The row's key hint is its own span; the leading icon is hidden from
+    // assistive technology and would answer an aria-hidden query first.
+    copyHint: copyItem?.querySelector('[class*="shortcut"]')?.textContent ?? null,
+    alerts: [...document.querySelectorAll('[role="alert"]')].map((n) => n.textContent),
+    copied: window.__copied ?? null,
+    sectionTitles: [...document.querySelectorAll('[role="dialog"] .flow-row__title')].map((n) => n.textContent),
+    switches: [...document.querySelectorAll('[role="dialog"] [role="switch"]')].map((n) => n.getAttribute('aria-checked')),
+    rowErrors: [...document.querySelectorAll('[role="dialog"] .flow-row')].map((n) => n.querySelector('.flow-row__error')?.textContent ?? null),
+  };
+})()`
+
+/**
+ * Page-side predicate: a copy notice is on screen right now.
+ *
+ * The panel's own warnings use the same role, so the sentence is part of the
+ * predicate rather than the role alone.
+ */
+const NOTICE_VISIBLE = `[...document.querySelectorAll('[role="alert"]')].some((n) => n.textContent.includes('已复制会话 ID'))`
+
+/** Open 设置 → 心流 and wait for its body. */
+async function openFlowTab(cdp, sessionId) {
+  await click(cdp, sessionId, '[data-slot="sidebar.settings"] button')
+  await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"] nav button\') !== null', 'the settings dialog')
+  const centre = await evaluate(cdp, sessionId, `(() => {
+    const tab = [...document.querySelectorAll('[role="dialog"] nav button')].find((b) => b.textContent === '心流');
+    if (tab === undefined) return null;
+    const rect = tab.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`)
+  if (centre === null) throw new Error('no 心流 tab in the settings navigation')
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+  await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"] .flow-row__title\') !== null', 'the 心流 page body')
+}
+
+/** The call every plugin's browser half makes to register itself. */
+const REGISTRATION = 'window.__ModuleLoader__.load('
+
+/** The separator the bundle puts between two plugin segments. */
+const SEPARATOR = '\n;\n'
+
+/**
+ * Swap one plugin's browser half inside a combined plugin bundle.
+ *
+ * A segment is bounded by its own registration call and by the separator that
+ * closes it, never by a byte count: the instance wraps the modules it installed
+ * from a registry but serves a locally linked package verbatim, so both shapes
+ * have to be found the same way.
+ *
+ * @param body - the combined bundle the instance served.
+ * @param id - the plugin row id whose segment to replace.
+ * @param source - the replacement browser half.
+ * @returns the bundle with exactly that segment replaced.
+ */
+function replaceSegment(body, id, source) {
+  const marks = ["id: '" + id + "'", 'id: "' + id + '"', "id:'" + id + "'", 'id:"' + id + '"']
+  const hit = marks.filter((mark) => body.includes(mark))
+  if (hit.length !== 1) throw new Error('no single ' + id + ' registration in the bundle')
+  const at = body.indexOf(hit[0])
+  const loadAt = body.lastIndexOf(REGISTRATION, at)
+  const nextAt = body.indexOf(REGISTRATION, at)
+  if (loadAt === -1 || nextAt === -1) throw new Error('malformed ' + id + ' segment')
+  const found = body.lastIndexOf(SEPARATOR, nextAt)
+  const end = found === -1 || found < loadAt ? nextAt : found + SEPARATOR.length
+  const fromLoad = source.slice(source.indexOf(REGISTRATION)).replace(/\s+$/u, '')
+  if (fromLoad === '') throw new Error('the replacement for ' + id + ' has no registration call')
+  return body.slice(0, loadAt) + fromLoad + SEPARATOR + body.slice(end)
 }
 
 async function shoot(cdp, sessionId, name) {
@@ -329,6 +536,36 @@ async function main() {
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
     await cdp.send('Network.enable', {}, sessionId)
     await cdp.send('Page.enable', {}, sessionId)
+    if (config.client !== null) {
+      const source = readFileSync(config.client, 'utf8')
+      // The instance serves every client half inside one combined bundle, so
+      // the override is a rewrite of that response, never of the request: the
+      // page keeps loading exactly the URLs it asked for.
+      cdp.on('Fetch.requestPaused', async (params, session) => {
+        const { requestId, request } = params
+        try {
+          if (!request.url.includes('dsh-flow/client.js') || !request.url.includes(',')) {
+            await cdp.send('Fetch.continueRequest', { requestId }, session)
+            return
+          }
+          const response = await fetch(request.url, { headers: { cookie: cookie.name + '=' + cookie.value } })
+          const body = await response.text()
+          await cdp.send('Fetch.fulfillRequest', {
+            requestId,
+            responseCode: 200,
+            responseHeaders: [
+              { name: 'Content-Type', value: 'text/javascript; charset=utf-8' },
+              { name: 'Cache-Control', value: 'no-store' },
+            ],
+            body: Buffer.from(replaceSegment(body, 'dsh-flow', source)).toString('base64'),
+          }, session)
+        } catch (error) {
+          fail('the --client override could not be served: ' + error.message)
+          await cdp.send('Fetch.continueRequest', { requestId }, session).catch(() => {})
+        }
+      })
+      await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*client.js*' }] }, sessionId)
+    }
     await cdp.send('Emulation.setLocaleOverride', { locale: 'zh-CN' }, sessionId)
     await cdp.send('Network.setCookie', {
       name: cookie.name, value: cookie.value, url: config.url, path: '/', httpOnly: true, sameSite: 'Strict',
@@ -444,6 +681,65 @@ async function main() {
       await restoreGroups(cdp, sessionId, baseline)
     }
 
+    // ---- D. copying a Session id ----------------------------------------
+    // Right-clicking a blank "new Session" row deliberately opens no menu, so
+    // the row under test is whichever one the shell itself answers; the copier
+    // is then asked for that row's id, not the open Session's.
+    const openSessionId = current.slice('session:'.length)
+    const candidateRows = await evaluate(cdp, sessionId, `(() => [...document.querySelectorAll('[class*="listArea"] [data-row-key^="session:"]')].map((e) => e.dataset.rowKey))()`)
+    await stubClipboard(cdp, sessionId)
+    let copy = null
+    let copyRow = null
+    for (const rowKey of candidateRows) {
+      await openRowMenu(cdp, sessionId, rowKey)
+      const probe = await evaluate(cdp, sessionId, COPY_PROBE)
+      if (probe.menuItems.length > 0) {
+        copy = probe
+        copyRow = rowKey
+        break
+      }
+    }
+    if (copy === null) {
+      fail('no Session row opened a menu at all: ' + JSON.stringify(candidateRows.slice(0, 4)))
+    } else if (copy.copyItem && copy.copyHint !== null && copy.copyHint.includes('C')) {
+      pass('right-clicking a Session row offers 复制会话 ID, hinting ' + JSON.stringify(copy.copyHint))
+    } else {
+      fail('the row menu has no 复制会话 ID entry: ' + JSON.stringify({ row: copyRow, items: copy.menuItems, hint: copy.copyHint }))
+    }
+    await shoot(cdp, sessionId, 'row-menu.png')
+
+    const copyRowId = copyRow === null ? null : copyRow.slice('session:'.length)
+    await clickMenuEntry(cdp, sessionId, '复制会话 ID')
+    try {
+      await waitFor(cdp, sessionId, 'window.__copied !== null', 'the clipboard write')
+    } catch { /* the assertion below is the report */ }
+    await sleep(300)
+    copy = await evaluate(cdp, sessionId, COPY_PROBE)
+    if (copy.copied === copyRowId) pass('the menu row copies the row it was opened on: ' + copy.copied)
+    else fail('the menu row copied the wrong value: ' + JSON.stringify({ copied: copy.copied, expected: copyRowId }))
+    if (copy.alerts.some((text) => text.includes('已复制会话 ID'))) pass('the copy is announced, not silent')
+    else fail('no notice after copying: ' + JSON.stringify(copy.alerts))
+    await shoot(cdp, sessionId, 'copied.png')
+
+    // The same copy answers the shortcut, over the same notice, and it takes
+    // the Session the conversation column holds rather than a row under the
+    // pointer.
+    await waitFor(cdp, sessionId, '!(' + NOTICE_VISIBLE + ')', 'the first notice to retire', 8000)
+    await evaluate(cdp, sessionId, 'window.__copied = null')
+    // Meta 4 | Shift 8 — the combination this plugin declares for every profile
+    // that admits one.
+    await pressShortcut(cdp, sessionId, { key: 'C', code: 'KeyC', virtualKeyCode: 67, modifiers: 12 })
+    try {
+      await waitFor(cdp, sessionId, 'window.__copied !== null', "the shortcut's clipboard write")
+    } catch { /* the assertion below is the report */ }
+    await sleep(300)
+    copy = await evaluate(cdp, sessionId, COPY_PROBE)
+    if (copy.copied === openSessionId) pass('Mod+Shift+C copies the open Session id')
+    else fail('Mod+Shift+C did not copy the open Session id: ' + JSON.stringify({ copied: copy.copied, expected: openSessionId }))
+    if (copy.alerts.some((text) => text.includes('已复制会话 ID'))) pass('the shortcut announces the copy too')
+    else fail('the shortcut copied silently: ' + JSON.stringify(copy.alerts))
+    await waitFor(cdp, sessionId, '!(' + NOTICE_VISIBLE + ')', 'the notice to retire', 8000)
+    await evaluate(cdp, sessionId, 'window.__copied = null')
     // ---- C. the 心流 page owns the button's visibility -------------------
     await click(cdp, sessionId, '[data-slot="sidebar.settings"] button')
     await waitFor(cdp, sessionId, 'document.querySelector(\'[role="dialog"] nav button\') !== null', 'the settings dialog')
@@ -473,10 +769,18 @@ async function main() {
         const dialogs = [...document.querySelectorAll('[role="dialog"]')];
         const text = dialogs.map((d) => d.innerText).join('\\n');
         const at = text.indexOf('定位当前会话');
-        return { present: at !== -1, around: at === -1 ? null : text.slice(Math.max(0, at - 40), at + 20) };
+        const copyAt = text.indexOf('复制会话 ID');
+        return {
+          present: at !== -1,
+          around: at === -1 ? null : text.slice(Math.max(0, at - 40), at + 20),
+          copyPresent: copyAt !== -1,
+          copyAround: copyAt === -1 ? null : text.slice(Math.max(0, copyAt - 60), copyAt + 24),
+        };
       })()`)
       if (listed.present) pass('the shortcut reference lists 定位当前会话 with ' + JSON.stringify(listed.around))
       else fail('the shortcut reference does not list the locate command')
+      if (listed.copyPresent) pass('the same editor lists 复制会话 ID, so the copy key is rebindable: ' + JSON.stringify(listed.copyAround))
+      else fail('the shortcut reference does not list the copy command')
       await pressEscape(cdp, sessionId)
       await sleep(400)
       await pressEscape(cdp, sessionId)
@@ -529,6 +833,58 @@ async function main() {
       }
     }
 
+    // ---- E. the 心流 switch owns the copy feature -----------------------
+    copy = await evaluate(cdp, sessionId, COPY_PROBE)
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID'])) {
+      pass('the 心流 page renders both preference rows')
+    } else {
+      fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
+    }
+
+    await click(cdp, sessionId, '[role="dialog"] .flow-row:nth-child(2) [role="switch"]')
+    await sleep(1200)
+    copy = await evaluate(cdp, sessionId, COPY_PROBE)
+
+    if (copy.switches[1] === 'false') {
+      pass('the copy preference can be switched off')
+
+      // The sidebar is inert behind the dialog, so close it before probing the
+      // row menu the preference is supposed to have emptied.
+      await pressEscape(cdp, sessionId)
+      await stubClipboard(cdp, sessionId)
+      await openRowMenu(cdp, sessionId, copyRow)
+      copy = await evaluate(cdp, sessionId, COPY_PROBE)
+      if (copy.menuItems.length > 0 && !copy.copyItem) pass('switched off, the row menu no longer offers 复制会话 ID')
+      else fail('the menu row survived the preference being switched off: ' + JSON.stringify(copy.menuItems))
+      await pressEscape(cdp, sessionId)
+      await pressShortcut(cdp, sessionId, { key: 'C', code: 'KeyC', virtualKeyCode: 67, modifiers: 12 })
+      copy = await evaluate(cdp, sessionId, COPY_PROBE)
+      if (copy.copied === null) pass('switched off, Mod+Shift+C copies nothing')
+      else fail('the shortcut still copied while switched off: ' + JSON.stringify(copy.copied))
+
+      await openFlowTab(cdp, sessionId)
+      await click(cdp, sessionId, '[role="dialog"] .flow-row:nth-child(2) [role="switch"]')
+      await sleep(1200)
+      copy = await evaluate(cdp, sessionId, COPY_PROBE)
+      if (copy.switches[1] === 'true') pass('switching it back on restores the copy preference')
+      else fail('the copy preference did not come back: ' + JSON.stringify(copy.switches))
+      await pressEscape(cdp, sessionId)
+      await openRowMenu(cdp, sessionId, copyRow)
+      copy = await evaluate(cdp, sessionId, COPY_PROBE)
+      if (copy.copyItem) pass('the row menu entry is back once the preference is on')
+      else fail('the row menu entry stayed away: ' + JSON.stringify(copy.menuItems))
+      await pressEscape(cdp, sessionId)
+    } else if (copy.rowErrors[1] !== null && copy.rowErrors[0] === null) {
+      // The switch is only drivable once the plugin's Host half — this
+      // checkout's index.js — is the one the instance activated: a preference
+      // the Host schema does not project cannot be saved, however the client
+      // writes it. What the refusal still has to prove is that it lands on the
+      // row that asked for it and not on its neighbour.
+      pass('a refused preference write is reported on its own row, not on its neighbour')
+      skip('the copy switch leg needs this checkout as the installed Host half; install it and restart the instance to run it here')
+    } else {
+      fail('the copy switch neither took nor reported a refusal: ' + JSON.stringify({ switches: copy.switches, errors: copy.rowErrors }))
+    }
     // Leave the dialog closed; the toggle is already back where it started.
     await pressEscape(cdp, sessionId)
   } finally {
@@ -538,7 +894,7 @@ async function main() {
   }
 
   console.log('')
-  console.log(passes.length + ' passed, ' + failures.length + ' failed')
+  console.log(passes.length + ' passed, ' + failures.length + ' failed' + (skips.length === 0 ? '' : ', ' + skips.length + ' skipped'))
   if (failures.length > 0) process.exitCode = 1
 }
 

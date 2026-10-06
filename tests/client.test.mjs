@@ -60,7 +60,15 @@ async function load() {
       if (name === 'react') return fakeReact()
       if (name === 'react-dom') return { createPortal: (element) => element }
       if (name === '@deepseek-ai/dsh-client-ui-primitives') {
-        return { Tooltip: (props) => props.children ?? null, Switch: () => null }
+        return {
+          Tooltip: (props) => props.children ?? null,
+          Switch: () => null,
+          MenuItemButton: (props) => props.children ?? null,
+          Toast: (props) => props.text ?? null,
+          IconCopyOutlineRegular: () => null,
+          IconWarningOutlineRegular: () => null,
+          writeClipboard: (text) => typeof text === 'string' && text.length > 0,
+        }
       }
       throw new Error(`unexpected require: ${name}`)
     })
@@ -236,8 +244,9 @@ test('reads the toggle from the config form, defaulting to shown', async () => {
   assert.equal(readLocateEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
 })
 
-test('apply registers the footer button and the 心流 section', async () => {
+test('apply registers the footer button, the 心流 section and the copy seats', async () => {
   const module = await load()
+  const { MENU_ORDER } = module.internals
   const registrations = []
   const effects = []
   const commands = []
@@ -253,14 +262,24 @@ test('apply registers the footer button and the 心流 section', async () => {
   assert.equal(section.label(), '心流')
   assert.ok(section.order < 40, 'must land ahead of the shipped third-party sections')
 
-  // The one application command, registered for the plugin's whole lifetime.
-  assert.equal(commands.length, 1)
-  assert.equal(commands[0].id, 'flow.locateCurrent')
+  // Both application commands, registered for the plugin's whole lifetime.
+  assert.deepEqual(commands.map((command) => command.id), ['flow.locateCurrent', 'flow.copySessionId'])
   assert.equal(commands[0].label(), '定位当前会话')
+  assert.equal(commands[1].label(), '复制会话 ID')
+
+  // The copy feature adds two seats of its own: the Session row menu row a
+  // right-click opens, and the overlay a finished copy reports through.
+  const menu = registrations.find((entry) => entry.name === 'sidebar.workspaces.session.menu.item')
+  assert.equal(menu.id, 'flow')
+  assert.equal(menu.locale, 'flow')
+  assert.equal(menu.order, MENU_ORDER)
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  assert.equal(overlay.id, 'flow')
+  assert.equal(overlay.locale, 'flow')
 
   // Every registration the module makes is released with its fiber.
-  assert.ok(effects.length >= 3)
-  assert.ok(registrations.length >= 2)
+  assert.ok(effects.length >= 5)
+  assert.ok(registrations.length >= 4)
 })
 
 test('the section is withheld until the Host serves the flow namespace', async () => {
@@ -336,8 +355,172 @@ test('the shortcut defaults stay inside what every declared profile admits', asy
   assert.equal(LOCATE_COMMAND.startsWith('flow.'), true)
 })
 
+/** The copy surfaces' dictionary slice, so assertions read the shipped sentences. */
+const copyCopy = {
+  'copy.noSession': '当前没有打开的会话',
+  'copy.done': '已复制会话 ID',
+  'copy.failed': '复制失败，剪贴板不可用',
+}
+
+test('readCopyEnabled defaults to on and only an explicit false turns it off', async () => {
+  const { readCopyEnabled } = (await load()).internals
+  assert.equal(readCopyEnabled({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readCopyEnabled({ getSnapshot: () => ({ value: { copySessionId: false } }) }), false)
+  assert.equal(readCopyEnabled({ getSnapshot: () => ({ value: { copySessionId: true } }) }), true)
+  assert.equal(readCopyEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+test('the notice store hands out one fresh snapshot per notice', async () => {
+  const { createNoticeStore } = (await load()).internals
+  const store = createNoticeStore()
+  assert.equal(store.getSnapshot(), null)
+
+  let wakes = 0
+  const off = store.subscribe(() => { wakes += 1 })
+  store.show('已复制会话 ID', 'success')
+  // A new object each time is the contract: React compares by identity.
+  assert.deepEqual(store.getSnapshot(), { seq: 1, text: '已复制会话 ID', tone: 'success' })
+  assert.equal(wakes, 1)
+
+  // A second notice carries a new sequence, which remounts the Toast.
+  store.show('复制失败，剪贴板不可用', 'warning')
+  assert.equal(store.getSnapshot().seq, 2)
+  assert.equal(store.getSnapshot().tone, 'warning')
+  assert.equal(wakes, 2)
+
+  off()
+  store.clear()
+  assert.equal(store.getSnapshot(), null)
+  assert.equal(wakes, 2, 'an unsubscribed listener stays silent')
+  store.clear()
+  assert.equal(wakes, 2, 'clearing an empty store is not a second wake-up')
+})
+
+test('copySessionId reports both outcomes instead of failing quietly', async () => {
+  const { copySessionId } = (await load()).internals
+  const seen = []
+  const notify = (text, tone) => seen.push([text, tone])
+  const t = (key) => copyCopy[key]
+
+  assert.equal(await copySessionId({ sessionId: 's1', write: (text) => text === 's1', notify, t }), true)
+  assert.deepEqual(seen, [['已复制会话 ID', 'success']])
+
+  assert.equal(await copySessionId({ sessionId: 's1', write: () => false, notify, t }), false)
+  assert.deepEqual(seen[1], ['复制失败，剪贴板不可用', 'warning'])
+
+  // A clipboard that throws is still a reported failure, never a rejection.
+  const thrown = await copySessionId({ sessionId: 's1', write: () => { throw new Error('denied') }, notify, t })
+  assert.equal(thrown, false)
+  assert.deepEqual(seen[2], ['复制失败，剪贴板不可用', 'warning'])
+})
+
+test('the copy command hands the key back while the preference is off', async () => {
+  const { copyCommand, COPY_COMMAND, COPY_DEFAULTS } = (await load()).internals
+  let copied = 0
+  const command = copyCommand({
+    label: () => '复制会话 ID',
+    enabled: () => false,
+    currentSessionId: () => 's1',
+    copy: () => { copied += 1 },
+    notify: () => { throw new Error('a feature that is off must not speak') },
+    t: (key) => copyCopy[key],
+  })
+
+  assert.equal(command.id, COPY_COMMAND)
+  assert.deepEqual(command.defaults, COPY_DEFAULTS)
+  assert.equal(command.label(), '复制会话 ID')
+  assert.deepEqual([...command.regions], ['page', 'editable'])
+  assert.deepEqual([...command.modals], [])
+  // Passing the gesture on is the point: an off feature must not swallow it.
+  assert.deepEqual(command.resolve(), { status: 'pass' })
+  assert.equal(copied, 0)
+})
+
+test('the copy command copies the Session the conversation column holds', async () => {
+  const { copyCommand } = (await load()).internals
+  const copied = []
+  const command = copyCommand({
+    label: () => '复制会话 ID',
+    enabled: () => true,
+    currentSessionId: () => 's7',
+    copy: (sessionId) => copied.push(sessionId),
+    notify: () => { throw new Error('a successful copy reports through copy()') },
+    t: (key) => copyCopy[key],
+  })
+
+  const resolution = command.resolve()
+  assert.equal(resolution.status, 'handled')
+  // The action captures the Session it resolved against.
+  resolution.run()
+  assert.deepEqual(copied, ['s7'])
+})
+
+test('the copy command says so, in words, when no Session is open', async () => {
+  const { copyCommand } = (await load()).internals
+  const notices = []
+  const command = copyCommand({
+    label: () => '复制会话 ID',
+    enabled: () => true,
+    currentSessionId: () => null,
+    copy: () => { throw new Error('there is nothing to copy') },
+    notify: (text, tone) => notices.push([text, tone]),
+    t: (key) => copyCopy[key],
+  })
+
+  const resolution = command.resolve()
+  // Never blocked: the shell drops a blocked reason on the floor, and a press
+  // that does nothing visible is the one outcome this feature must not have.
+  assert.equal(resolution.status, 'handled')
+  resolution.run()
+  assert.deepEqual(notices, [['当前没有打开的会话', 'warning']])
+})
+
+test('the copy defaults claim the copy combination on every admitting profile', async () => {
+  const { COPY_COMMAND, COPY_DEFAULTS, LOCATE_COMMAND } = (await load()).internals
+  const profiles = Object.keys(COPY_DEFAULTS)
+  // Web Linux admits only Mod+Slash, Mod+Shift+Comma and Mod+Shift+Period, and
+  // every shell that is not macOS or Windows reserves a primary modifier with
+  // KeyC for the browser's own copy. Declaring either throws at registration,
+  // and a throw takes the whole client half down with it — which is exactly how
+  // this combination failed when it was first declared for all five profiles.
+  assert.equal(profiles.includes('web:linux'), false)
+  assert.equal(profiles.includes('desktop:linux'), false)
+  assert.equal(profiles.length, 4)
+  for (const [profile, binding] of Object.entries(COPY_DEFAULTS)) {
+    assert.equal(binding.code, 'KeyC', profile)
+    assert.deepEqual(binding.modifiers, ['primary', 'shift'], profile)
+  }
+  assert.equal(COPY_COMMAND.startsWith('flow.'), true)
+  assert.notEqual(COPY_COMMAND, LOCATE_COMMAND)
+})
+
+test('both dictionaries stay complete, copy included', async () => {
+  const module = await load()
+  const recorded = []
+  module.apply(fakeContext([], [], { recorded }))
+  const flow = recorded.find((entry) => entry.ns === 'flow')
+  assert.ok(flow, 'the plugin registers its dictionary under its own namespace')
+  assert.deepEqual(Object.keys(flow.en).sort(), Object.keys(flow.zh).sort())
+  for (const key of [
+    'copy.label',
+    'copy.menu',
+    'copy.done',
+    'copy.failed',
+    'copy.noSession',
+    'section.copy.title',
+    'section.copy.description',
+  ]) {
+    assert.equal(typeof flow.zh[key], 'string', key)
+    assert.notEqual(flow.zh[key].length, 0, key)
+    assert.equal(typeof flow.en[key], 'string', key)
+  }
+  assert.equal(flow.zh['copy.menu'], '复制会话 ID')
+  assert.equal(flow.zh['copy.done'], '已复制会话 ID')
+  assert.equal(flow.zh['copy.failed'], '复制失败，剪贴板不可用')
+})
+
 /** A client-root stub with exactly the services the module injects. */
-function fakeContext(registrations, effects, { served = true, commands = [] } = {}) {
+function fakeContext(registrations, effects, { served = true, commands = [], recorded = null } = {}) {
   const form = {
     getSnapshot: () => ({ value: {}, writable: true }),
     subscribe: () => () => {},
@@ -375,6 +558,7 @@ function fakeContext(registrations, effects, { served = true, commands = [] } = 
     locale: {
       register: (ns, all) => {
         dicts.set(ns, all)
+        if (recorded !== null) recorded.push({ ns, ...all })
         return () => {}
       },
       bind: (ns) => (key, params) => translate(ns, key, params),

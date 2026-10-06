@@ -1,12 +1,12 @@
 /**
  * dsh-flow — host half.
  *
- * Owns one fact: the plugin's preference surface. `locateButton` is a volatile
- * Config field, which is what makes the settings provider project it into the
- * namespace named by this row's id (`flow`); the browser half reads and writes
- * that namespace through `ctx.configForms`. Nothing else about the plugin is
- * host-side — locating a Session is pure browser work over snapshots the shell
- * already publishes.
+ * Owns one fact: the plugin's preference surface. `locateButton` and
+ * `copySessionId` are volatile Config fields, which is what makes the settings
+ * provider project them into the namespace named by this row's id (`flow`); the
+ * browser half reads and writes that namespace through `ctx.configForms`.
+ * Nothing else about the plugin is host-side — locating a Session, and copying
+ * one's id, are pure browser work over snapshots the shell already publishes.
  *
  * The second fact is a presentation policy: this bundle ships its own settings
  * page (the 心流 section the browser half registers), so the settings provider
@@ -27,9 +27,11 @@ export const name = 'flow'
  *
  * @typedef {object} Config
  * @property {boolean} locateButton - whether the workspace header shows the locate-current-Session button.
+ * @property {boolean} copySessionId - whether a Session row offers "copy Session ID", by right-click menu and by shortcut.
  */
 export const Config = z.object({
   locateButton: z.boolean().default(true).volatile(),
+  copySessionId: z.boolean().default(true).volatile(),
 })
 
 /**

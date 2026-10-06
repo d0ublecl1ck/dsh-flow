@@ -21,10 +21,20 @@ test('the preference defaults to a shown button', () => {
   assert.equal(z.resolve({ locateButton: false }, Config)[0].locateButton.get(), false)
 })
 
-test('the toggle is volatile, which is what the settings form projects', () => {
-  const field = Config.dict.locateButton
+test('the copy switch defaults to on, and is volatile for the same reason', () => {
+  assert.equal(z.resolve({}, Config)[0].copySessionId.get(), true)
+  assert.equal(z.resolve({ copySessionId: false }, Config)[0].copySessionId.get(), false)
+  const field = Config.dict.copySessionId
   assert.equal(field.meta.volatile, true)
   assert.equal(field.type, 'boolean')
+})
+
+test('the toggles are volatile, which is what the settings form projects', () => {
+  for (const name of ['locateButton', 'copySessionId']) {
+    const field = Config.dict[name]
+    assert.equal(field.meta.volatile, true, name)
+    assert.equal(field.type, 'boolean', name)
+  }
 })
 
 test('apply claims the flow namespace as a hand-written page', () => {

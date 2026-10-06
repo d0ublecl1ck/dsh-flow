@@ -1,6 +1,6 @@
 # dsh-flow
 
-DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）+ 设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
+DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`），以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
 
 ## 结构与约定
 
@@ -27,14 +27,19 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 - 定位动作只存在于挂载中的按钮里（它要解析标题行容器、拥有重试节奏与状态文本），命令是插件级注册一次 —— 两者通过 `createLocateSeat()` 这个单槽座位相接：按钮挂载时 publish，命令 resolve 时读当前发布，并在 resolve 里捕获它看到的那份 handler。
 - 默认键：五个 profile 全部 `primary+shift+KeyD`。**不要给 `web:linux` 声明默认键**：该 profile 只接受 `Mod+/`、`Mod+Shift+,`、`Mod+Shift+.`，声明别的会在注册时抛错并**连带整个客户端半边不挂载**。同理，`web:*` 下裸 `Command+字母` 会被判 `unsupported-browser`，`⌥` 组合可能被 macOS 当死键。
 - 加新命令前先确认字母没被占用：注册表在注册时校验**所有已声明 profile** 的重叠，冲突会抛错（同样是整个半边挂掉）。当前只有 `flow.locateCurrent` 占 `KeyD`；2026-10-04 实测全量客户端清单（9.1MB，官方 + 第三方）里 `code: "KeyD"` 出现 0 次。
+- 复制命令 id `flow.copySessionId`，默认键 `primary+shift+KeyC`，**只声明四个 profile**（`desktop:macos`、`desktop:windows`、`web:macos`、`web:windows`）。两个 Linux profile 都不能声明：注册表的 `bindingIssue()` 把「主修饰键 + `KeyC`」判成 `reserved`（浏览器自己的复制），任何非 macOS/Windows 的 shell 都会命中，声明即抛错、整个半边挂掉 —— 这是本仓库踩过的一次真实事故，`tests/client.test.mjs` 里现在有断言钉住它。macOS/Windows 两个 runtime 之所以没事，是因为它们先走 `isWebBindingAllowed()` 的 `Mod+Shift` 分支直接 return null，压根走不到保留列表。
+- 复制的两个入口各自独立：菜单项自己持有 `copySessionId()`，快捷键命令在 `resolve()` 里用 `currentSessionId()` 取当前会话；两者写同一个 notice seat，因此在哪边复制都有一致的提示。
 
 ## 依赖的官方契约（脆弱点集中在这里）
 
-- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）。
+- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（复制提示的 `Toast` 宿主）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
+- 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
 - 服务：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts`。
+- 模块：`@deepseek-ai/dsh-client-ui-primitives` 是动态客户端包的隐式 baseline external，本轮用到 `MenuItemButton` / `Toast` / `writeClipboard`（同一个 `require`）。`writeClipboard` 只出现在导出清单里，官方 README 没写它 —— 它不存在时症状是复制永远报失败，所以改动后要跑真浏览器验收，不能只看单测。
+- 复制行直接用官方包里的 `IconCopyOutlineRegular`，**没有**内联进本仓库，因此 `THIRD-PARTY-NOTICES.md` 不需要新增条目；`LocateIcon` 的内联约定不受影响。
 - CSS-module 的 local name（`sectionHeader` 等）比构建哈希稳定，这是唯一被依赖的脆弱点。官方改这些名字中的任何一个，症状都是**静默失效**（按钮不出现、定位不动作、设置行消失），所以每次动完必须跑 `npm run verify:browser`，而不是只看单测。
 
 ## 偏好与命名空间
@@ -53,12 +58,18 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 ## 验证
 
 ```sh
-npm test                 # 22 条纯逻辑 + 接线断言，不需要运行中的实例
-npm run verify:browser   # 13 条真浏览器断言，需要本机跑着 DSH Web 实例
+npm test                 # 31 条纯逻辑 + 接线断言，不需要运行中的实例
+npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
+npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
 ```
 
 `verify:browser` 会改变界面状态（展开分组、开关偏好），结束时全部复原；它只用无头 Chrome，不弹可见窗口，手势一律走 `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`。
+
+两处必须知道的边界：
+
+- `--client <path>` 把指定文件的浏览器半边在飞行中替换进**合并后的**插件包（`replaceSegment()` 按 `window.__ModuleLoader__.load(` 注册调用与 `\n;\n` 分隔符定位片段，不按字节数：官方包被包装过，本地 `link:` 包是原样拼进去的，两种形状都得认）。它**只替换浏览器半边**：新加的 Config 字段要被 settings 域投影、要能保存，实例激活的宿主半边也得是这份代码。实例加载的是旧宿主时，设置写入那一段会 `SKIP` 并附原因（页面上同时如实显示保存失败），不会假装通过；片段定位失败则直接 `FAIL`，不会静默跑回旧代码。
+- 右键手势要拆成两半：CDP 的真实右键按下 + 在行坐标上补发 `contextmenu`。无头 Chrome 不会把右键按下变成 `contextmenu`，而 `contextmenu` 是官方行处理器唯一的入口，不补发就永远测不到那个菜单。同理，设置弹窗里的目标要先 `scrollIntoView` 再量坐标。
 
 若怀疑运行中的实例没加载本插件，先看清单而不是猜：
 
