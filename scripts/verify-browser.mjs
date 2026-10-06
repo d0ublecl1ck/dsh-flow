@@ -330,6 +330,35 @@ async function stubClipboard(cdp, sessionId) {
   })()`)
 }
 
+/**
+ * Wait for the copy preference's switch to read back as `expected`.
+ *
+ * The write is a Host round trip, so the switch is polled instead of read once
+ * after a fixed sleep; running out of patience is not an error here, because the
+ * assertion that follows reports what the switch actually says.
+ *
+ * @param expected - the `aria-checked` value to wait for.
+ */
+async function settled(cdp, sessionId, expected) {
+  const expression = '(() => { const n = document.querySelector(' + JSON.stringify('[role="dialog"] .flow-row:nth-child(2) [role="switch"]') + '); return n !== null && n.getAttribute("aria-checked") === ' + JSON.stringify(expected) + ' })()'
+  try {
+    await waitFor(cdp, sessionId, expression, 'the copy preference to settle at ' + expected, 8000)
+  } catch {
+    // Report through the assertion that follows, with the row's own error text.
+  }
+}
+
+/** Put the copy preference back on, whatever a previous run left behind. */
+async function ensureCopyOn(cdp, sessionId) {
+  await openFlowTab(cdp, sessionId)
+  const checked = await evaluate(cdp, sessionId, '(() => { const n = document.querySelector(' + JSON.stringify('[role="dialog"] .flow-row:nth-child(2) [role="switch"]') + '); return n === null ? null : n.getAttribute("aria-checked") })()')
+  if (checked !== 'true') {
+    await click(cdp, sessionId, '[role="dialog"] .flow-row:nth-child(2) [role="switch"]')
+    await settled(cdp, sessionId, 'true')
+  }
+  await pressEscape(cdp, sessionId)
+}
+
 /** What the copy surfaces look like right now. */
 const COPY_PROBE = `(() => {
   const items = [...document.querySelectorAll('[role="menuitem"]')];
@@ -529,6 +558,36 @@ function ownerOf(rowKeys, current) {
   return null
 }
 
+/**
+ * Stop the throwaway Chrome and delete its profile.
+ *
+ * A bare kill plus one removal is not enough: the profile is still being written
+ * while the process dies, so the removal can lose the race and throw ENOTEMPTY —
+ * and a throw from the `finally` block replaces whatever the run was actually
+ * reporting, turning a green run into a crash and hiding the verdict when the
+ * output is piped. Waiting for the exit, retrying, and never throwing keeps the
+ * report the report's own.
+ *
+ * @param chrome - the spawned Chrome child process.
+ * @param profile - its throwaway user-data directory.
+ */
+async function shutdown(chrome, profile) {
+  if (chrome.exitCode === null) chrome.kill('SIGKILL')
+  const deadline = Date.now() + 10000
+  while (chrome.exitCode === null && chrome.signalCode === null && Date.now() < deadline) {
+    await sleep(100)
+  }
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      rmSync(profile, { recursive: true, force: true })
+      return
+    } catch {
+      await sleep(200)
+    }
+  }
+  console.log('  NOTE  could not remove the throwaway Chrome profile: ' + profile)
+}
+
 async function main() {
   const credentialsPath = join(config.home, '.credentials.yaml')
   if (!existsSync(credentialsPath)) throw new Error('DSH home has no .credentials.yaml: ' + credentialsPath)
@@ -710,6 +769,10 @@ async function main() {
     // is then asked for that row's id, not the open Session's.
     const openSessionId = current.slice('session:'.length)
     const candidateRows = await evaluate(cdp, sessionId, `(() => [...document.querySelectorAll('[class*="listArea"] [data-row-key^="session:"]')].map((e) => e.dataset.rowKey))()`)
+    // A run that died mid-way can leave this preference off, and an off
+    // preference hides the very row under test: put it back rather than let one
+    // interrupted run fail the next one.
+    await ensureCopyOn(cdp, sessionId)
     await stubClipboard(cdp, sessionId)
     let copy = null
     let copyRow = null
@@ -864,8 +927,11 @@ async function main() {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
 
+    // A preference write round-trips through the Host, so the switch is read
+    // back on a bounded wait rather than a guessed sleep: a slow answer must not
+    // read as a refusal, and a real refusal still has to fail this run.
     await click(cdp, sessionId, '[role="dialog"] .flow-row:nth-child(2) [role="switch"]')
-    await sleep(1200)
+    await settled(cdp, sessionId, 'false')
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
 
     if (copy.switches[1] === 'false') {
@@ -881,16 +947,29 @@ async function main() {
       else fail('the menu row survived the preference being switched off: ' + JSON.stringify(copy.menuItems))
       await pressEscape(cdp, sessionId)
       await pressShortcut(cdp, sessionId, { key: 'C', code: 'KeyC', virtualKeyCode: 67, modifiers: 12 })
+      // The app refuses this gesture while the feature is off, so it reaches the
+      // browser, where it asks for the element picker; Escape stands that down
+      // before the next press, which the picker would otherwise swallow.
+      await pressEscape(cdp, sessionId)
       copy = await evaluate(cdp, sessionId, COPY_PROBE)
       if (copy.copied === null) pass('switched off, Mod+Shift+C copies nothing')
       else fail('the shortcut still copied while switched off: ' + JSON.stringify(copy.copied))
 
       await openFlowTab(cdp, sessionId)
+      // A control still busy with the previous write is disabled, and pressing a
+      // disabled control does nothing — which looks exactly like a product bug
+      // from the outside. Wait for it to become pressable instead.
+      await waitFor(
+        cdp,
+        sessionId,
+        '(() => { const n = document.querySelector(' + JSON.stringify('[role="dialog"] .flow-row:nth-child(2) [role="switch"]') + '); return n !== null && n.disabled === false })()',
+        'the copy switch to become pressable',
+      )
       await click(cdp, sessionId, '[role="dialog"] .flow-row:nth-child(2) [role="switch"]')
-      await sleep(1200)
+      await settled(cdp, sessionId, 'true')
       copy = await evaluate(cdp, sessionId, COPY_PROBE)
       if (copy.switches[1] === 'true') pass('switching it back on restores the copy preference')
-      else fail('the copy preference did not come back: ' + JSON.stringify(copy.switches))
+      else fail('the copy preference did not come back: ' + JSON.stringify({ switches: copy.switches, errors: copy.rowErrors }))
       await pressEscape(cdp, sessionId)
       await openRowMenu(cdp, sessionId, copyRow)
       copy = await evaluate(cdp, sessionId, COPY_PROBE)
@@ -912,8 +991,7 @@ async function main() {
     await pressEscape(cdp, sessionId)
   } finally {
     socket?.close()
-    chrome.kill('SIGKILL')
-    rmSync(profile, { recursive: true, force: true })
+    await shutdown(chrome, profile)
   }
 
   console.log('')
