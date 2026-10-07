@@ -132,7 +132,7 @@ curl -s -H "Cookie: <现签的会话 Cookie>" http://127.0.0.1:43129/ | grep -c 
 ## 图标与展示产物
 
 - 按钮图标是 IntelliJ 平台自带的 *Locate* 图形，逐字内联在 `client.js` 的 `LocateIcon` 里，仅把固定填充色换成 `currentColor`。`assets/locate-flow.svg` 里的同一图形由 `scripts/render-assets.mjs` 生成。**不要**凭印象重画这个图形：出处、改动说明与 Apache-2.0 正文在 `THIRD-PARTY-NOTICES.md`，改图必须同步改那里。
-- `assets/` 是**手绘示意图，不是截图**（生成脚本的可信来源只有代码本身），因此天然不含真实会话/工作区/账号信息。若将来改用真实截图，必须先走裁剪与打码，再入库。
+- `assets/` 是**手绘示意图，不是截图**（生成脚本的可信来源只有代码本身），因此天然不含真实会话/工作区/账号信息。当前四张：`locate-flow`、`code-menu`、`link-open`、`send-key`（发送键对调）。若将来改用真实截图，必须先走裁剪与打码，再入库。
 - `screenshots.json` 放在仓库根，市场会读它（1–8 张，图片必须是 GitHub 自己的托管域名，`raw.githubusercontent.com` 等）。
 
 ## 发布与上架（2026-10-04 实拉门槛）

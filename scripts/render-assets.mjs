@@ -11,6 +11,8 @@
  *  - `assets/code-menu.svg` — the inline-code right-click menu: the press, the
  *    two entries, and the three conditions a press must satisfy before the
  *    feature takes it (see `client.js` `codeMenuTarget`).
+ *  - `assets/send-key.svg` — the same Enter chord before and after the send-key
+ *    swap, plus what the rewrite does and does not touch;
  *  - `assets/link-open.svg` — the same `http://localhost` click before and after
  *    the plugin, plus the host route's contract (see `index.js` `openRequestHandler`).
  *  - `assets/*.png` — each drawing rasterised at 2x through a headless Chrome,
@@ -385,6 +387,66 @@ function linkDrawing() {
     + parts.join('') + '</svg>\n'
 }
 /**
+ * The send-key explainer: the same two keys before and after the switch, plus
+ * what the plugin does and does not touch.
+ *
+ * @returns the SVG document.
+ */
+function sendKeyDrawing() {
+  const parts = []
+  parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
+  parts.push(text(28, 44, '发送键对调：Enter 换行，⌘/Ctrl+Enter 发送', { size: 22, weight: 600 }))
+  parts.push(text(28, 68, '官方那一对键上下互换；只在对话输入框里生效（示意图，非截图）', { size: 13, fill: MUTED }))
+  const capW = 208
+  parts.push(rect(WIDTH - 28 - capW, 26, capW, 44, { fill: PANEL, radius: 10 }))
+  parts.push(text(WIDTH - 28 - capW / 2, 54, '心流 → ⌘+Enter 发送', { size: 14, weight: 600, anchor: 'middle' }))
+  /** One keycap, an arrow, and where the press goes. */
+  const keyRow = (x, y, keys, result, hot) => {
+    const out = []
+    out.push(rect(x, y - 17, 150, 32, { fill: hot ? ACCENT_SOFT : '#f1f2f4', stroke: 'none', radius: 7 }))
+    out.push(text(x + 75, y + 4, keys, { size: 13, weight: 600, fill: hot ? ACCENT : INK, anchor: 'middle' }))
+    out.push(text(x + 172, y + 4, '→', { size: 15, fill: MUTED, anchor: 'middle' }))
+    out.push(text(x + 196, y + 4, result, { size: 13, fill: hot ? ACCENT : INK, weight: hot ? 600 : 400 }))
+    return out
+  }
+  const py = 104
+  const ph = 300
+  const pw = 520
+  // before: the shipped pair
+  parts.push(rect(28, py, pw, ph, { radius: 12 }))
+  parts.push(text(48, py + 32, '开关关（官方行为）', { size: 14, weight: 600, fill: MUTED }))
+  parts.push(text(48, py + 56, 'Enter 发送、Shift+Enter 换行', { size: 12, fill: MUTED }))
+  parts.push(...keyRow(48, py + 108, 'Enter', '发送', false))
+  parts.push(...keyRow(48, py + 156, '⇧Enter', '换行', false))
+  parts.push(...keyRow(48, py + 204, '⌘/Ctrl+Enter', '另一种发送方式', false))
+  parts.push(text(48, py + 252, '智能体运行时 Queue／Steer 的另一档，由官方设置决定', { size: 11, fill: MUTED }))
+  // arrow between the panels
+  parts.push(text(568, py + 150, '→', { size: 22, fill: MUTED, anchor: 'middle' }))
+  parts.push(text(568, py + 174, '开关打开', { size: 11, fill: MUTED, anchor: 'middle' }))
+  // after: the swapped pair
+  parts.push(rect(652, py, pw, ph, { radius: 12 }))
+  parts.push(text(672, py + 32, '开关开：写消息时 Enter 只换行', { size: 14, weight: 600, fill: ACCENT }))
+  parts.push(text(672, py + 56, '⌘+Enter 发送，⇧Enter 仍是换行', { size: 12, fill: MUTED }))
+  parts.push(...keyRow(672, py + 108, 'Enter', '换行', true))
+  parts.push(...keyRow(672, py + 156, '⇧Enter', '换行', true))
+  parts.push(...keyRow(672, py + 204, '⌘/Ctrl+Enter', '发送', true))
+  parts.push(text(672, py + 252, '⇧⌘/Ctrl+Enter 保留官方的「另一种发送方式」', { size: 11, fill: MUTED }))
+  // the contract strip
+  const cy = 428
+  parts.push(rect(28, cy, WIDTH - 56, 164, { radius: 12 }))
+  parts.push(text(48, cy + 32, '实现边界：换的是「按下的那个键」，不是改写输入框', { size: 13, weight: 600 }))
+  parts.push(text(48, cy + 58, '捕获阶段拿走这一下按键，再对着同一个输入框补发官方本来就认的另一个手势 → 提交判定、撤销历史、输入法记账仍是官方那一套', { size: 12 }))
+  parts.push(text(48, cy + 80, '一律放行：目标不在输入框内、输入法组字中、⌥ 组合、以及 / 或 @ 菜单正有高亮候选（那一下 Enter 是「选中」）', { size: 12 }))
+  parts.push(text(48, cy + 102, '官方快捷键表里那 11 行只读项一个都不动（发送／换行在官方设置页仍是不可改）；开关关闭时连监听都不注册', { size: 12 }))
+  parts.push(rect(44, cy + 118, WIDTH - 88, 32, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(60, cy + 139, '开关默认关：没打开过它的人拿到的就是官方行为；想用就在 设置 → 心流 → 「⌘+Enter 发送」里打开。', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(28, HEIGHT - 16, '本插件不写你的草稿内容、不碰提交链路；唯一的副作用是把一个键盘手势换成官方认的另一个。', { size: 11, fill: MUTED }))
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：Enter 与 Cmd/Ctrl+Enter 发送键对调，以及实现边界">'
+    + parts.join('') + '</svg>\n'
+}
+
+/**
  * Rasterise one local file through a throwaway headless Chrome.
  *
  * Chrome writes the screenshot and then, on this platform, sometimes keeps the
@@ -446,6 +508,7 @@ const ASSETS = [
   { name: 'locate-flow', draw: drawing },
   { name: 'code-menu', draw: codeMenuDrawing },
   { name: 'link-open', draw: linkDrawing },
+  { name: 'send-key', draw: sendKeyDrawing },
 ]
 
 async function main() {
