@@ -71,6 +71,8 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **⇧⌘Enter 保留加速档**：换行分支丢掉 Shift 会顺手丢掉「另一种发送方式」，所以 ⇧⌘Enter 补发的是**保留主修饰键**的 Enter。这是刻意的补偿，不是漏改。
 - **监听只在偏好打开时存在**（与行内代码菜单同一范式）：表单的 subscribe 当 Host 回声用，翻到 false 就 detach，翻回来再 attach；关掉时 document 上根本没有 keydown 监听。设置页的开关文案与这条实现一一对应。
 
+## 依赖的官方契约（脆弱点集中在这里）
+
 - 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占两个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
