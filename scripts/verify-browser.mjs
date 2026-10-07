@@ -341,9 +341,11 @@ async function clickExactMenuEntry(cdp, sessionId, label) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
-      return
+      return true
     }
-    if (Date.now() > deadline) throw new Error('no menu entry labelled exactly ' + label)
+    // A row that never appears is a verdict for the caller to report: throwing
+    // here aborted the whole run and hid every leg after it.
+    if (Date.now() > deadline) return false
   }
 }
 
@@ -448,8 +450,18 @@ async function openContentSession(cdp, sessionId) {
         continue
       }
       try {
-        await waitFor(cdp, sessionId, 'document.querySelectorAll("code").length > 0', 'inline code in ' + row.key, 20000)
-        return { ok: true, rowKey: row.key, codes: await evaluate(cdp, sessionId, 'document.querySelectorAll("code").length') }
+        const count = 'document.querySelectorAll("code").length'
+        await waitFor(cdp, sessionId, count + ' > 0', 'inline code in ' + row.key, 20000)
+        // The poll can be satisfied by a body that then re-renders to zero — the
+        // shell swaps transcript views while a Session settles, and a run that
+        // trusted the poll's verdict read "0 code elements" off a body it had
+        // just declared ready. So the count is read back, not assumed.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const codes = await evaluate(cdp, sessionId, count)
+          if (codes > 0) return { ok: true, rowKey: row.key, codes }
+          await sleep(500)
+        }
+        if (!tried.includes(row.key)) tried.push(row.key)
       } catch {
         // The next row may be the one with a body; a row that never renders one
         // is not an error, it is the reason this loop exists.
@@ -493,30 +505,50 @@ async function codeMenuSwitchState(cdp, sessionId) {
  * @returns whether the switch reads back as `want`.
  */
 async function setCodeMenu(cdp, sessionId, want) {
-  if (await codeMenuSwitchState(cdp, sessionId) === want) return true
-  await waitFor(
-    cdp,
-    sessionId,
-    `(() => { const node = document.querySelector(${JSON.stringify(CODE_MENU_SWITCH)}); return node !== null && node.disabled === false })()`,
-    'the code-menu switch to become pressable',
-  ).catch(() => { /* the read-back below reports it */ })
-  await click(cdp, sessionId, CODE_MENU_SWITCH)
-  await waitFor(
-    cdp,
-    sessionId,
-    `(() => { const node = document.querySelector(${JSON.stringify(CODE_MENU_SWITCH)}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`,
-    'the code-menu preference to settle at ' + want,
-    8000,
-  ).catch(() => { /* the read-back below reports it */ })
-  return await codeMenuSwitchState(cdp, sessionId) === want
+  return pressFlowSwitch(cdp, sessionId, CODE_MENU_SWITCH, want)
+}
+
+/** Read one 心流 switch's `aria-checked`, or null when its row is not on screen. */
+async function flowSwitchState(cdp, sessionId, selector) {
+  return evaluate(cdp, sessionId, `(() => {
+    const node = document.querySelector(${JSON.stringify(selector)});
+    return node === null ? null : node.getAttribute('aria-checked');
+  })()`)
+}
+
+/**
+ * Press one 心流 switch until it reads back as `want`.
+ *
+ * A preference write is a Host round trip. Two facts measured on a live instance
+ * shape the bounds below: the new value can land several seconds after the press
+ * (a switch read back `false` for a whole 8s wait and showed the new value on
+ * the next read), and a press that lands while the form is still settling is
+ * simply lost. So the press is retried on a bounded wait instead of being trusted
+ * once — a switch that really refuses still reads back wrong after every attempt,
+ * and the caller reports that as the failure it is.
+ *
+ * @returns whether the switch reads back as `want`.
+ */
+async function pressFlowSwitch(cdp, sessionId, selector, want) {
+  const quoted = JSON.stringify(selector)
+  const settled = `(() => { const node = document.querySelector(${quoted}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`
+  const pressable = `(() => { const node = document.querySelector(${quoted}); return node !== null && node.disabled === false })()`
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await flowSwitchState(cdp, sessionId, selector) === want) return true
+    await waitFor(cdp, sessionId, pressable, 'the switch to become pressable', 4000).catch(() => { /* the press below is the next try */ })
+    try {
+      await click(cdp, sessionId, selector)
+    } catch {
+      // Nothing hit-testable yet; the next attempt waits again.
+    }
+    await waitFor(cdp, sessionId, settled, 'the preference to settle at ' + want, 12000).catch(() => { /* the read-back below reports it */ })
+  }
+  return await flowSwitchState(cdp, sessionId, selector) === want
 }
 
 /** Read the send-key preference off the 心流 page's fifth row. */
 async function modEnterSwitchState(cdp, sessionId) {
-  return evaluate(cdp, sessionId, `(() => {
-    const node = document.querySelector(${JSON.stringify(MOD_ENTER_SWITCH)});
-    return node === null ? null : node.getAttribute('aria-checked');
-  })()`)
+  return flowSwitchState(cdp, sessionId, MOD_ENTER_SWITCH)
 }
 
 /**
@@ -525,25 +557,18 @@ async function modEnterSwitchState(cdp, sessionId) {
  * Same discipline as the inline-code switch: the write is a Host round trip, so
  * the answer is waited for rather than read after a guessed sleep.
  *
+ * Two facts measured on a live instance shape the bounds below: a preference
+ * write can land several seconds after the press (the switch read back `false`
+ * for the whole of an 8s wait and then showed the new value on the next read),
+ * and a press that lands while the form is still settling is simply lost. So the
+ * press is retried on the same bounded wait instead of being trusted once — a
+ * switch that really refuses still reads back wrong after all three tries, and
+ * the caller reports that as the failure it is.
+ *
  * @returns whether the switch reads back as `want`.
  */
 async function setModEnter(cdp, sessionId, want) {
-  if (await modEnterSwitchState(cdp, sessionId) === want) return true
-  await waitFor(
-    cdp,
-    sessionId,
-    `(() => { const node = document.querySelector(${JSON.stringify(MOD_ENTER_SWITCH)}); return node !== null && node.disabled === false })()`,
-    'the send-key switch to become pressable',
-  ).catch(() => { /* the read-back below reports it */ })
-  await click(cdp, sessionId, MOD_ENTER_SWITCH)
-  await waitFor(
-    cdp,
-    sessionId,
-    `(() => { const node = document.querySelector(${JSON.stringify(MOD_ENTER_SWITCH)}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`,
-    'the send-key preference to settle at ' + want,
-    8000,
-  ).catch(() => { /* the read-back below reports it */ })
-  return await modEnterSwitchState(cdp, sessionId) === want
+  return pressFlowSwitch(cdp, sessionId, MOD_ENTER_SWITCH, want)
 }
 
 /** What the composer currently holds, and whether it would take a keystroke. */
@@ -1563,7 +1588,8 @@ async function main() {
         await shoot(cdp, sessionId, 'code-menu.png')
 
         // ② 复制 writes the code's own text
-        await clickExactMenuEntry(cdp, sessionId, '复制')
+        const choseCopy = await clickExactMenuEntry(cdp, sessionId, '复制')
+        if (!choseCopy) fail('the inline-code menu never offered 复制')
         try {
           await waitFor(cdp, sessionId, 'window.__copied !== null', 'the inline-code clipboard write')
         } catch { /* the assertion below is the report */ }
@@ -1725,24 +1751,7 @@ async function main() {
       const node = document.querySelector(${JSON.stringify(linkRow)});
       return node === null ? null : node.getAttribute('aria-checked');
     })()`)
-    const setLink = async (want) => {
-      if (await linkChecked() === want) return true
-      await waitFor(
-        cdp,
-        sessionId,
-        `(() => { const node = document.querySelector(${JSON.stringify(linkRow)}); return node !== null && node.disabled === false })()`,
-        'the link switch to become pressable',
-      ).catch(() => { /* the read-back below reports it */ })
-      await click(cdp, sessionId, linkRow)
-      await waitFor(
-        cdp,
-        sessionId,
-        `(() => { const node = document.querySelector(${JSON.stringify(linkRow)}); return node !== null && node.getAttribute('aria-checked') === ${JSON.stringify(want)} })()`,
-        'the link preference to settle at ' + want,
-        8000,
-      ).catch(() => { /* the read-back below reports it */ })
-      return await linkChecked() === want
-    }
+    const setLink = async (want) => await pressFlowSwitch(cdp, sessionId, linkRow, want)
     const ourCalls = (opened) => opened.calls.filter((call) => call.route.endsWith('/flow/open-external'))
 
     const onDuty = await setLink('true')
