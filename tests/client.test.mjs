@@ -1892,4 +1892,25 @@ test('changesFileRows lead with the default action, then the editors, and end on
   assert.deepEqual(changesFileRows(null).map((row) => row.kind), [])
 })
 
+test('a default editor row wears the dictionary marker with its own name', async () => {
+  // The shipped dictionary is the source of truth here: its placeholder is
+  // `{app}`, and handing the translator a `{name}` leaves the literal
+  // `{app}（默认）` on screen — the exact defect this test exists to keep out.
+  const module = await load()
+  const { changesFileRowLabel } = module.internals
+  const recorded = []
+  module.apply(fakeContext([], [], { recorded }))
+  const zh = recorded.find((entry) => entry.ns === 'flow').zh
+  const t = (key, params) => {
+    const template = zh[key]
+    if (params === undefined) return template
+    return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
+  }
+
+  assert.equal(changesFileRowLabel({ kind: 'app', app: { label: 'VS Code', default: true } }, t), 'VS Code（默认）')
+  assert.equal(changesFileRowLabel({ kind: 'app', app: { label: 'Zed', default: false } }, t), 'Zed')
+  assert.equal(changesFileRowLabel({ kind: 'reveal', labelKey: 'changesFile.reveal' }, t), '在文件管理器中显示')
+  assert.equal(changesFileRowLabel({ kind: 'open', labelKey: 'changesFile.open' }, t), '用默认应用打开')
+})
+
 

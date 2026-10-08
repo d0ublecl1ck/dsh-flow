@@ -1474,6 +1474,25 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The text one changed-file menu row wears.
+     *
+     * An application row names the application — the OS default carries the
+     * dictionary's default marker, whose placeholder is `{app}`, not `{name}`:
+     * passing the wrong one leaves the literal `{app}（默认）` on screen, which
+     * is exactly what shipped once. A helper so the substitution is pinned by a
+     * test instead of only by looking at the menu.
+     *
+     * @param row - one row from :func:`changesFileRows`.
+     * @param t - the plugin's localized copy.
+     * @returns the label.
+     */
+    function changesFileRowLabel(row, t) {
+      if (row.kind !== 'app') return t(row.labelKey)
+      if (row.app.default !== true) return row.app.label
+      return t('changesFile.appDefault', { app: row.app.label })
+    }
+
+    /**
      * The rows one changed-file menu shows.
      *
      * The default action and the file-manager reveal are always there, so the
@@ -2219,9 +2238,7 @@ window.__ModuleLoader__.load({
               : undefined,
             onSelect: () => { choose(row) },
           },
-          row.kind === 'app'
-            ? (row.app.default === true ? t('changesFile.appDefault', { name: row.app.label }) : row.app.label)
-            : t(row.labelKey),
+          changesFileRowLabel(row, t),
         )),
       )
     }
@@ -2921,6 +2938,7 @@ window.__ModuleLoader__.load({
         readChangesFileOpen,
         editorApplications,
         changesFileRows,
+        changesFileRowLabel,
         openChangedFile,
         isPlainLeftPress,
         codeOpenTarget,
