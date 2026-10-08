@@ -8,7 +8,8 @@
 - fail open：探测给不出确定答案（目录、宿主不在、超时）时不猜着打开，有壳 button 就退回它、没有就什么都不做；路径确定不存在时仍是 `找不到这个路径 <这段代码>` 的非阻塞提示。
 - 「心流」→「行内代码右键菜单」的说明文案同步改成实际行为（旧文案还写着「单击行为不受影响」）。
 - 修一个只在真机暴露的接线错误：插件没有 inject `remote` / `remote.workspaceFiles` / `sidebarRight`。少前两个时 `ctx.remote.workspaceFiles.stat` 是 `undefined`、探测恒 unknown、每次按压静默 fail-open 退回壳（壳用原文打开后报「文件不存在」）；少 `sidebarRight` 时按压被认领却什么都不打开。
-- 测试从 74 条增至 85 条（+11：展开边界、地址语法、无 button 与壳接线两种 `~/…` 命中、missing/unknown/无家目录的 fail open、菜单接线、inject 契约）。
+- `~/…` 探测为**目录**时改走宿主既有的 `POST /open-in-app/open`（`{app, path}`，app 按 `finder` / `explorer` / `filemanager` 取本机第一个可用的）在平台文件管理器打开：侧栏预览只显示文件，退回壳对目录只会得到「path open failed」。
+- 测试从 74 条增至 88 条（+14：展开边界、地址语法、无 button 与壳接线两种 `~/…` 命中、missing/unknown/无家目录的 fail open、目录判定与文件管理器打开、菜单接线、inject 契约）。
 
 ## 0.6.0
 

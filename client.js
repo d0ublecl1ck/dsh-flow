@@ -106,6 +106,15 @@ window.__ModuleLoader__.load({
     /** Exact Host route that hands one URL to the platform opener. */
     const OPEN_ROUTE = '/flow/open-external'
 
+    /** Host route that opens one existing absolute directory in a chosen application. */
+    const OPEN_IN_APP_ROUTE = '/open-in-app/open'
+
+    /** Host route that lists the applications this Host can actually launch. */
+    const OPEN_IN_APP_APPS_ROUTE = '/open-in-app/apps'
+
+    /** Catalog ids that mean "the platform file manager", best first. */
+    const FILE_MANAGER_APPS = ['finder', 'explorer', 'filemanager']
+
     /** The schemes the OS opener is allowed to receive. */
     const OPENABLE = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
@@ -769,15 +778,30 @@ window.__ModuleLoader__.load({
      * feature must never hide a path that exists.
      *
      * @param result - whatever the probe answered.
-     * @returns `present`, `missing`, or `unknown`.
+     * @returns `present`, `directory`, `missing`, or `unknown`.
      */
     function statVerdict(result) {
       if (result !== null && typeof result === "object" && result.ok === true) return "present"
       const error = result !== null && typeof result === "object" ? result.error : null
       const code = String(error?.code ?? "")
       const message = String(error?.message ?? "")
+      const kind = String(error?.details?.kind ?? "")
       if (/not[-_ ]?found|enoent|no such file/i.test(code + " " + message)) return "missing"
+      // A directory is a real, addressable thing — just not a file the Sidebar
+      // preview can show. It is the one other verdict this plugin acts on.
+      if (/not-regular-file/i.test(code) && (kind === "directory" || /\bdirectory\b/i.test(message))) return "directory"
       return "unknown"
+    }
+
+    /**
+     * The catalog id of this Host's file manager, from the ids it offers.
+     *
+     * @param apps - the `apps` array `/open-in-app/apps` answered, when it did.
+     * @returns the best matching id, or null when the Host offers none.
+     */
+    function fileManagerAppOf(apps) {
+      if (!Array.isArray(apps)) return null
+      return FILE_MANAGER_APPS.find((id) => apps.includes(id)) ?? null
     }
 
     /**
@@ -817,7 +841,8 @@ window.__ModuleLoader__.load({
      * @param plan - the verdict from `inlineCodePlan`.
      * @param input.stat - `(path) => Promise<probe result>`, on the planned path.
      * @param input.open - re-dispatch the shell activation for one element.
-     * @param input.openHome - open one absolute path in the Sidebar.
+     * @param input.openHome - open one absolute file in the Sidebar.
+     * @param input.openDirectory - open one absolute directory in the platform file manager.
      * @param input.notify - raise a notice.
      * @param input.t - the plugin's localized copy.
      * @returns `missing` (noticed), `open` (opened), or `unknown` (left alone).
@@ -834,6 +859,12 @@ window.__ModuleLoader__.load({
           if (plan.kind === "shell") {
             input.open(hit.element)
             return "open"
+          }
+          if (verdict === "directory") {
+            // The Sidebar preview shows files only, so a directory takes the
+            // Host's own open-in-app route out to the platform file manager.
+            return Promise.resolve(input.openDirectory(plan.probe))
+              .then((opened) => (opened === true ? "open" : "unknown"), () => "unknown")
           }
           if (verdict !== "present") {
             // The probe could not prove this path — a directory, or a Host that
@@ -1943,6 +1974,33 @@ window.__ModuleLoader__.load({
           }
           return true
         }
+        // A `~/…` directory cannot use the Sidebar preview, which shows files
+        // only. The Host already serves one route that opens an existing absolute
+        // directory in a resolved application, so the platform file manager is
+        // reused instead of spawning a second opener here. The application list is
+        // asked once and remembered; any failure answers "nothing was opened".
+        let fileManagerApp
+        let fileManagerLookup = null
+        const resolveFileManager = () => {
+          if (fileManagerApp !== undefined) return Promise.resolve(fileManagerApp)
+          if (fileManagerLookup === null) {
+            fileManagerLookup = Promise.resolve()
+              .then(() => fetch(OPEN_IN_APP_APPS_ROUTE))
+              .then((response) => (response.ok ? response.json() : null), () => null)
+              .then((payload) => fileManagerAppOf(payload?.apps), () => null)
+          }
+          return fileManagerLookup.then((id) => { fileManagerApp = id; return id })
+        }
+        const openInFileManager = (absolute) => resolveFileManager().then((app) => {
+          if (typeof app !== 'string') return false
+          return Promise.resolve()
+            .then(() => fetch(OPEN_IN_APP_ROUTE, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ app, path: absolute }),
+            }))
+            .then((response) => response.ok === true, () => false)
+        }, () => false)
         const readInlineCodeStat = (path) => {
           const sessionId = currentSessionId(sessions.getSnapshot())
           const stat = ctx.remote?.workspaceFiles?.stat
@@ -1991,6 +2049,7 @@ window.__ModuleLoader__.load({
                   activateInlineCode(element, element?.ownerDocument?.defaultView)
                 },
                 openHome: openAtHome,
+                openDirectory: openInFileManager,
                 notify,
                 t,
               })
@@ -2122,6 +2181,7 @@ window.__ModuleLoader__.load({
                 stat: (path) => readInlineCodeStat(path),
                 open: (element) => activateInlineCode(element, window),
                 openHome: openAtHome,
+                openDirectory: openInFileManager,
                 notify,
                 t,
               })
@@ -2189,6 +2249,7 @@ window.__ModuleLoader__.load({
         inlineCodePlan,
         openInlineCodeHit,
         statVerdict,
+        fileManagerAppOf,
         handleInlineCodeClick,
         COMPOSER_INPUT,
         TRIGGER_MENU_PICK,

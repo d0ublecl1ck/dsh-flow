@@ -1300,6 +1300,50 @@ test("a tilde code the shell did wire still goes home, and falls back to the she
   }), "unknown")
 })
 
+test("the probe tells a directory apart from an unanswered host", async () => {
+  const { statVerdict } = (await load()).internals
+  assert.equal(statVerdict({ ok: true, value: {} }), "present")
+  assert.equal(statVerdict({ ok: false, error: { code: "workspace-file/not-found", message: "no entry" } }), "missing")
+  assert.equal(statVerdict({ ok: false, error: { code: "workspace-file/not-regular-file", message: "x is a directory", details: { kind: "directory" } } }), "directory")
+  // The kind can ride only in the message on some transports.
+  assert.equal(statVerdict({ ok: false, error: { code: "workspace-file/not-regular-file", message: "\"/Users/x\" is a directory" } }), "directory")
+  // A symlink, or a Host that is away, is not a directory this plugin may open.
+  assert.equal(statVerdict({ ok: false, error: { code: "workspace-file/not-regular-file", message: "x is a symlink", details: { kind: "symlink" } } }), "unknown")
+  assert.equal(statVerdict({ ok: false, error: { code: "gateway/internal", message: "away" } }), "unknown")
+})
+
+test("a home directory opens in the file manager, not in the Sidebar preview", async () => {
+  const { inlineCodePlan, openInlineCodeHit } = (await load()).internals
+  const bare = homeCode("~/dsh-flow-worktrees/tilde-home")
+  const hit = { element: bare.element, text: "~/dsh-flow-worktrees/tilde-home" }
+  const plan = inlineCodePlan(hit, () => "/Users/x")
+  assert.deepEqual(plan, { kind: "home", probe: "/Users/x/dsh-flow-worktrees/tilde-home", shell: false })
+
+  const directories = []
+  const input = {
+    stat: () => Promise.resolve({ ok: false, error: { code: "workspace-file/not-regular-file", message: "\"/Users/x/dsh-flow-worktrees/tilde-home\" is a directory", details: { kind: "directory" } } }),
+    open: () => { throw new Error("a directory is not re-dispatched to the shell") },
+    openHome: () => { throw new Error("a directory has no Sidebar preview") },
+    openDirectory: (absolute) => { directories.push(absolute); return true },
+    notify: () => { throw new Error("a directory is not a missing path") },
+    t: (key) => key,
+  }
+  assert.equal(await openInlineCodeHit(hit, plan, input), "open")
+  assert.deepEqual(directories, ["/Users/x/dsh-flow-worktrees/tilde-home"])
+
+  // A file-manager open that could not happen leaves the press alone.
+  assert.equal(await openInlineCodeHit(hit, plan, { ...input, openDirectory: () => false }), "unknown")
+})
+
+test("the file manager is the first catalog id the host actually offers", async () => {
+  const { fileManagerAppOf } = (await load()).internals
+  assert.equal(fileManagerAppOf(["vscode", "finder", "terminal"]), "finder")
+  assert.equal(fileManagerAppOf(["explorer"]), "explorer")
+  assert.equal(fileManagerAppOf(["filemanager"]), "filemanager")
+  assert.equal(fileManagerAppOf(["vscode", "terminal"]), null)
+  assert.equal(fileManagerAppOf(null), null)
+})
+
 test("the plugin injects the Remote carrier and its workspaceFiles namespace", async () => {
   // Measured: without these two the cordis context has no ctx.remote.workspaceFiles,
   // every existence probe answers "unknown", and each press silently falls back to
