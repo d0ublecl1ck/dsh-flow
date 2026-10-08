@@ -1099,6 +1099,169 @@ test("a press this plugin does not own costs nothing", async () => {
   assert.equal(press.stopped, 0)
   assert.deepEqual(spy.opened, [])
 })
+
+// --- Tilde-path inline code: expand the Host home, then open it here --------
+
+/** One inline code naming a tilde path, with no shell-wired control inside. */
+function homeCode(text = "~/notes/todo.md") {
+  const hit = inlineCode({ text })
+  hit.element.querySelector = () => null
+  return hit
+}
+
+test("a tilde path is the one shape this plugin expands", async () => {
+  const { isTildePath, expandHomePath } = (await load()).internals
+  assert.equal(isTildePath("~/a/b.md"), true)
+  assert.equal(isTildePath("~\\a\\b.md"), true)
+  assert.equal(isTildePath("~"), false)
+  assert.equal(isTildePath("~alice/a.md"), false)
+  assert.equal(isTildePath("/home/x/a.md"), false)
+  assert.equal(isTildePath(""), false)
+
+  assert.equal(expandHomePath("~/a.md", "/Users/x"), "/Users/x/a.md")
+  assert.equal(expandHomePath("~\\a.md", "/Users/x"), "/Users/x/a.md")
+  // A home that already ends in a separator must not double it.
+  assert.equal(expandHomePath("~/a.md", "/Users/x/"), "/Users/x/a.md")
+  // Named-user forms and every other path stay the shell's own business.
+  assert.equal(expandHomePath("~alice/a.md", "/Users/x"), null)
+  assert.equal(expandHomePath("/home/fixture/a.md", "/Users/x"), null)
+  assert.equal(expandHomePath("~/a.md", null), null)
+  assert.equal(expandHomePath("~/a.md", ""), null)
+})
+
+test("the home path is spelled with the shell's own file-address grammar", async () => {
+  const { fileAddress } = (await load()).internals
+  assert.equal(fileAddress("s1", "/Users/x/a b.md"), "dsh-resource://file/session/s1//Users/x/a%20b.md")
+  // Backslashes normalize; a colon stays literal, as the grammar requires for drives.
+  assert.equal(fileAddress("s1", "C:\\tmp\\a.md"), "dsh-resource://file/session/s1/C:/tmp/a.md")
+  assert.equal(fileAddress("", "/a.md"), null)
+  assert.equal(fileAddress("s1", ""), null)
+})
+
+test("a tilde code is openable even though the shell wired no control into it", async () => {
+  const { codeOpenTarget } = (await load()).internals
+  const hit = homeCode()
+  assert.deepEqual(codeOpenTarget(leftPress(hit)), { element: hit.element, text: "~/notes/todo.md" })
+  // Every other control-less code stays inert.
+  const inert = inlineCode({ text: "npm test" })
+  inert.element.querySelector = () => null
+  assert.equal(codeOpenTarget(leftPress(inert)), null)
+})
+
+test("a tilde press is probed as the Host home path and opened there", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const hit = homeCode()
+  const press = leftPress(hit)
+  const probed = []
+  const homed = []
+  const shell = []
+  const notices = []
+  const input = {
+    home: () => "/Users/x",
+    stat: (path) => { probed.push(path); return Promise.resolve({ ok: true, value: { absolutePath: path } }) },
+    open: (element) => { shell.push(element) },
+    openHome: (absolute) => { homed.push(absolute); return true },
+    notify: (text, tone) => { notices.push({ text, tone }) },
+    t: (key) => key,
+  }
+
+  assert.equal(await handleInlineCodeClick(press, input), "open")
+  assert.deepEqual(probed, ["/Users/x/notes/todo.md"], "the probe must ask about the expanded path")
+  assert.deepEqual(shell, [], "the shell has no control to re-dispatch here")
+  assert.deepEqual(homed, ["/Users/x/notes/todo.md"])
+  assert.deepEqual(notices, [])
+  assert.equal(press.prevented, 1)
+  assert.equal(press.stopped, 1)
+})
+
+test("a tilde path the probe calls missing still becomes the notice", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const press = leftPress(homeCode())
+  const homed = []
+  const notices = []
+  const input = {
+    home: () => "/Users/x",
+    stat: () => Promise.resolve({ ok: false, error: { code: "workspace-files/not-found", message: "no such file" } }),
+    open: () => { throw new Error("the shell must not be re-dispatched") },
+    openHome: (absolute) => { homed.push(absolute); return true },
+    notify: (text, tone) => { notices.push({ text, tone }) },
+    t: (key) => key,
+  }
+
+  assert.equal(await handleInlineCodeClick(press, input), "missing")
+  assert.deepEqual(homed, [], "a missing path is never opened")
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].tone, "warning")
+  assert.match(notices[0].text, /~\/notes\/todo\.md/)
+})
+
+test("an unanswered tilde probe opens nothing instead of guessing", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const homed = []
+  const notices = []
+  const input = {
+    home: () => "/Users/x",
+    stat: () => Promise.resolve({ ok: false, error: { code: "gateway/internal", message: "host is away" } }),
+    open: () => { throw new Error("the shell must not be re-dispatched") },
+    openHome: (absolute) => { homed.push(absolute); return true },
+    notify: (text, tone) => { notices.push({ text, tone }) },
+    t: (key) => key,
+  }
+
+  assert.equal(await handleInlineCodeClick(leftPress(homeCode()), input), "unknown")
+  assert.deepEqual(homed, [])
+  assert.deepEqual(notices, [], "an unknown verdict must never claim the path is missing")
+})
+
+test("without a Host home a tilde press is left alone, not claimed", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const press = leftPress(homeCode())
+  const input = {
+    home: () => null,
+    stat: () => { throw new Error("the probe must not run") },
+    open: () => { throw new Error("the shell must not be re-dispatched") },
+    openHome: () => { throw new Error("nothing may be opened") },
+    notify: () => { throw new Error("nothing may be noticed") },
+    t: (key) => key,
+  }
+
+  assert.equal(await handleInlineCodeClick(press, input), "pass")
+  assert.equal(press.prevented, 0)
+  assert.equal(press.stopped, 0)
+})
+
+test("the menu opens a tilde code the shell never wired, and only that one", async () => {
+  const { inlineCodePlan, openInlineCodeHit } = (await load()).internals
+  const input = {
+    stat: () => Promise.resolve({ ok: true, value: { absolutePath: "/Users/x/notes/todo.md" } }),
+    openHome: () => true,
+    notify: () => { throw new Error("a present path is never noticed") },
+    t: (key) => key,
+  }
+  // A control the shell wired keeps the shipped activation, so its plan is that one.
+  const wired = clickableCode({ text: "client.js" })
+  const wiredHit = { element: wired.element, text: "client.js" }
+  assert.deepEqual(inlineCodePlan(wiredHit, () => "/Users/x"), { kind: "shell", probe: "client.js" })
+  // A control-less tilde code plans the Host home path.
+  const home = homeCode()
+  const homeHit = { element: home.element, text: "~/notes/todo.md" }
+  const plan = inlineCodePlan(homeHit, () => "/Users/x")
+  assert.deepEqual(plan, { kind: "home", probe: "/Users/x/notes/todo.md" })
+  assert.equal(await openInlineCodeHit(homeHit, plan, input), "open")
+  // Anything else keeps today's no-op activation.
+  const inert = inlineCode({ text: "npm test" })
+  inert.element.querySelector = () => null
+  assert.equal(inlineCodePlan(inert, () => "/Users/x"), null)
+})
+
+test("the inline-code menu is handed a home opener beside its store", async () => {
+  const module = await load()
+  const registrations = []
+  module.apply(fakeContext(registrations, []))
+  const menu = registrations.find((entry) => entry.name === "shell.overlay" && entry.id === "flow.code-menu")
+  assert.equal(typeof menu.inject().openCode, "function")
+})
+
 /** One keydown stub carrying the two cancels the seat is required to make. */
 function press(key, { altKey = false, metaKey = false, ctrlKey = false, shiftKey = false, isComposing = false, keyCode = 0 } = {}) {
   return {

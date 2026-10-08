@@ -1,8 +1,8 @@
 {
   "name": "dsh-flow",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
-  "description": "DSH Web 插件：在工作区标题行的搜索按钮右侧提供「定位当前会话」按钮（⇧⌘D）、在会话行菜单里提供「复制会话 ID」（⇧⌘C，复制完有提示）、把 http/https/mailto/tel 链接交给系统默认程序打开（含 Electron 壳会留在内置窗口里的 localhost）、为对话正文里的行内代码提供「打开 / 复制」右键菜单，并可把输入框的 Enter 与 Cmd/Ctrl+Enter 对调（Enter 换行、Cmd/Ctrl+Enter 发送）；设置里的「心流」页分别开关这五个功能。",
+  "description": "DSH Web 插件：在工作区标题行的搜索按钮右侧提供「定位当前会话」按钮（⇧⌘D）、在会话行菜单里提供「复制会话 ID」（⇧⌘C，复制完有提示）、把 http/https/mailto/tel 链接交给系统默认程序打开（含 Electron 壳会留在内置窗口里的 localhost）、为对话正文里的行内代码提供「打开 / 复制」右键菜单并把 ~/… 家目录路径展开后在侧栏打开，还可把输入框的 Enter 与 Cmd/Ctrl+Enter 对调（Enter 换行、Cmd/Ctrl+Enter 发送）；设置里的「心流」页分别开关这五个功能。",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -51,6 +51,8 @@
     "localhost",
     "clipboard",
     "inline-code",
+    "tilde",
+    "home-directory",
     "context-menu",
     "send-key",
     "enter-key",

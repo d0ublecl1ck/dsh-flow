@@ -316,8 +316,8 @@ function codeMenuDrawing() {
   parts.push(text(bx + 20, ay + 32, '两个动作分别是什么', { size: 13, weight: 600 }))
   parts.push(rect(bx + 16, ay + 48, bw - 32, 96, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
   parts.push(text(bx + 32, ay + 76, '打开', { size: 13, weight: 600, fill: ACCENT }))
-  parts.push(text(bx + 32, ay + 98, '对同一个元素派发一次普通左键 click —— 完全是壳自己的链路；', { size: 12 }))
-  parts.push(text(bx + 32, ay + 118, '侧栏预览、文件管理器还是系统默认程序，由壳决定，本插件不插手。', { size: 12 }))
+  parts.push(text(bx + 32, ay + 98, '壳自己接了线的路径：派发一次普通左键 click，走壳那条链路；', { size: 12 }))
+  parts.push(text(bx + 32, ay + 118, '~/… 家目录路径壳解析不了，由本插件展开后在右侧栏打开。', { size: 12 }))
   parts.push(rect(bx + 16, ay + 156, bw - 32, 96, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
   parts.push(text(bx + 32, ay + 184, '复制', { size: 13, weight: 600, fill: ACCENT }))
   parts.push(text(bx + 32, ay + 206, '把这段代码的原文写进剪贴板，成功或失败都有顶部横幅。', { size: 12 }))
@@ -331,8 +331,8 @@ function codeMenuDrawing() {
   parts.push(text(ax + 20, cy + 80, '② 不在 pre（多行代码块）/ [contenteditable]（输入框与快捷键编辑器）/ <a href>（链接另有归属）里', { size: 12 }))
   parts.push(text(ax + 20, cy + 102, '③ 文本去掉空白后非空', { size: 12 }))
   parts.push(rect(ax + 16, cy + 118, WIDTH - 88, 34, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
-  parts.push(text(ax + 32, cy + 140, '只监听 contextmenu，绝不注册或拦截 click；开关关掉时连监听都不注册。', { size: 12, fill: ACCENT, weight: 600 }))
-  parts.push(text(28, HEIGHT - 16, '单击行为一个字没改：壳自己的左键链路照旧；本功能只在右键上多给一个选择。', { size: 11, fill: MUTED }))
+  parts.push(text(ax + 32, cy + 140, '只监听 contextmenu；左键只接管「路径不存在」与 ~/… 家目录两种，其余照旧。', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(28, HEIGHT - 16, '单击基本照旧：路径不存在、或 ~/… 家目录路径时才接管，其余仍走壳的链路。', { size: 11, fill: MUTED }))
 
   return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：行内代码右键菜单的命中条件与两个动作">'
     + parts.join('') + '</svg>\n'

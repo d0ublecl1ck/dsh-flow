@@ -43,13 +43,15 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 对话正文里的行内代码（`dsh-client-ui-primitives` 的 markdown 渲染器，`inlineCode` → `<code>`）右键浮出一个两项菜单。三件事必须同时成立，实现也就长成了现在的样子：
 
-- **右键只监听 `contextmenu`；左键只在一种情况下接管**：路径存在时本插件对左键零介入，单击打开的链路仍是壳自己的（`MarkdownDelegateProvider` 注入的 `openFile`）；只有判定**路径不存在**时才 `preventDefault() + stopPropagation()`，换成一条不会打断操作的提示，替掉壳那个必须点掉的「path open failed」弹窗。两个监听都注册在 `document` 捕获阶段，没命中一行都不动。
-- **顺序不能反过来：先接管，再探测。** `preventDefault()` 只在事件还在派发时才有意义，而探测是宿主往返；所以按下先被接管，探测回来发现路径存在时用 `activateInlineCode()` **重新派发**壳的那次激活。试图「先 await 探测、不存在再 preventDefault」是无效实现——等探测回来事件早已派发完毕。
-- **fail open 是硬要求**：探测接口拿不到、抛错、超时、或返回的失败不是「不存在」那一类时，一律走「重新派发」这条路。宁可让用户继续看到壳的弹窗，也不允许把存在的路径判成不存在（那会让一个本来能打开的文件彻底点不开）。
+- **右键只监听 `contextmenu`；左键只在两种情况下接管**：壳自己接了线、且路径存在时，本插件对左键零介入，单击打开的链路仍是壳自己的（`MarkdownDelegateProvider` 注入的 `openFile`）；判定**路径不存在**、或文本是壳解析不了的 `~/…` 家目录路径时，才 `preventDefault() + stopPropagation()` —— 前者换成一条不会打断操作的提示（替掉壳那个必须点掉的「path open failed」弹窗），后者由本插件展开后在右侧栏打开。两个监听都注册在 `document` 捕获阶段，没命中一行都不动。
+- **顺序不能反过来：先接管，再探测。** `preventDefault()` 只在事件还在派发时才有意义，而探测是宿主往返；所以按下先被接管，探测回来发现路径存在时用 `activateInlineCode()` **重新派发**壳的那次激活。试图「先 await 探测、不存在再 preventDefault」是无效实现——等探测回来事件早已派发完毕。唯一能提前决定的是「这一下有没有得打开」：`inlineCodePlan()` 同步算出「交给壳」还是「展开家目录」，算不出目标就压根不接管（返回 `pass`，不 `preventDefault`）。
+- **fail open 是硬要求**：探测接口拿不到、抛错、超时、或返回的失败不是「不存在」那一类时，壳自己接了线的路径一律走「重新派发」；`~/…` 这种没有壳链路可交的路径则**什么都不做**，绝不用一次未证实的探测去打开一个可能不存在的文件。宁可让用户继续看到壳的弹窗，也不允许把存在的路径判成不存在（那会让一个本来能打开的文件彻底点不开）。
 - **开关关闭时不注册监听**（不是注册了再判断）：`ctx.configForms` 的表单有 `subscribe`，把它当 Host 回声用 —— `readCodeMenuEnabled` 翻到 false 就 detach，翻回 true 再 attach。`tests/client.test.mjs` 有断言钉住这条：关闭后 `document` 上根本不存在 `contextmenu` 监听。
-- **「打开」是合成一次普通左键 `click`**，不自己调 RPC：这样「侧栏预览还是系统默认程序」的分叉留在壳里。
+- **「打开」默认是合成一次普通左键 `click`**，不自己调 RPC：这样「侧栏预览还是系统默认程序」的分叉留在壳里。**`~/…` 是唯一例外** —— 壳的 `fileAddressFor` 把非绝对路径按工作区根解析，`~/x` 永远落不到家目录，所以这一条由本插件展开成绝对路径后自己拼 `dsh-resource://file/session/<id>/<abs>` 地址交给 `ctx.sidebarRight.openResource()`（同一套语法见 `dsh-util-workspace-path` 的 `sessionFileAddress`，浏览器半边无法 import，故内联在 `fileAddress()` 里）。
 
-**点击目标不是 `<code>` 本身。** 壳的渲染器把解析成文件引用的行内代码渲染成 `code > button._fileMention_*`，`onClick: mention.open` 挂在这个 button 上，`<code>` 自己没有任何处理器（实拉运行中的实例：某会话 89 个 `code`，带 button 的那一批才有打开动作）。所以 `clickTargetOf()` 先取 `element.querySelector('button')`，取不到才退回 `<code>` —— 往 `<code>` 上派发 `click` 不会触发 button 的 `onClick`（React 的合成事件按原生传播路径派发，button 不在路径里），症状是「菜单在，点打开没反应」。另外 `dispatchEvent` 的返回值是「事件没被取消」，壳的处理器通常会 `preventDefault`，别把它当成功信号。
+**点击目标不是 `<code>` 本身。** 壳的渲染器把解析成文件引用的行内代码渲染成 `code > button._fileMention_*`，`onClick: mention.open` 挂在这个 button 上，`<code>` 自己没有任何处理器（实拉运行中的实例：某会话 89 个 `code`，带 button 的那一批才有打开动作）。所以 `clickTargetOf()` 先取 `element.querySelector('button')`（`shellWiredControl()`），取不到才退回 `<code>` —— 往 `<code>` 上派发 `click` 不会触发 button 的 `onClick`（React 的合成事件按原生传播路径派发，button 不在路径里），症状是「菜单在，点打开没反应」。另外 `dispatchEvent` 的返回值是「事件没被取消」，壳的处理器通常会 `preventDefault`，别把它当成功信号。
+
+**`~/…` 是壳解析不了的那一类。** 壳的 mention 词表只装「本回合 write/edit 产出或 present 交付」的路径（deliverables 的 `chatFileMentions`），而 `ctx.fs.resolve` 从不展开 `~`，所以正文里裸写的 `~/.codex/AGENTS.md` 既拿不到 `code > button`，壳的 `fileAddressFor(sessionId, cwd, path)` 也会把它当工作区相对路径。本插件因此自己接手这一条：`isTildePath()` 只认裸 `~/…` / `~\…`（`~alice/…` 与单独一个 `~` 都不动），`expandHomePath()` 用连接握手那份 host facts 里的家目录（`ctx.remote.$host.home`，即 `os.homedir()`）拼出绝对路径，探测后交给 `ctx.sidebarRight.openResource()`。家目录、当前会话、侧栏控制器任一拿不到就整条放弃。左键与右键「打开」共用 `inlineCodePlan()` + `openInlineCodeHit()`，所以两条手势行为一致。
 
 **菜单用壳的 `Menu`，不是 `MenuSurface`。** 键盘漫游（↑↓/Home/End）、`Esc`、点外面的 `pointerdown` 关闭全在 `Menu` 里；`MenuSurface` 只是它画的那张卡（`ComponentPropsWithoutRef<"div">` + `compact`，位置靠 `style`），直接用 surface 等于自己重写键盘处理。位置方面：`portal` 的列表挂在 `document.body` 下、由 `getAnchorRect` 给的矩形定位，所以右键点被表达成那个点的零尺寸矩形（`cursorRect`），列表浮在光标右下并自动夹在视口内。`autoFocus` 是必需的 —— 右键打开时焦点不在任何触发器上，没有它方向键走不起来。
 
@@ -76,6 +78,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占两个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
+- 服务与数据（`~/…` 打开）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）。两者都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开。
 - DOM（发送键）：对话输入框根 `[data-composer-input]`（实拉时它的类名是 `uV2eYG_input` —— 构建哈希，不要依赖；属性 `data-composer-input` 才是契约，带 contenteditable 与 Lexical 的 `__lexicalEditor`）、触发菜单容器 `[data-trigger-menu]` 与其中的 `[role="listbox"][aria-activedescendant]`。这两处都是**静默失效型**依赖：属性改名后症状只是「开关开了但 Enter 还是发送」，所以改完必须跑真浏览器验收。
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
@@ -102,7 +105,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 74 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 83 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

@@ -27,11 +27,15 @@
  *    schemes, a host that cannot answer — stays with the shell.
  *  - inline `code` in a conversation's markdown — a right-click opens a menu
  *    with 「打开」 and 「复制」. Only `contextmenu` is listened for, in the capture
- *    phase and only while the preference is on; `click` is never registered or
- *    intercepted, so a plain left click keeps doing exactly what it does today.
- *    「打开」 dispatches one ordinary left-button `click` at the control the shell
- *    itself made clickable, so the choice between an in-app preview and the OS
- *    opener stays where it already lives.
+ *    phase and only while the preference is on. 「打开」 dispatches one ordinary
+ *    left-button `click` at the control the shell made clickable, so the choice
+ *    between an in-app preview and the OS opener stays where it already lives.
+ *    A plain left press is intercepted for exactly one purpose: the path is
+ *    probed first, and a path that is definitely absent becomes a non-blocking
+ *    notice instead of the shell's blocking "path open failed" dialog.
+ *    A `~/…` code is the one shape the shell cannot open on its own — it
+ *    resolves a relative path against the Workspace — so this plugin expands it
+ *    against the Host account's home and opens it in the Sidebar itself.
  *  - the composer's send key — with the preference on, a plain Enter inserts a
  *    newline and ⌘/Ctrl+Enter sends, i.e. the shipped pair with its two halves
  *    swapped. The shipped composer decides Enter inside its own keymap (a plain
@@ -558,18 +562,32 @@ window.__ModuleLoader__.load({
      * into `code > button._fileMention_*` and puts the open handler on that
      * button — the `<code>` carries no handler at all (measured in the running
      * instance: one sample conversation rendered 64 inline codes, 14 of them as
-     * that button).
-     * A click dispatched at the `code` therefore never reaches the handler, which
-     * is why the shell's own chain is entered at the button when there is one and
-     * at the `code` otherwise.
+     * that button). A code the shell never resolved keeps no control, which is
+     * exactly how a `~/…` path arrives: the mention vocabulary only holds paths
+     * a tool produced or delivered, and those never leave the Workspace.
+     *
+     * @param element - the `<code>` element.
+     * @returns the control, or null when the shell wired none.
+     */
+    function shellWiredControl(element) {
+      if (typeof element?.querySelector !== 'function') return null
+      const button = element.querySelector('button')
+      return isElement(button) ? button : null
+    }
+
+    /**
+     * The node one open dispatch has to be aimed at.
+     *
+     * A click dispatched at the `code` never reaches the shell's handler, which
+     * lives on the button when there is one, so the button is preferred and the
+     * element itself is the fallback.
      *
      * @param element - the `<code>` element.
      * @returns the button to activate, or the element itself.
      */
     function clickTargetOf(element) {
       if (typeof element?.querySelector !== 'function') return null
-      const button = element.querySelector('button')
-      return isElement(button) ? button : element
+      return shellWiredControl(element) ?? element
     }
 
     /**
@@ -659,12 +677,70 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether one inline code names a path under the current user's home.
+     *
+     * Only the bare and current-user spellings the shell itself understands are
+     * claimed: `~/…` and `~\…`. A bare `~` names a directory, and a
+     * named-user form such as `~alice/…` is not this account's home, so both
+     * stay with the shell.
+     *
+     * @param text - the code's exact text.
+     * @returns whether this is a current-user home path.
+     */
+    function isTildePath(text) {
+      if (typeof text !== 'string') return false
+      if (text.startsWith('~/')) return true
+      return text.startsWith('~\\')
+    }
+
+    /**
+     * Expand one `~/…` code against the Host account's home.
+     *
+     * The home comes from the connection's host facts; a home that is not known
+     * (no generation yet, or a deployment that never sent one) answers null,
+     * which is what leaves the press to the shell instead of guessing.
+     *
+     * @param text - the code's exact text.
+     * @param home - the Host account's home, when known.
+     * @returns the absolute path, or null when this is not one to expand.
+     */
+    function expandHomePath(text, home) {
+      if (!isTildePath(text)) return null
+      if (typeof home !== 'string' || home === '') return null
+      const root = home.replace(/[\\/]+$/, '')
+      if (root === '') return null
+      return root + '/' + text.slice(2)
+    }
+
+    /**
+     * The `dsh-resource://file/…` address the Sidebar previews one absolute
+     * path through.
+     *
+     * This is the grammar `sessionFileAddress` spells on the Host side; a browser
+     * bundle cannot import that library, so the one shape needed here is kept
+     * inline — each segment component-encoded with `:` left literal and the
+     * leading `/` preserved, so the Host resolves an absolute path.
+     *
+     * @param sessionId - the Session that authorizes the read.
+     * @param absolutePath - the absolute path to address.
+     * @returns the address, or null when it cannot be built.
+     */
+    function fileAddress(sessionId, absolutePath) {
+      if (typeof sessionId !== 'string' || sessionId === '') return null
+      if (typeof absolutePath !== 'string' || absolutePath === '') return null
+      const encode = (segment) => encodeURIComponent(segment).replace(/%3A/gi, ':')
+      const path = absolutePath.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
+      return 'dsh-resource://file/session/' + encode(sessionId) + '/' + path.split('/').map(encode).join('/')
+    }
+
+    /**
      * The inline `code` a plain left press is about to open.
      *
-     * The same scope as the menu (`codeMenuTarget`), narrowed by one more fact:
-     * only a `code` the shipped renderer wired a control into has anything to
-     * open. An inert `code` — plain prose — keeps today's behaviour and costs no
-     * round trip at all.
+     * The same scope as the menu (`codeMenuTarget`), narrowed to the two shapes
+     * this plugin can open: a `code` the shipped renderer wired a control into,
+     * and a `~/…` code, which the shell's mention vocabulary never holds because
+     * it only names paths a tool produced or delivered. An inert `code` — plain
+     * prose — keeps today's behaviour and costs no round trip at all.
      *
      * @param event - the document `click` event.
      * @returns `{element, text}`, or null when this press is not ours to consider.
@@ -677,8 +753,9 @@ window.__ModuleLoader__.load({
       if (event.isTrusted === false) return null
       const hit = codeMenuTarget(event)
       if (hit === null) return null
+      if (isTildePath(hit.text)) return hit
       if (typeof hit.element.querySelector !== "function") return null
-      if (!isElement(hit.element.querySelector("button"))) return null
+      if (shellWiredControl(hit.element) === null) return null
       return hit
     }
 
@@ -704,39 +781,82 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Handle one left press that landed on inline code.
+     * What one openable inline `code` would do, decided without a round trip.
      *
-     * The press is taken *before* the probe, and that order is the whole design:
-     * `preventDefault` only means anything while the event is still being
-     * dispatched, while the probe is a Host round trip. So a press is claimed
-     * first and the shell activation is re-dispatched when the path turns out to
-     * exist — the click the user gets is the shipped one, one round trip later.
-     * A path that is definitely absent is the single case that becomes a notice
-     * instead, which replaces the shell's blocking "path open failed" dialog.
+     * A code with a shell control goes back to the shell: whatever the renderer
+     * resolved there (a produced file, a delivery) is what the user means, and
+     * the shell already resolves it. A `~/…` code has no such owner, so this
+     * plugin expands it against the Host home and opens the result itself. A home
+     * that is not known answers null, which is how the press stays the shell's
+     * instead of being claimed.
      *
-     * @param event - the document `click` event.
-     * @param input.stat - `(text) => Promise<probe result>`.
+     * @param hit - `{element, text}` from `codeMenuTarget`.
+     * @param home - the Host home, or a getter for it.
+     * @returns `{kind, probe}`, or null when there is nothing to open.
+     */
+    function inlineCodePlan(hit, home) {
+      if (shellWiredControl(hit.element) !== null) return { kind: 'shell', probe: hit.text }
+      if (!isTildePath(hit.text)) return null
+      const absolute = expandHomePath(hit.text, typeof home === 'function' ? home() : home)
+      if (absolute === null) return null
+      return { kind: 'home', probe: absolute }
+    }
+
+    /**
+     * Open one planned inline `code`, probing first.
+     *
+     * Order matters and is the whole design: the probe is a Host round trip, so
+     * the press is claimed while the event is still dispatching and the decision
+     * arrives later. A path the probe definitely calls absent becomes a notice;
+     * a home path the probe cannot answer opens nothing at all — never a path
+     * this plugin cannot prove.
+     *
+     * @param hit - `{element, text}` from `codeMenuTarget`.
+     * @param plan - the verdict from `inlineCodePlan`.
+     * @param input.stat - `(path) => Promise<probe result>`, on the planned path.
      * @param input.open - re-dispatch the shell activation for one element.
+     * @param input.openHome - open one absolute path in the Sidebar.
      * @param input.notify - raise a notice.
      * @param input.t - the plugin's localized copy.
-     * @returns `pass` (not ours), `missing` (noticed), or `open` (handed back).
+     * @returns `missing` (noticed), `open` (opened), or `unknown` (left alone).
      */
-    function handleInlineCodeClick(event, input) {
-      const hit = codeOpenTarget(event)
-      if (hit === null) return Promise.resolve("pass")
-      event.preventDefault()
-      event.stopPropagation()
+    function openInlineCodeHit(hit, plan, input) {
       return Promise.resolve()
-        .then(() => input.stat(hit.text))
+        .then(() => input.stat(plan.probe))
         .then((result) => statVerdict(result), () => "unknown")
         .then((verdict) => {
           if (verdict === "missing") {
             input.notify(input.t("linkMissing.notice") + " " + hit.text, "warning")
             return "missing"
           }
-          input.open(hit.element)
-          return "open"
+          if (plan.kind === "shell") {
+            input.open(hit.element)
+            return "open"
+          }
+          if (verdict !== "present") return "unknown"
+          return input.openHome(plan.probe) ? "open" : "unknown"
         })
+    }
+
+    /**
+     * Handle one left press that landed on inline code.
+     *
+     * The plan is decided synchronously, so a press with nothing to open is never
+     * claimed; once claimed, the probe's verdict decides between the shell's own
+     * activation, this plugin's home open, and the notice.
+     *
+     * @param event - the document `click` event.
+     * @param input - `openInlineCodeHit`'s inputs plus `home` for the plan.
+     * @returns `pass` (not ours), `missing`, `open`, or `unknown`.
+     */
+    function handleInlineCodeClick(event, input) {
+      const hit = codeOpenTarget(event)
+      if (hit === null) return Promise.resolve("pass")
+      const plan = inlineCodePlan(hit, input.home)
+      if (plan === null) return Promise.resolve("pass")
+      event.preventDefault()
+      event.stopPropagation()
+      return openInlineCodeHit(hit, plan, input)
     }
 
     /**
@@ -1234,7 +1354,7 @@ window.__ModuleLoader__.load({
       'section.external.title': '在系统默认程序中打开链接',
       'section.external.description': '点击非本站的 http、https、mailto、tel 链接时，交给操作系统的默认应用打开（macOS 用 open、Windows 用 start、Linux 用 xdg-open），包括本来会开在内置窗口里的 localhost 地址。关闭后恢复壳自身的打开方式。',
       'section.codeMenu.title': '行内代码右键菜单',
-      'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：打开与左键单击走同一条链路，复制把代码原文写进剪贴板。单击行为不受影响；关闭后右键恢复壳自身的行为。',
+      'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：复制把代码原文写进剪贴板；打开对 ~/… 家目录路径会先展开、再由插件在侧栏打开（壳自己解析不了），其余仍走壳自己的链路。单击一条指向不存在路径的行内代码会换成一条非阻塞提示；关闭后右键与这条接管都不注册。',
       'section.sendKey.title': '⌘+Enter 发送',
       'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
       'section.saveError': '偏好没有保存成功，请重试',
@@ -1265,7 +1385,7 @@ window.__ModuleLoader__.load({
       'section.external.title': 'Open links in the system default app',
       'section.external.description': 'Off-origin http, https, mailto and tel links open in the operating system’s default application (open on macOS, start on Windows, xdg-open on Linux), including the localhost addresses that would otherwise open in an in-app window. Switching this off restores the shell’s own behaviour.',
       'section.codeMenu.title': 'Inline code right-click menu',
-      'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Open runs the same path a left click already takes, Copy puts the code’s text on the clipboard. Left-clicking is unaffected; switching this off restores the shell’s own right-click behaviour.',
+      'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Copy puts the code’s text on the clipboard, and Open expands a ~/… home path and opens it in the Sidebar itself — the shell cannot resolve that one; everything else keeps the shell’s own path. Left-clicking code whose path does not exist becomes a non-blocking notice instead; switching this off registers neither.',
       'section.sendKey.title': '⌘+Enter to send',
       'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
       'section.saveError': 'The preference was not saved. Try again.',
@@ -1571,10 +1691,10 @@ window.__ModuleLoader__.load({
             key: 'open',
             onSelect: () => {
               // Closing first keeps the menu's own dismissal out of the way of
-              // the click this is about to dispatch.
-              const { element } = menu
+              // whatever this is about to open.
+              const { element, text } = menu
               store.close()
-              activateInlineCode(element, window)
+              props.openCode({ element, text })
             },
           },
           t('codeMenu.open'),
@@ -1754,13 +1874,49 @@ window.__ModuleLoader__.load({
           document.addEventListener('click', onClick, true)
           return () => { document.removeEventListener('click', onClick, true) }
         }, 'flow: external links')
-        // The existence probe behind the left-press takeover. The shell's own
-        // workspace-files remote answers a Result envelope, so "not there" is a
-        // value rather than an exception. A probe that cannot answer inside the
-        // deadline is treated as unknown, which re-dispatches the shell
-        // activation instead of hiding a path that may well exist.
+        // The existence probe behind the left-press takeover. It is asked about
+        // the planned path — the raw text for a shell-owned mention, the expanded
+        // absolute path for a `~/…` code. The shell's own workspace-files remote
+        // answers a Result envelope, so "not there" is a value rather than an
+        // exception; a probe that cannot answer inside the deadline is treated as
+        // unknown, which never hides a path that may well exist.
         const LINK_STAT_DEADLINE_MS = 2000
-        const readInlineCodeStat = (text) => {
+        // The Host account's home, as the connection's host facts publish it. A
+        // generation that has not arrived, or a deployment that never sent one,
+        // answers null; a `~/…` press then stays with the shell rather than
+        // guessing.
+        const hostHome = () => {
+          try {
+            const home = ctx.remote?.$host?.home
+            return typeof home === 'string' && home !== '' ? home : null
+          } catch {
+            return null
+          }
+        }
+        // The plugin's own open for a path the shell cannot resolve: one
+        // `dsh-resource://file/…` address handed to the Sidebar controller. Every
+        // step may be missing — no Session, no controller, a controller that
+        // refuses — and the answer is always "nothing was opened", never a throw.
+        const openAtHome = (absolute) => {
+          const sessionId = currentSessionId(sessions.getSnapshot())
+          if (sessionId === null) return false
+          const address = fileAddress(sessionId, absolute)
+          if (address === null) return false
+          let sidebarRight
+          try {
+            sidebarRight = ctx.sidebarRight
+          } catch {
+            return false
+          }
+          if (typeof sidebarRight?.openResource !== 'function') return false
+          try {
+            sidebarRight.openResource(address)
+          } catch {
+            return false
+          }
+          return true
+        }
+        const readInlineCodeStat = (path) => {
           const sessionId = currentSessionId(sessions.getSnapshot())
           const stat = ctx.remote?.workspaceFiles?.stat
           if (sessionId === null || typeof stat !== 'function') return Promise.resolve(null)
@@ -1769,7 +1925,7 @@ window.__ModuleLoader__.load({
             timer = setTimeout(() => { resolve(null) }, LINK_STAT_DEADLINE_MS)
           })
           const probe = Promise.resolve()
-            .then(() => stat.call(ctx.remote.workspaceFiles, sessionId, text))
+            .then(() => stat.call(ctx.remote.workspaceFiles, sessionId, path))
             .then((result) => result, () => null)
           return Promise.race([probe, deadline]).then((result) => {
             if (timer !== null) clearTimeout(timer)
@@ -1802,10 +1958,12 @@ window.__ModuleLoader__.load({
             // :func:`handleInlineCodeClick` for why the order is this way.
             const onClick = (event) => {
               handleInlineCodeClick(event, {
-                stat: (text) => readInlineCodeStat(text),
+                stat: (path) => readInlineCodeStat(path),
+                home: hostHome,
                 open: (element) => {
                   activateInlineCode(element, element?.ownerDocument?.defaultView)
                 },
+                openHome: openAtHome,
                 notify,
                 t,
               })
@@ -1918,7 +2076,29 @@ window.__ModuleLoader__.load({
           name: 'shell.overlay',
           id: CODE_MENU_ID,
           locale: ENTRY_ID,
-          inject: () => ({ store: codeMenu, config, write: writeClipboard, notify, useLocaleRevision }),
+          inject: () => ({
+            store: codeMenu,
+            config,
+            write: writeClipboard,
+            notify,
+            useLocaleRevision,
+            // A control the shell wired keeps its own activation untouched. Only
+            // a `~/…` code has no owner, and that one goes through the same probe
+            // and home open the left press uses.
+            openCode: (hit) => {
+              const plan = inlineCodePlan(hit, hostHome)
+              if (plan === null || plan.kind === 'shell') {
+                activateInlineCode(hit.element, window)
+                return
+              }
+              openInlineCodeHit(hit, plan, {
+                stat: (path) => readInlineCodeStat(path),
+                openHome: openAtHome,
+                notify,
+                t,
+              })
+            },
+          }),
         }, CodeMenu)), 'flow: inline code menu overlay')
 
         // The page follows the Host's own namespace: a deployment that never
@@ -1974,6 +2154,12 @@ window.__ModuleLoader__.load({
         readCodeMenuEnabled,
         isPlainLeftPress,
         codeOpenTarget,
+        shellWiredControl,
+        isTildePath,
+        expandHomePath,
+        fileAddress,
+        inlineCodePlan,
+        openInlineCodeHit,
         statVerdict,
         handleInlineCodeClick,
         COMPOSER_INPUT,
