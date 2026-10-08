@@ -55,7 +55,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 **菜单用壳的 `Menu`，不是 `MenuSurface`。** 键盘漫游（↑↓/Home/End）、`Esc`、点外面的 `pointerdown` 关闭全在 `Menu` 里；`MenuSurface` 只是它画的那张卡（`ComponentPropsWithoutRef<"div">` + `compact`，位置靠 `style`），直接用 surface 等于自己重写键盘处理。位置方面：`portal` 的列表挂在 `document.body` 下、由 `getAnchorRect` 给的矩形定位，所以右键点被表达成那个点的零尺寸矩形（`cursorRect`），列表浮在光标右下并自动夹在视口内。`autoFocus` 是必需的 —— 右键打开时焦点不在任何触发器上，没有它方向键走不起来。
 
-**目录菜单的行是探测出来的。** 右键时先按「打开 / 复制」弹出，同时对 `~/…` 做一次探测；`codeMenuRows(menu)` 在 `menu.directory === true` 时换成「在文件管理器中打开 / 用 VS Code 打开 / 用 Zed 打开 / 复制」——文件管理器与每个编辑器都只在宿主 `/open-in-app/apps` 真的列出该 id 时才成行，不装就不出现（点了只会失败的项比没有更糟）。store 的 `mark(seq, patch)` 只打在同一个 seq 上：右键与探测结果之间隔着多帧，期间菜单可能已被另一个右键替换或关掉，晚到的答案绝不能改到别的菜单；`menuPatchForProbe()` 只认目录判定，文件 / 不存在 / 家目录未知一律保持默认两项。
+**行内代码菜单的行是探测出来的。** 右键时先弹菜单，随后对一切**像路径**的代码分类：`~/…` 与任何壳接了 button 的路径都由 `pathTarget()` 同步解析成绝对路径（`~/…` 展开家目录、绝对路径原样、其余按会话快照里的 `cwd` 拼），马上 `mark(seq, {path, apps: []})` 先把菜单变成「复制」单行，再用 `workspaceFiles.stat` 判文件还是目录——**目录**取 `GET /open-in-app/apps` 那份 catalog（与壳的 Open In 同一串，图标走 `/open-in-app/icon/<id>`，名称是官方词典里的原文），**文件**取 `ctx.remote.session.workspacePathApplications({path})` 再按 `FILE_EDITORS` 过滤出 IDE（图标是宿主渲染好的 data URL，默认那个标「（默认）」）。`codeMenuRows(menu)` 只把有 `menu.path` 的菜单变成「复制在最上、应用行随后」，非路径代码（`npm test` 这种）保持默认的「打开 / 复制」。store 的 `mark(seq, patch)` 只打在同一个 seq 上：右键与探测结果之间隔着多帧，晚到的答案绝不能改到别的菜单；探测说不存在、或给不出确定答案，就只留「复制」。
 
 **`shell.overlay` 上是本插件的第二个 cell。** 槽合同里写得很明确：`id` 是 cell 键，新 id 加在已有条目旁边，复用已有 id 则**进入那个 cell 并替换它**。复制提示占着 `flow`，菜单因此用 `flow.code-menu`，两者互不顶替（`tests/client.test.mjs` 断言两条 `shell.overlay` 注册的 id 不同）。
 
@@ -95,7 +95,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
 - DOM（改动文件菜单）：改动文件卡片根 `[data-changed-files]`，以及卡内带 `aria-describedby` 的按钮——那个 id 指向的隐藏元素里是 Host 路径。两者都是**静默失效型**依赖：官方改渲染形状后症状只是「右键没菜单」，不报错，所以改完必须跑真浏览器验收。
-- 服务与数据（`~/…` 打开）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）。目录走宿主既有的 `dsh-host-open-in-app`：`GET /open-in-app/apps` 列可用应用，`POST /open-in-app/open` 收 `{app, path}`（`path` 必须**绝对且存在**的目录，否则 400/404；未认证 401）。文件管理器 catalog id 按 `finder` / `explorer` / `filemanager` 依次取第一个可用的；目录菜单的编辑器按 `EDITOR_APPS`（`vscode` → VS Code、`zed` → Zed）逐个判断该 id 是否在 apps 里。本机实拉 apps = `["finder","vscode","zed","xcode","androidstudio","intellij","pycharm","iterm","terminal"]`。三条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开；应用列表只取一次并记住，之后每帧读缓存。
+- 服务与数据（`~/…` 打开）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）。目录走宿主既有的 `dsh-host-open-in-app`：`GET /open-in-app/apps` 列可用应用，`POST /open-in-app/open` 收 `{app, path}`（`path` 必须**绝对且存在**的目录，否则 400/404；未认证 401）。目录菜单直接列这份 catalog 的全部 id（名称用本仓库 `app.<id>` 词典，缺 id 时显示原文），图标是 `GET /open-in-app/icon/<id>`。本机实拉 apps = `["finder","vscode","zed","xcode","androidstudio","intellij","pycharm","iterm","terminal"]`。**文件**不走这条路由（它只收目录），改走官方 Session Remote：`ctx.remote.session.workspacePathApplications({ path })` 与 `openWorkspacePath({ path, application })`，与「已编辑 N 个文件」菜单同一套。三条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开；目录应用列表只取一次并记住，文件应用按 path 缓存、失败不缓存。
 - DOM（发送键）：对话输入框根 `[data-composer-input]`（实拉时它的类名是 `uV2eYG_input` —— 构建哈希，不要依赖；属性 `data-composer-input` 才是契约，带 contenteditable 与 Lexical 的 `__lexicalEditor`）、触发菜单容器 `[data-trigger-menu]` 与其中的 `[role="listbox"][aria-activedescendant]`。这两处都是**静默失效型**依赖：属性改名后症状只是「开关开了但 Enter 还是发送」，所以改完必须跑真浏览器验收。
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
@@ -123,7 +123,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 103 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 106 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

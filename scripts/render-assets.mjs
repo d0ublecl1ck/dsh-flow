@@ -287,7 +287,7 @@ const frame = (x, y, w, h, kind) => {
 function codeMenuDrawing() {
   const parts = []
   parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
-  parts.push(text(28, 44, '行内代码右键菜单：打开 / 复制 / 目录专用项', { size: 22, weight: 600 }))
+  parts.push(text(28, 44, '行内代码右键菜单：复制 + 本机打开方式', { size: 22, weight: 600 }))
   parts.push(text(28, 68, '想复制代码里的路径时，不用再怕手一抖把文件点开（示意图，非截图）', { size: 13, fill: MUTED }))
   const capW = 108
   parts.push(rect(WIDTH - 28 - capW, 26, capW, 44, { fill: PANEL, radius: 10 }))
@@ -305,7 +305,7 @@ function codeMenuDrawing() {
   parts.push(text(ax + 416, ay + 58, '就是宿主半边。', { size: 13 }))
   // the press marker
   parts.push('<path d="M' + (ax + 404) + ' ' + (ay + 66) + ' l0 16 l4 -4 l3 7 l3 -1 l-3 -7 l6 -1 z" fill="' + INK + '"/>')
-  parts.push(menuSurface(ax + 300, ay + 96, [{ label: '打开' }, { label: '复制', hint: '⌘C' }]))
+  parts.push(menuSurface(ax + 300, ay + 96, [{ label: '复制', hint: '⌘C' }, { label: '访达' }, { label: 'VS Code' }]))
   parts.push(text(ax + 20, ay + 250, '菜单浮在光标处，用壳自己的 Menu 组件', { size: 11, fill: MUTED }))
   parts.push(text(ax + 20, ay + 270, '↑↓/Home/End 移动 · ↵ 执行 · Esc 或点外面关闭', { size: 11, fill: MUTED }))
 
@@ -313,11 +313,11 @@ function codeMenuDrawing() {
   const bx = 604
   const bw = 568
   parts.push(rect(bx, ay, bw, ah, { radius: 12 }))
-  parts.push(text(bx + 20, ay + 32, '两个动作分别是什么', { size: 13, weight: 600 }))
+  parts.push(text(bx + 20, ay + 32, '菜单里有什么', { size: 13, weight: 600 }))
   parts.push(rect(bx + 16, ay + 48, bw - 32, 96, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
-  parts.push(text(bx + 32, ay + 76, '打开', { size: 13, weight: 600, fill: ACCENT }))
-  parts.push(text(bx + 32, ay + 98, '壳自己接了线的路径：派发一次普通左键 click，走壳那条链路；', { size: 12 }))
-  parts.push(text(bx + 32, ay + 118, '~/… 家目录路径壳解析不了：文件由本插件展开后在右侧栏打开，目录改在文件管理器打开。', { size: 12 }))
+  parts.push(text(bx + 32, ay + 76, '打开方式', { size: 13, weight: 600, fill: ACCENT }))
+  parts.push(text(bx + 32, ay + 98, '是路径的代码：复制在最上，下面接这条路径能用的应用，各带图标；', { size: 12 }))
+  parts.push(text(bx + 32, ay + 118, '不是路径的代码：仍是「打开 / 复制」，打开走壳自己那条链路。', { size: 12 }))
   parts.push(rect(bx + 16, ay + 156, bw - 32, 96, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
   parts.push(text(bx + 32, ay + 184, '复制', { size: 13, weight: 600, fill: ACCENT }))
   parts.push(text(bx + 32, ay + 206, '把这段代码的原文写进剪贴板，成功或失败都有顶部横幅。', { size: 12 }))
@@ -332,9 +332,9 @@ function codeMenuDrawing() {
   parts.push(text(ax + 20, cy + 102, '③ 文本去掉空白后非空', { size: 12 }))
   parts.push(rect(ax + 16, cy + 118, WIDTH - 88, 34, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
   parts.push(text(ax + 32, cy + 140, '只监听 contextmenu；左键只接管「路径不存在」与 ~/… 家目录两种，其余照旧。', { size: 12, fill: ACCENT, weight: 600 }))
-  parts.push(text(28, HEIGHT - 16, '单击基本照旧：路径不存在、或 ~/… 家目录路径时才接管。~/… 目录的右键菜单换成 在文件管理器中打开 / 用 VS Code 打开 / 用 Zed 打开 / 复制。', { size: 11, fill: MUTED }))
+  parts.push(text(28, HEIGHT - 16, '单击基本照旧：路径不存在、或 ~/… 家目录路径时才接管。是路径的代码右键给「复制 + 打开方式」：目录列全部应用，文件只列 IDE。', { size: 11, fill: MUTED }))
 
-  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：行内代码右键菜单的命中条件、默认两项与目录专用项">'
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：行内代码右键菜单的命中条件与打开方式">'
     + parts.join('') + '</svg>\n'
 }
 

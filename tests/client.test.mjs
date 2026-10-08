@@ -431,40 +431,68 @@ test('the code-menu seat mints one fresh snapshot per open', async () => {
   assert.equal(wakes, 2, 'closing an empty seat is not a second wake-up')
 })
 
-test("the menu rows turn into the directory set only once a probe says so", async () => {
-  const { codeMenuRows } = (await load()).internals
-  assert.deepEqual(codeMenuRows(null), [])
-  assert.deepEqual(codeMenuRows({ text: "client.js" }), [
-    { key: "open", kind: "open" },
-    { key: "copy", kind: "copy" },
-  ])
-  // A directory with both editors: file manager, VS Code, Zed, then copy.
-  assert.deepEqual(codeMenuRows({ directory: true, apps: ["finder", "vscode", "zed"] }), [
-    { key: "file-manager", kind: "app", app: "finder", labelKey: "codeMenu.openInFileManager" },
-    { key: "vscode", kind: "app", app: "vscode", labelKey: "codeMenu.openInApp", name: "VS Code" },
-    { key: "zed", kind: "app", app: "zed", labelKey: "codeMenu.openInApp", name: "Zed" },
-    { key: "copy", kind: "copy" },
-  ])
-  // An application this Host does not offer is not a row — editors and file manager alike.
-  assert.deepEqual(codeMenuRows({ directory: true, apps: ["vscode"] }).map((row) => row.key), ["vscode", "copy"])
-  assert.deepEqual(codeMenuRows({ directory: true, apps: ["zed"] }).map((row) => row.key), ["zed", "copy"])
-  assert.deepEqual(codeMenuRows({ directory: true, apps: [] }).map((row) => row.key), ["copy"])
+test("a path-looking code resolves to its probe path and its absolute path", async () => {
+  const { pathTarget } = (await load()).internals
+  assert.deepEqual(pathTarget("~/x", "/Users/a", "/work"), { probe: "/Users/a/x", absolute: "/Users/a/x" })
+  assert.deepEqual(pathTarget("src/a.ts", null, "/work/"), { probe: "src/a.ts", absolute: "/work/src/a.ts" })
+  assert.deepEqual(pathTarget("/tmp/x", null, "/work"), { probe: "/tmp/x", absolute: "/tmp/x" })
+  // No home, no workspace root, empty text: nothing to hang a menu on.
+  assert.equal(pathTarget("~/x", null, "/work"), null)
+  assert.equal(pathTarget("src/a.ts", null, null), null)
+  assert.equal(pathTarget("", "/Users/a", "/work"), null)
 })
 
-test("a directory verdict is the only patch the probe may put on a tilde menu", async () => {
+test("a probe patch names the kind and the path, and nothing else moves the menu", async () => {
   const { menuPatchForProbe } = (await load()).internals
-  const directory = { ok: false, error: { code: "workspace-file/not-regular-file", message: "x is a directory", details: { kind: "directory" } } }
-  const file = { ok: true, value: { absolutePath: "/Users/a/x" } }
-  assert.deepEqual(menuPatchForProbe("~/x", "/Users/a", directory, ["finder", "vscode", "zed"]), {
-    directory: true,
-    absolute: "/Users/a/x",
-    apps: ["finder", "vscode", "zed"],
-  })
-  assert.equal(menuPatchForProbe("~/x", "/Users/a", file, ["finder"]), null)
-  assert.equal(menuPatchForProbe("client.js", "/Users/a", directory, ["finder"]), null)
-  assert.equal(menuPatchForProbe("~/x", null, directory, ["finder"]), null)
-  // A Host that answered nothing usable degrades to an empty list, not a broken menu.
-  assert.deepEqual(menuPatchForProbe("~/x", "/Users/a", directory, null), { directory: true, absolute: "/Users/a/x", apps: [] })
+  const fileResult = { ok: true, value: { absolutePath: "/w/a.ts" } }
+  const directoryResult = { ok: false, error: { code: "workspace-file/not-regular-file", message: "\"/w/src\" is a directory", details: { kind: "directory" } } }
+  const editors = [{ key: "vscode", id: "vscode", label: "VS Code", default: true, icon: null }]
+  assert.deepEqual(menuPatchForProbe({ probe: "src/a.ts", absolute: "/w/a.ts" }, fileResult, editors), { path: "/w/a.ts", kind: "file", apps: editors })
+  assert.deepEqual(menuPatchForProbe({ probe: "src", absolute: "/w/src" }, directoryResult, editors), { path: "/w/src", kind: "directory", apps: editors })
+  assert.equal(menuPatchForProbe({ probe: "src/a.ts", absolute: "/w/a.ts" }, { ok: false, error: { code: "workspace-file/not-found", message: "no entry" } }, editors), null)
+  assert.equal(menuPatchForProbe({ probe: "src/a.ts", absolute: "/w/a.ts" }, { ok: false, error: { code: "gateway/internal", message: "away" } }, editors), null)
+  assert.equal(menuPatchForProbe(null, fileResult, editors), null)
+  // A Host that answered nothing usable degrades to no rows, not a broken menu.
+  assert.deepEqual(menuPatchForProbe({ probe: "src/a.ts", absolute: "/w/a.ts" }, fileResult, null), { path: "/w/a.ts", kind: "file", apps: [] })
+})
+
+test("the code menu is copy-first once the code names a path", async () => {
+  const { codeMenuRows } = (await load()).internals
+  assert.deepEqual(codeMenuRows(null), [])
+  // A code that names no path keeps the shipped pair.
+  assert.deepEqual(codeMenuRows({ text: "npm test" }), [
+    { key: "open", kind: "open", labelKey: "codeMenu.open" },
+    { key: "copy", kind: "copy", labelKey: "codeMenu.copy" },
+  ])
+  // A path whose probe is still out: copy alone, so no row shifts under the pointer.
+  assert.deepEqual(codeMenuRows({ text: "src/a.ts", path: "/w/a.ts", apps: [] }), [
+    { key: "copy", kind: "copy", labelKey: "codeMenu.copy" },
+  ])
+  const apps = [{ key: "vscode", id: "vscode", label: "VS Code", default: false, icon: null }]
+  assert.deepEqual(codeMenuRows({ text: "src/a.ts", path: "/w/a.ts", kind: "file", apps }), [
+    { key: "copy", kind: "copy", labelKey: "codeMenu.copy" },
+    { key: "vscode", kind: "app", app: apps[0] },
+  ])
+})
+
+test("the catalog rows carry the shipped label and the host icon route", async () => {
+  const { catalogApplications, appLabel } = (await load()).internals
+  const t = (key) => ({ "app.finder": "访达", "app.vscode": "VS Code" }[key] ?? key)
+  assert.equal(appLabel("vscode", t), "VS Code")
+  assert.equal(appLabel("brand-new", t), "brand-new")
+  assert.deepEqual(catalogApplications(["finder", "vscode"], t), [
+    { key: "finder", id: "finder", label: "访达", default: false, icon: "/open-in-app/icon/finder" },
+    { key: "vscode", id: "vscode", label: "VS Code", default: false, icon: "/open-in-app/icon/vscode" },
+  ])
+  assert.deepEqual(catalogApplications(null, t), [])
+})
+
+test("the workspace root comes off the session snapshot", async () => {
+  const { sessionCwd } = (await load()).internals
+  assert.equal(sessionCwd({ byId: { s1: { cwd: "/work" } } }, "s1"), "/work")
+  assert.equal(sessionCwd({ byId: { s1: {} } }, "s1"), null)
+  assert.equal(sessionCwd({ byId: {} }, "s1"), null)
+  assert.equal(sessionCwd(null, "s1"), null)
 })
 
 test("a menu patch only lands on the menu the probe was measured for", async () => {

@@ -1652,10 +1652,13 @@ async function main() {
         const pressed = await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
         const menus = await settleMenus(cdp, sessionId, 1)
         let code = await evaluate(cdp, sessionId, CODE_PROBE)
-        if (code.openItem && code.copyItem && menus === 1) {
-          pass('right-clicking inline code offers 打开 and 复制')
+        // A file mention is a path: its menu is copy-first and carries the
+        // application rows instead of 打开. The app rows need the probe and the
+        // Host's application list, so this leg pins the shape and not the rows.
+        if (!code.openItem && code.copyItem && code.items[0] === '复制' && menus === 1) {
+          pass('right-clicking a mention offers 复制 first and no 打开 row')
         } else {
-          fail('no inline-code menu after a right-click: ' + JSON.stringify({ items: code.items, menus: code.menus }))
+          fail('unexpected inline-code menu after a right-click: ' + JSON.stringify({ items: code.items, menus: code.menus }))
         }
         await shoot(cdp, sessionId, 'code-menu.png')
 
@@ -1695,14 +1698,17 @@ async function main() {
           window.__codeClickRecorder = true;
           return true;
         })()`)
-        await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
+        // 打开 survives only on a code that names no path (a plain code), and
+        // there it dispatches the element the shell wired — the code itself when
+        // no control owns it.
+        await pressElement(cdp, sessionId, codeFinder('plain'), { contextMenu: true })
         await settleMenus(cdp, sessionId, 1)
         await clickExactMenuEntry(cdp, sessionId, '打开')
         await sleep(800)
         code = await evaluate(cdp, sessionId, CODE_PROBE)
         const syntheticClicks = code.clicks.filter((click) => click.trusted === false)
-        if (syntheticClicks.length === 1 && syntheticClicks[0].tag === 'BUTTON') {
-          pass('打开 dispatches one synthetic left click at the shell’s own control')
+        if (syntheticClicks.length === 1 && syntheticClicks[0].tag === 'CODE') {
+          pass('打开 dispatches one synthetic left click on the code the shell wired')
         } else {
           fail('打开 did not run the shell’s own click path: ' + JSON.stringify(code.clicks))
         }

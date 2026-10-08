@@ -124,11 +124,22 @@ window.__ModuleLoader__.load({
     /** Catalog ids that mean "the platform file manager", best first. */
     const FILE_MANAGER_APPS = ['finder', 'explorer', 'filemanager']
 
-    /** Editors a `~/…` directory offers, in menu order, with their display names. */
-    const EDITOR_APPS = [
-      { id: 'vscode', name: 'VS Code' },
-      { id: 'zed', name: 'Zed' },
-    ]
+    /** GET prefix serving one PNG bundle icon per catalog id. */
+    const OPEN_IN_APP_ICON_ROUTE = '/open-in-app/icon'
+
+    /**
+     * Catalog ids whose label this plugin carries.
+     *
+     * The names are the shipped Open In dictionary verbatim; an id that is not
+     * here (a newer catalog entry) shows its raw id instead of a broken label.
+     */
+    const APP_LABEL_IDS = new Set([
+      'cursor', 'vscode', 'vscodeinsiders', 'windsurf', 'zed', 'sublimetext', 'xcode', 'androidstudio',
+      'intellij', 'pycharm', 'webstorm', 'phpstorm', 'goland', 'rider', 'rustrover',
+      'fork', 'sourcetree', 'github', 'tower', 'gitkraken', 'smartgit', 'sublimemerge',
+      'ghostty', 'warp', 'iterm', 'kitty', 'windowsterminal', 'gitbash', 'gnometerminal', 'konsole',
+      'finder', 'explorer', 'filemanager', 'terminal',
+    ])
 
     /**
      * Editors and IDEs a changed file may be handed to.
@@ -850,48 +861,120 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The rows one open inline-code menu shows.
+     * One catalog id's label, in the shipped Open In dictionary's own words.
      *
-     * The shipped pair until a probe proves the code names a directory; then the
-     * directory set, in which an application row exists only when the Host really
-     * offers that application — a row that can only fail is worse than no row.
-     *
-     * @param menu - the code-menu store's snapshot, or null.
-     * @returns `[{key, kind, app?, labelKey, name?}]`.
+     * @param id - the catalog id.
+     * @param t - the plugin's localized copy.
+     * @returns the label, or the raw id for a catalog entry this plugin predates.
      */
-    function codeMenuRows(menu) {
-      if (menu === null || typeof menu !== 'object') return []
-      if (menu.directory !== true) return [{ key: 'open', kind: 'open' }, { key: 'copy', kind: 'copy' }]
-      const apps = Array.isArray(menu.apps) ? menu.apps : []
+    function appLabel(id, t) {
+      return APP_LABEL_IDS.has(id) ? t('app.' + id) : id
+    }
+
+    /**
+     * The catalog rows a directory offers: every application the Host says it can
+     * launch, in the Host's own order, wearing the Host's icon route.
+     *
+     * @param ids - the `apps` array `/open-in-app/apps` answered, when it did.
+     * @param t - the plugin's localized copy.
+     * @returns `[{key, id, label, default, icon}]`.
+     */
+    function catalogApplications(ids, t) {
+      if (!Array.isArray(ids)) return []
       const rows = []
-      const fileManager = fileManagerAppOf(apps)
-      if (fileManager !== null) rows.push({ key: 'file-manager', kind: 'app', app: fileManager, labelKey: 'codeMenu.openInFileManager' })
-      for (const editor of EDITOR_APPS) {
-        if (apps.includes(editor.id)) rows.push({ key: editor.id, kind: 'app', app: editor.id, labelKey: 'codeMenu.openInApp', name: editor.name })
+      for (const id of ids) {
+        if (typeof id !== 'string' || id === '') continue
+        rows.push({ key: id, id, label: appLabel(id, t), default: false, icon: OPEN_IN_APP_ICON_ROUTE + '/' + id })
       }
-      rows.push({ key: 'copy', kind: 'copy' })
       return rows
+    }
+
+    /**
+     * The two paths one inline `code` names: what to ask the Host about, and
+     * what to hand an application.
+     *
+     * `~/…` expands to the account home; an absolute code is already absolute;
+     * anything else is relative to the Session's workspace directory. A code this
+     * client cannot complete (no home, no workspace root, empty text) is not a
+     * target at all, and that press keeps the shipped pair.
+     *
+     * @param text - the code's exact text.
+     * @param home - the Host home, or a getter for it.
+     * @param root - the Session's workspace directory, when known.
+     * @returns `{probe, absolute}`, or null.
+     */
+    function pathTarget(text, home, root) {
+      if (typeof text !== 'string') return null
+      const trimmed = text.trim()
+      if (trimmed === '') return null
+      if (isTildePath(trimmed)) {
+        const absolute = expandHomePath(trimmed, typeof home === 'function' ? home() : home)
+        return absolute === null ? null : { probe: absolute, absolute }
+      }
+      if (trimmed.startsWith('/')) return { probe: trimmed, absolute: trimmed }
+      if (typeof root !== 'string' || root === '') return null
+      return { probe: trimmed, absolute: root.replace(/\/+$/u, '') + '/' + trimmed }
     }
 
     /**
      * The menu patch one probe answer earns, if any.
      *
-     * Only a `~/…` code the probe calls a directory switches the menu; a file, a
-     * path that is not there, a home this client does not know, or any other code
-     * leaves the shipped pair in place.
+     * Only a path the probe calls present or a directory becomes a target: a path
+     * that is not there, or an answer that proves nothing, leaves the shipped pair.
      *
-     * @param text - the code's exact text.
-     * @param home - the Host home, or a getter for it.
-     * @param result - whatever the probe answered for the expanded path.
-     * @param apps - the Host's launchable application ids, when known.
-     * @returns `{directory, absolute, apps}`, or null to leave the menu alone.
+     * @param target - `{probe, absolute}` from :func:`pathTarget`, or null.
+     * @param result - whatever the probe answered.
+     * @param apps - the rows this target offers, when the caller already has them.
+     * @returns `{path, kind, apps}`, or null to leave the menu alone.
      */
-    function menuPatchForProbe(text, home, result, apps) {
-      if (!isTildePath(text)) return null
-      const absolute = expandHomePath(text, typeof home === 'function' ? home() : home)
-      if (absolute === null) return null
-      if (statVerdict(result) !== 'directory') return null
-      return { directory: true, absolute, apps: Array.isArray(apps) ? apps : [] }
+    function menuPatchForProbe(target, result, apps) {
+      if (target === null || typeof target !== 'object') return null
+      if (typeof target.absolute !== 'string' || target.absolute === '') return null
+      const verdict = statVerdict(result)
+      if (verdict !== 'present' && verdict !== 'directory') return null
+      return {
+        path: target.absolute,
+        kind: verdict === 'directory' ? 'directory' : 'file',
+        apps: Array.isArray(apps) ? apps : [],
+      }
+    }
+
+    /**
+     * The rows one open inline-code menu shows.
+     *
+     * A code that names no path keeps the shipped 打开 / 复制 pair. Once the code is
+     * known to name a path the menu is copy-first, and the application rows are
+     * appended as they arrive, so the top row never moves under the pointer.
+     *
+     * @param menu - the code-menu store's snapshot, or null.
+     * @returns `[{key, kind, app?, labelKey}]`.
+     */
+    function codeMenuRows(menu) {
+      if (menu === null || typeof menu !== 'object') return []
+      if (typeof menu.path !== 'string' || menu.path === '') {
+        return [
+          { key: 'open', kind: 'open', labelKey: 'codeMenu.open' },
+          { key: 'copy', kind: 'copy', labelKey: 'codeMenu.copy' },
+        ]
+      }
+      const rows = [{ key: 'copy', kind: 'copy', labelKey: 'codeMenu.copy' }]
+      for (const app of (Array.isArray(menu.apps) ? menu.apps : [])) {
+        rows.push({ key: app.key, kind: 'app', app })
+      }
+      return rows
+    }
+
+    /**
+     * One Session's workspace directory, which is what a relative code resolves
+     * against.
+     *
+     * @param snapshot - the `sessions` store snapshot.
+     * @param sessionId - the current Session id, or null.
+     * @returns the directory, or null.
+     */
+    function sessionCwd(snapshot, sessionId) {
+      const cwd = snapshot?.byId?.[sessionId]?.cwd
+      return typeof cwd === 'string' && cwd !== '' ? cwd : null
     }
 
     /**
@@ -1335,8 +1418,9 @@ window.__ModuleLoader__.load({
      */
     function openChangedFile(input) {
       const action = input.action === 'reveal' ? 'reveal' : 'open'
+      const failureKey = input.failureKey ?? (action === 'open' ? 'changesFile.failed' : 'changesFile.revealFailed')
       const failed = () => {
-        input.notify(input.t(action === 'open' ? 'changesFile.failed' : 'changesFile.revealFailed'), 'warning')
+        input.notify(input.t(failureKey), 'warning')
         return false
       }
       const session = input.remote?.session
@@ -1779,11 +1863,44 @@ window.__ModuleLoader__.load({
       'copy.noSession': '当前没有打开的会话',
       'codeMenu.open': '打开',
       'codeMenu.copy': '复制',
-      'codeMenu.openInFileManager': '在文件管理器中打开',
-      'codeMenu.openInApp': '用 {name} 打开',
       'codeMenu.openFailed': '打开失败',
+      'codeMenu.appDefault': '{name}（默认）',
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
+      'app.cursor': 'Cursor',
+      'app.vscode': 'VS Code',
+      'app.vscodeinsiders': 'VS Code Insiders',
+      'app.windsurf': 'Windsurf',
+      'app.zed': 'Zed',
+      'app.sublimetext': 'Sublime Text',
+      'app.xcode': 'Xcode',
+      'app.androidstudio': 'Android Studio',
+      'app.intellij': 'IntelliJ IDEA',
+      'app.pycharm': 'PyCharm',
+      'app.webstorm': 'WebStorm',
+      'app.phpstorm': 'PhpStorm',
+      'app.goland': 'GoLand',
+      'app.rider': 'Rider',
+      'app.rustrover': 'RustRover',
+      'app.fork': 'Fork',
+      'app.sourcetree': 'Sourcetree',
+      'app.github': 'GitHub Desktop',
+      'app.tower': 'Tower',
+      'app.gitkraken': 'GitKraken',
+      'app.smartgit': 'SmartGit',
+      'app.sublimemerge': 'Sublime Merge',
+      'app.ghostty': 'Ghostty',
+      'app.warp': 'Warp',
+      'app.iterm': 'iTerm2',
+      'app.kitty': 'kitty',
+      'app.windowsterminal': 'Windows Terminal',
+      'app.gitbash': 'Git Bash',
+      'app.gnometerminal': 'GNOME Terminal',
+      'app.konsole': 'Konsole',
+      'app.finder': '访达',
+      'app.explorer': '文件资源管理器',
+      'app.filemanager': '文件管理器',
+      'app.terminal': '终端',
       'changesFile.open': '用默认应用打开',
       'changesFile.appDefault': '{app}（默认）',
       'changesFile.reveal': '在文件管理器中显示',
@@ -1820,11 +1937,44 @@ window.__ModuleLoader__.load({
       'copy.noSession': 'No Session is open',
       'codeMenu.open': 'Open',
       'codeMenu.copy': 'Copy',
-      'codeMenu.openInFileManager': 'Open in file manager',
-      'codeMenu.openInApp': 'Open in {name}',
       'codeMenu.openFailed': 'Could not open',
+      'codeMenu.appDefault': '{name} (default)',
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
+      'app.cursor': 'Cursor',
+      'app.vscode': 'VS Code',
+      'app.vscodeinsiders': 'VS Code Insiders',
+      'app.windsurf': 'Windsurf',
+      'app.zed': 'Zed',
+      'app.sublimetext': 'Sublime Text',
+      'app.xcode': 'Xcode',
+      'app.androidstudio': 'Android Studio',
+      'app.intellij': 'IntelliJ IDEA',
+      'app.pycharm': 'PyCharm',
+      'app.webstorm': 'WebStorm',
+      'app.phpstorm': 'PhpStorm',
+      'app.goland': 'GoLand',
+      'app.rider': 'Rider',
+      'app.rustrover': 'RustRover',
+      'app.fork': 'Fork',
+      'app.sourcetree': 'Sourcetree',
+      'app.github': 'GitHub Desktop',
+      'app.tower': 'Tower',
+      'app.gitkraken': 'GitKraken',
+      'app.smartgit': 'SmartGit',
+      'app.sublimemerge': 'Sublime Merge',
+      'app.ghostty': 'Ghostty',
+      'app.warp': 'Warp',
+      'app.iterm': 'iTerm2',
+      'app.kitty': 'kitty',
+      'app.windowsterminal': 'Windows Terminal',
+      'app.gitbash': 'Git Bash',
+      'app.gnometerminal': 'GNOME Terminal',
+      'app.konsole': 'Konsole',
+      'app.finder': 'Finder',
+      'app.explorer': 'File Explorer',
+      'app.filemanager': 'Files',
+      'app.terminal': 'Terminal',
       'changesFile.open': 'Open in Default App',
       'changesFile.appDefault': '{app} (default)',
       'changesFile.reveal': 'Show in File Manager',
@@ -2134,7 +2284,7 @@ window.__ModuleLoader__.load({
       const select = (row) => {
         // Closing first keeps the menu's own dismissal out of the way of
         // whatever this is about to open.
-        const { element, text, absolute } = menu
+        const { element, text, kind, path } = menu
         store.close()
         if (row.kind === 'copy') {
           copyInlineCode({ text, write: props.write, notify: props.notify, t })
@@ -2145,7 +2295,7 @@ window.__ModuleLoader__.load({
           return
         }
         const refuse = () => { props.notify(t('codeMenu.openFailed'), 'warning') }
-        Promise.resolve(props.openApp(row.app, absolute)).then((opened) => {
+        Promise.resolve(props.openCodeApp({ kind, path, application: row.app.id })).then((opened) => {
           if (opened !== true) refuse()
         }, refuse)
       }
@@ -2162,8 +2312,18 @@ window.__ModuleLoader__.load({
         },
         codeMenuRows(menu).map((row) => h(
           MenuItemButton,
-          { key: row.key, onSelect: () => { select(row) } },
-          row.name === undefined ? t(row.labelKey) : t(row.labelKey, { name: row.name }),
+          {
+            key: row.key,
+            // An application row wears the icon its own source handed over: the
+            // OS's for a file, the Host's icon route for a catalog directory.
+            icon: row.kind === 'app' && row.app.icon !== null
+              ? h('img', { className: 'flow-app-icon', src: row.app.icon, alt: '' })
+              : undefined,
+            onSelect: () => { select(row) },
+          },
+          row.kind === 'app'
+            ? (row.app.default === true ? t('codeMenu.appDefault', { name: row.app.label }) : row.app.label)
+            : t(row.labelKey),
         )),
       )
     }
@@ -2512,6 +2672,21 @@ window.__ModuleLoader__.load({
         }
         const openInFileManager = (absolute) => resolveApps()
           .then((apps) => openInApp(fileManagerAppOf(apps), absolute), () => false)
+        // One application row's hand-off: a directory goes through the catalog
+        // route, a file through the Session Remote that owns that file's
+        // registered handlers. Either answer is a Result, never a throw.
+        const openCodeApp = (request) => {
+          if (request === null || typeof request !== 'object') return Promise.resolve(false)
+          if (request.kind === 'directory') return openInApp(request.application, request.path)
+          return openChangedFile({
+            remote: ctx.remote,
+            path: request.path,
+            application: request.application,
+            failureKey: 'codeMenu.openFailed',
+            notify,
+            t,
+          })
+        }
         // The file's own registered handlers, one query per path. The answer
         // carries icons, so it is not re-asked on every right-click; a failed
         // answer is not cached, because a Host that is briefly away would
@@ -2561,16 +2736,35 @@ window.__ModuleLoader__.load({
             changesMenu.mark(target, { apps: rows })
           }, () => {})
         }
-        // The context menu labels itself from a probe: a `~/…` directory swaps the
-        // shipped pair for the directory set. The sequence number keeps a late
-        // answer from re-labelling a menu that has already been replaced.
-        const classifyDirectoryMenu = (target, text) => {
-          if (!isTildePath(text)) return
-          const absolute = expandHomePath(text, hostHome())
-          if (absolute === null) return
-          Promise.all([readInlineCodeStat(absolute), resolveApps()]).then(([result, apps]) => {
-            const patch = menuPatchForProbe(text, hostHome(), result, apps)
-            if (patch !== null) codeMenu.mark(target, patch)
+        // The context menu labels itself from a probe. Every path-looking code
+        // gets the copy-first menu: a directory lists the Host's catalog (the same
+        // list the shipped Open In button shows), a file lists the editors the OS
+        // registered for that exact file, and a path that is not there stays
+        // copy-only. The sequence number keeps a late answer off a menu it does
+        // not belong to.
+        const classifyCodeMenu = (target, hit) => {
+          const plan = inlineCodePlan(hit, hostHome)
+          if (plan === null) return
+          const root = sessionCwd(sessions.getSnapshot(), currentSessionId(sessions.getSnapshot()))
+          const resolved = pathTarget(hit.text, hostHome(), root)
+          if (resolved === null) return
+          // Copy alone until the answer lands, so no row moves under the pointer.
+          codeMenu.mark(target, { path: resolved.absolute, apps: [] })
+          const probe = plan.kind === 'home' ? plan.probe : hit.text
+          readInlineCodeStat(probe).then((result) => {
+            const verdict = statVerdict(result)
+            if (verdict === 'present') {
+              return readFileApplications(resolved.absolute).then((apps) => {
+                if (apps === null) return
+                codeMenu.mark(target, { path: resolved.absolute, kind: 'file', apps: editorApplications(apps) })
+              })
+            }
+            if (verdict === 'directory') {
+              return resolveApps().then((ids) => {
+                codeMenu.mark(target, { path: resolved.absolute, kind: 'directory', apps: catalogApplications(ids, t) })
+              })
+            }
+            return undefined
           }, () => {})
         }
         const readInlineCodeStat = (path) => {
@@ -2609,7 +2803,7 @@ window.__ModuleLoader__.load({
             if (detach !== null) return
             const onContextMenu = (event) => {
               handleCodeContextMenu(event, {
-                open: (hit) => { classifyDirectoryMenu(codeMenu.open(hit), hit.text) },
+                open: (hit) => { classifyCodeMenu(codeMenu.open(hit), hit) },
               })
             }
             // A left press on a file mention is claimed here, probed, and handed
@@ -2832,9 +3026,9 @@ window.__ModuleLoader__.load({
             write: writeClipboard,
             notify,
             useLocaleRevision,
-            // The directory rows open one resolved application at one absolute
-            // path; the route answers "opened" or "refused".
-            openApp: (app, absolute) => openInApp(app, absolute),
+            // One application row hands one absolute path to one resolved
+            // application; the answer is "opened" or "refused".
+            openCodeApp: (request) => openCodeApp(request),
             // A control the shell wired keeps its own activation untouched. Only
             // a `~/…` code has no owner, and that one goes through the same probe
             // and home open the left press uses.
@@ -2950,6 +3144,10 @@ window.__ModuleLoader__.load({
         openInlineCodeHit,
         statVerdict,
         fileManagerAppOf,
+        appLabel,
+        catalogApplications,
+        pathTarget,
+        sessionCwd,
         codeMenuRows,
         menuPatchForProbe,
         handleInlineCodeClick,
