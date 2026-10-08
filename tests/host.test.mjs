@@ -56,6 +56,14 @@ test('the inline-code menu switch defaults to on, and is volatile too', () => {
   assert.equal(field.type, 'boolean')
 })
 
+test('the changed-file menu switch defaults to on, and is volatile too', () => {
+  assert.equal(z.resolve({}, Config)[0].changesFileOpen.get(), true)
+  assert.equal(z.resolve({ changesFileOpen: false }, Config)[0].changesFileOpen.get(), false)
+  const field = Config.dict.changesFileOpen
+  assert.equal(field.meta.volatile, true)
+  assert.equal(field.type, 'boolean')
+})
+
 test('the send-key switch starts on the shell behaviour, and is volatile too', () => {
   // Off is the shipped Enter: a fresh install must not silently swap the keys
   // under someone who never asked for it.
@@ -68,7 +76,7 @@ test('the send-key switch starts on the shell behaviour, and is volatile too', (
 })
 
 test('the toggles are volatile, which is what the settings form projects', () => {
-  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'modEnterSend']) {
+  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend']) {
     const field = Config.dict[name]
     assert.equal(field.meta.volatile, true, name)
     assert.equal(field.type, 'boolean', name)

@@ -275,12 +275,14 @@ test('apply registers the footer button, the 心流 section and the copy seats',
   assert.equal(menu.locale, 'flow')
   assert.equal(menu.order, MENU_ORDER)
   const overlays = registrations.filter((entry) => entry.name === 'shell.overlay')
-  assert.deepEqual(overlays.map((entry) => entry.id), ['flow', 'flow.code-menu'])
+  assert.deepEqual(overlays.map((entry) => entry.id), ['flow', 'flow.code-menu', 'flow.changes-menu'])
   assert.equal(overlays[0].locale, 'flow')
-  // The inline-code menu is a second cell of the same list slot rather than a
+  // Each floating surface is its own cell of the same list slot rather than a
   // second surface sharing the notice's cell.
-  assert.equal(overlays[1].locale, 'flow')
-  assert.notEqual(overlays[1].id, overlays[0].id)
+  for (const overlay of overlays.slice(1)) {
+    assert.equal(overlay.locale, 'flow')
+    assert.notEqual(overlay.id, overlays[0].id)
+  }
 
   // Every registration the module makes is released with its fiber.
   assert.ok(effects.length >= 5)
@@ -546,7 +548,9 @@ test('the inline-code listeners exist only while the preference is on', async ()
     removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
   }
   try {
-    const form = fakeForm({ codeMenu: true })
+    // The changed-file menu is another feature's listener; it is held off here
+    // so this assertion stays about the inline-code pair alone.
+    const form = fakeForm({ codeMenu: true, changesFileOpen: false })
     module.apply(fakeContext([], [], { form }))
     // `click` first is the off-origin link hand-off, which is a separate
     // feature; the menu press and the path press are the two below it.
@@ -554,16 +558,17 @@ test('the inline-code listeners exist only while the preference is on', async ()
 
     // A Host echo that turns the feature off detaches both listeners instead of
     // leaving ones behind that decide to do nothing.
-    form.publish({ codeMenu: false })
+    form.publish({ codeMenu: false, changesFileOpen: false })
     assert.deepEqual(removed, [
       { type: 'contextmenu', listener: added[1].listener, capture: true },
       { type: 'click', listener: added[2].listener, capture: true },
     ])
-    form.publish({ codeMenu: false })
+    form.publish({ codeMenu: false, changesFileOpen: false })
     assert.equal(removed.length, 2, 'already detached listeners are not removed twice')
 
-    // Turning it back on binds both again, and nothing else.
-    form.publish({ codeMenu: true })
+    // Turning it back on binds both again, and nothing else. The changed-file
+    // menu keeps its own preference off throughout, so it never joins in.
+    form.publish({ codeMenu: true, changesFileOpen: false })
     assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'click', 'contextmenu', 'click'])
     assert.equal(added[3].capture, true)
     assert.equal(added[4].capture, true)
@@ -716,6 +721,12 @@ test('both dictionaries stay complete, copy included', async () => {
     'section.codeMenu.description',
     'section.sendKey.title',
     'section.sendKey.description',
+    'changesFile.open',
+    'changesFile.reveal',
+    'changesFile.failed',
+    'changesFile.revealFailed',
+    'section.changesFile.title',
+    'section.changesFile.description',
   ]) {
     assert.equal(typeof flow.zh[key], 'string', key)
     assert.notEqual(flow.zh[key].length, 0, key)
@@ -727,6 +738,10 @@ test('both dictionaries stay complete, copy included', async () => {
   assert.equal(flow.zh['codeMenu.open'], '打开')
   assert.equal(flow.zh['codeMenu.copy'], '复制')
   assert.equal(flow.zh['codeMenu.done'], '已复制行内代码')
+  assert.equal(flow.zh['changesFile.open'], '用默认应用打开')
+  assert.equal(flow.zh['changesFile.reveal'], '在文件管理器中显示')
+  assert.equal(flow.zh['changesFile.failed'], '无法用默认应用打开这个文件')
+  assert.equal(flow.zh['changesFile.revealFailed'], '无法在文件管理器中显示这个文件')
 })
 
 test('readExternalLinkEnabled defaults to on and only an explicit false turns it off', async () => {
@@ -868,9 +883,10 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // Three separate capture-phase listeners: the link hand-off, the menu press,
-    // and the path press. None can be reached through another's registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true]])
+    // Four separate capture-phase listeners: the link hand-off, the inline-code
+    // menu press, the inline-code path press, and the changed-file menu press.
+    // None can be reached through another's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true], ['contextmenu', true]])
     assert.deepEqual(removed, [])
     // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
@@ -878,6 +894,7 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
       { type: 'click', listener: listeners[0].listener },
       { type: 'contextmenu', listener: listeners[1].listener },
       { type: 'click', listener: listeners[2].listener },
+      { type: 'contextmenu', listener: listeners[3].listener },
     ])
   } finally {
     delete globalThis.document
@@ -1344,14 +1361,17 @@ test("the file manager is the first catalog id the host actually offers", async 
   assert.equal(fileManagerAppOf(null), null)
 })
 
-test("the plugin injects the Remote carrier and its workspaceFiles namespace", async () => {
-  // Measured: without these two the cordis context has no ctx.remote.workspaceFiles,
+test("the plugin injects the Remote carrier and both namespaces it uses", async () => {
+  // Measured: without these the cordis context has no ctx.remote.workspaceFiles,
   // every existence probe answers "unknown", and each press silently falls back to
   // the shell — which is exactly the "path open failed" report this feature exists
-  // to replace. The inject list is therefore part of the feature, not boilerplate.
+  // to replace. ctx.remote.session is the same contract for the changed-file menu:
+  // omitted, every hand-off answers "could not open". The inject list is therefore
+  // part of both features, not boilerplate.
   const module = await load()
   assert.ok(module.inject.includes("remote"), "ctx.remote carries the host facts and $host")
   assert.ok(module.inject.includes("remote.workspaceFiles"), "ctx.remote.workspaceFiles carries stat")
+  assert.ok(module.inject.includes("remote.session"), "ctx.remote.session carries openWorkspacePath")
   assert.ok(module.inject.includes("sidebarRight"), "ctx.sidebarRight carries openResource")
 })
 
@@ -1537,3 +1557,189 @@ test('the composer listener exists only while the preference is on', async () =>
     delete globalThis.document
   }
 })
+
+
+// --- 「已编辑 N 个文件」卡片：右键把文件交给默认应用 -----------------------
+
+/** One changed-file row: a button whose `aria-describedby` names its Host path. */
+function changedFileRow({ path = '/Users/me/project/src/app.ts', describedBy = 'dsh-changes-0', card = true, described = true } = {}) {
+  const description = node({ tag: 'span' })
+  description.textContent = path
+  const row = node({ tag: 'button', attrs: { 'aria-describedby': describedBy } })
+  row.closest = (selector) => (selector === '[data-changed-files]' && card ? node({}) : null)
+  row.ownerDocument = { getElementById: (value) => (described && value === describedBy ? description : null) }
+  const target = { nodeType: 1, closest: (selector) => (selector === 'button[aria-describedby]' ? row : null) }
+  return { row, description, event: { target } }
+}
+
+test('changedFileTarget claims one changed-file row, and nothing else', async () => {
+  const { changedFileTarget } = (await load()).internals
+
+  const hit = changedFileRow()
+  assert.deepEqual(changedFileTarget(hit.event), { element: hit.row, path: '/Users/me/project/src/app.ts' })
+
+  // A press that never reached a row button.
+  assert.equal(changedFileTarget({ target: { closest: () => null } }), null)
+  assert.equal(changedFileTarget({ target: null }), null)
+  assert.equal(changedFileTarget({}), null)
+  assert.equal(changedFileTarget(undefined), null)
+  // A row button outside the changed-files card belongs to some other surface.
+  assert.equal(changedFileTarget(changedFileRow({ card: false }).event), null)
+  // No description, a description that is not in the document, and an empty one
+  // all leave the press without a Host path to hand over.
+  const bare = changedFileRow()
+  bare.row.getAttribute = () => null
+  assert.equal(changedFileTarget(bare.event), null)
+  assert.equal(changedFileTarget(changedFileRow({ described: false }).event), null)
+  assert.equal(changedFileTarget(changedFileRow({ path: '   ' }).event), null)
+})
+
+test('a context-menu press on a changed-file row is claimed, and any other press is left alone', async () => {
+  const { handleChangesContextMenu } = (await load()).internals
+  const hit = changedFileRow()
+  const claimed = {
+    ...hit.event,
+    clientX: 12,
+    clientY: 34,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { claimed.prevented += 1 },
+    stopPropagation() { claimed.stopped += 1 },
+  }
+  const opened = []
+  assert.equal(handleChangesContextMenu(claimed, { open: (menu) => opened.push(menu) }), true)
+  assert.deepEqual(opened, [{ x: 12, y: 34, path: '/Users/me/project/src/app.ts', element: hit.row }])
+  assert.equal(claimed.prevented, 1, 'the browser must not also open its own menu')
+  assert.equal(claimed.stopped, 1)
+
+  const passed = {
+    target: { closest: () => null },
+    clientX: 0,
+    clientY: 0,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { passed.prevented += 1 },
+    stopPropagation() { passed.stopped += 1 },
+  }
+  assert.equal(handleChangesContextMenu(passed, { open: () => { throw new Error('nothing to open') } }), false)
+  assert.equal(passed.prevented, 0, 'a press that is not ours keeps the shipped behaviour')
+  assert.equal(passed.stopped, 0)
+})
+
+test('the changed-file seat mints one fresh snapshot per open', async () => {
+  const { createChangesMenuStore } = (await load()).internals
+  const store = createChangesMenuStore()
+  assert.equal(store.getSnapshot(), null)
+
+  let wakes = 0
+  const off = store.subscribe(() => { wakes += 1 })
+  const element = { nodeType: 1 }
+  store.open({ x: 5, y: 6, path: '/a/b.ts', element })
+  const first = store.getSnapshot()
+  assert.deepEqual(first, { seq: 1, x: 5, y: 6, path: '/a/b.ts', element })
+  assert.equal(wakes, 1)
+
+  // The very same press point again is still a new object: React compares
+  // snapshots by identity, so a re-open has to re-render.
+  store.open({ x: 5, y: 6, path: '/a/b.ts', element })
+  assert.equal(store.getSnapshot() === first, false)
+  assert.equal(store.getSnapshot().seq, 2)
+  assert.equal(wakes, 2)
+
+  off()
+  store.close()
+  assert.equal(store.getSnapshot(), null)
+  assert.equal(wakes, 2, 'an unsubscribed listener stays silent')
+  store.close()
+  assert.equal(wakes, 2, 'closing an empty seat is not a second wake-up')
+})
+
+test('readChangesFileOpen defaults to on and only an explicit false turns it off', async () => {
+  const { readChangesFileOpen } = (await load()).internals
+  assert.equal(readChangesFileOpen({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readChangesFileOpen({ getSnapshot: () => ({ value: { changesFileOpen: false } }) }), false)
+  assert.equal(readChangesFileOpen({ getSnapshot: () => ({ value: { changesFileOpen: true } }) }), true)
+  assert.equal(readChangesFileOpen({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+test('openChangedFile asks the Host, and reports a refusal in words', async () => {
+  const { openChangedFile } = (await load()).internals
+  const seen = []
+  const notify = (text, tone) => seen.push([text, tone])
+  const t = (key) => ({
+    'changesFile.failed': '无法用默认应用打开这个文件',
+    'changesFile.revealFailed': '无法在文件管理器中显示这个文件',
+  }[key])
+
+  const opened = []
+  const remote = { session: { openWorkspacePath: (request) => { opened.push(request); return Promise.resolve({ ok: true }) } } }
+  assert.equal(await openChangedFile({ path: '/a/b.ts', remote, notify, t }), true)
+  assert.deepEqual(opened, [{ path: '/a/b.ts' }])
+  assert.deepEqual(seen, [], 'a hand-off that worked says nothing')
+
+  const revealed = []
+  const revealing = { session: { openWorkspacePath: (request) => { revealed.push(request); return Promise.resolve({ ok: true }) } } }
+  assert.equal(await openChangedFile({ path: '/a/b.ts', action: 'reveal', remote: revealing, notify, t }), true)
+  assert.deepEqual(revealed, [{ path: '/a/b.ts', action: 'reveal' }])
+
+  // A refusal envelope, a rejection, and a Host that never mounted the remote
+  // all read as the same spoken refusal — never as silence, and never as the
+  // raw error the Host happened to answer with.
+  const refused = { session: { openWorkspacePath: () => Promise.resolve({ ok: false, error: { code: 'path/unmapped', message: 'ENOENT: no such file' } }) } }
+  assert.equal(await openChangedFile({ path: '/a/b.ts', remote: refused, notify, t }), false)
+  assert.deepEqual(seen[0], ['无法用默认应用打开这个文件', 'warning'])
+  assert.equal(/ENOENT|path\/unmapped/.test(seen[0][0]), false, 'the raw error never reaches the notice')
+
+  const throwing = { session: { openWorkspacePath: () => Promise.reject(new Error('boom')) } }
+  assert.equal(await openChangedFile({ path: '/a/b.ts', remote: throwing, notify, t }), false)
+  assert.deepEqual(seen[1], ['无法用默认应用打开这个文件', 'warning'])
+
+  assert.equal(await openChangedFile({ path: '/a/b.ts', remote: undefined, notify, t }), false)
+  assert.deepEqual(seen[2], ['无法用默认应用打开这个文件', 'warning'])
+  assert.equal(await openChangedFile({ path: '/a/b.ts', action: 'reveal', remote: undefined, notify, t }), false)
+  assert.deepEqual(seen[3], ['无法在文件管理器中显示这个文件', 'warning'])
+})
+
+test('the changed-file listener exists only while the preference is on', async () => {
+  const module = await load()
+  const added = []
+  const removed = []
+  globalThis.document = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, remove() {} }),
+    head: { appendChild() {} },
+    addEventListener: (type, listener, capture) => added.push({ type, listener, capture }),
+    removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
+  }
+  try {
+    // The inline-code menu is held off, so the only `contextmenu` listener here
+    // is this feature's own.
+    const form = fakeForm({ changesFileOpen: false, codeMenu: false })
+    module.apply(fakeContext([], [], { form }))
+    const menus = () => added.filter((entry) => entry.type === 'contextmenu')
+    assert.deepEqual(menus(), [], 'an off feature adds no contextmenu listener')
+
+    form.publish({ changesFileOpen: true, codeMenu: false })
+    assert.deepEqual(menus().map((entry) => entry.capture), [true])
+
+    form.publish({ changesFileOpen: false, codeMenu: false })
+    assert.deepEqual(removed, [{ type: 'contextmenu', listener: menus()[0].listener, capture: true }])
+    form.publish({ changesFileOpen: false, codeMenu: false })
+    assert.equal(removed.length, 1, 'an already detached listener is not removed twice')
+
+    form.publish({ changesFileOpen: true, codeMenu: false })
+    assert.deepEqual(menus().map((entry) => entry.capture), [true, true])
+  } finally {
+    delete globalThis.document
+  }
+})
+
+test('the changed-file menu is handed an opener beside its store', async () => {
+  const module = await load()
+  const registrations = []
+  module.apply(fakeContext(registrations, []))
+  const menu = registrations.find((entry) => entry.name === 'shell.overlay' && entry.id === 'flow.changes-menu')
+  assert.ok(menu, 'the changed-file menu owns its own overlay cell')
+  assert.equal(typeof menu.inject().openFile, 'function')
+})
+

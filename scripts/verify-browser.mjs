@@ -473,6 +473,41 @@ async function openContentSession(cdp, sessionId) {
 }
 
 /**
+ * Open a Session whose transcript ends with a 已编辑 N 个文件 card.
+ *
+ * The same reason `openContentSession` exists: the shell opens whatever Session
+ * was used last, and only a turn that really changed files renders the card this
+ * feature hangs its menu on. A Session whose card was never recorded — the Host
+ * restarted since — shows none, so labelled rows are tried until one does.
+ *
+ * @returns `{ok, rowKey, rows}`, or `{ok: false, rows}` when none did.
+ */
+async function openChangedFilesSession(cdp, sessionId) {
+  const rows = await evaluate(cdp, sessionId, `(() => [...document.querySelectorAll('[class*="listArea"] [data-row-key^="session:"]')]
+    .map((row) => ({ key: row.dataset.rowKey, label: (row.innerText || '').trim() })))()`)
+  const candidates = rows.filter((row) => row.label !== '' && !row.label.includes('新会话'))
+  const tried = []
+  for (const row of candidates) {
+    try {
+      await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(row.key) + ']')
+    } catch {
+      continue
+    }
+    const expression = `document.querySelectorAll('[data-changed-files] button[aria-describedby]').length`
+    try {
+      await waitFor(cdp, sessionId, expression + ' > 0', 'a changed-files card in ' + row.key, 8000)
+      const count = await evaluate(cdp, sessionId, expression)
+      if (count > 0) return { ok: true, rowKey: row.key, rows: count }
+    } catch {
+      // The next row may be the one with a card; a row without one is the reason
+      // this loop exists.
+    }
+    if (!tried.includes(row.key)) tried.push(row.key)
+  }
+  return { ok: false, rows: tried }
+}
+
+/**
  * Wait for exactly `count` menus to be on screen, and report how many are.
  *
  * A menu is React state, not a synchronous consequence of the press: reading
@@ -862,11 +897,48 @@ const CODE_DIAGNOSTICS = `(() => {
   };
 })()`
 
-/** The 心流 page's fourth row: this feature's own switch. */
+/** The changed-file row this feature claims: the card's own file button. */
+const CHANGED_FILE_FINDER = `(() => {
+  const rows = [...document.querySelectorAll('[data-changed-files] button[aria-describedby]')];
+  const pressable = rows.filter((b) => {
+    const r = b.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const x = r.x + r.width / 2;
+    const y = r.y + r.height / 2;
+    return x > 0 && x < window.innerWidth && y > 0 && y < window.innerHeight;
+  });
+  return (pressable[0] ?? rows[0]) ?? null;
+})()`
+
+/** What the changed-file menu and the card it hangs from look like right now. */
+const CHANGED_FILES_PROBE = `(() => {
+  const rows = [...document.querySelectorAll('[data-changed-files] button[aria-describedby]')];
+  const first = rows[0] ?? null;
+  const described = first === null ? null : (() => {
+    const id = String(first.getAttribute('aria-describedby') || '').trim().split(' ')[0];
+    const node = id === '' ? null : document.getElementById(id);
+    return node === null ? null : node.textContent.trim();
+  })();
+  const anchor = document.querySelector('[data-flow-changes-path]');
+  return {
+    cards: document.querySelectorAll('[data-changed-files]').length,
+    rows: rows.length,
+    menus: document.querySelectorAll('[role="menu"]').length,
+    items: [...document.querySelectorAll('[role="menuitem"]')].map((n) => n.textContent.trim()),
+    path: anchor === null ? null : anchor.getAttribute('data-flow-changes-path'),
+    described,
+  };
+})()`
+
+
+/** The 心流 page's fourth row: the inline-code menu switch. */
 const CODE_MENU_SWITCH = '[role="dialog"] .flow-row:nth-child(4) [role="switch"]'
 
-/** The 心流 page's fifth row: the swapped send key. */
-const MOD_ENTER_SWITCH = '[role="dialog"] .flow-row:nth-child(5) [role="switch"]'
+/** The 心流 page's fifth row: the changed-file menu switch. */
+const CHANGES_FILE_SWITCH = '[role="dialog"] .flow-row:nth-child(5) [role="switch"]'
+
+/** The 心流 page's sixth row: the swapped send key. */
+const MOD_ENTER_SWITCH = '[role="dialog"] .flow-row:nth-child(6) [role="switch"]'
 
 /**
  * Wait until one element's box has stopped moving.
@@ -1484,8 +1556,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '⌘+Enter 发送'])) {
-      pass('the 心流 page renders all five preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送'])) {
+      pass('the 心流 page renders all six preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -1730,6 +1802,56 @@ async function main() {
       }
     }
 
+
+
+    // ---- H. the changed-file right-click menu --------------------------
+    // The card is rendered from the Host's own per-turn change summary, so it
+    // exists only for a turn that really changed files and only while the Host
+    // process that recorded it is alive. No such turn on screen is a skip, not a
+    // failure.
+    const changed = await openChangedFilesSession(cdp, sessionId)
+    if (!changed.ok) {
+      skip('no Session on screen ends with a 已编辑 N 个文件 card; run a turn that edits files and re-run to exercise the changed-file menu')
+    } else {
+      pass('a changed-files card is on screen (' + changed.rows + ' file rows)')
+      const pressed = await pressElement(cdp, sessionId, CHANGED_FILE_FINDER, { contextMenu: true })
+      const menus = await settleMenus(cdp, sessionId, 1)
+      const probe = await evaluate(cdp, sessionId, CHANGED_FILES_PROBE)
+      if (pressed === null) {
+        fail('nothing pressable on the changed-files card: ' + JSON.stringify(probe))
+      } else if (menus !== 1 || probe.items.length !== 2) {
+        fail('no changed-file menu after a right-click: ' + JSON.stringify({ items: probe.items, menus: probe.menus }))
+      } else if (probe.items[0] !== '用默认应用打开' || probe.items[1] !== '在文件管理器中显示') {
+        fail('the changed-file menu offered the wrong entries: ' + JSON.stringify(probe.items))
+      } else {
+        pass('right-clicking a changed file offers 用默认应用打开 and 在文件管理器中显示')
+      }
+      // The path the live card handed over is the contract unit tests cannot
+      // reach: it comes from the shipped `aria-describedby` element, and a
+      // rename there would leave the menu openable but empty of a target.
+      if (typeof probe.path === 'string' && probe.path.startsWith('/') && probe.path === probe.described) {
+        pass('the menu carries the absolute Host path the card recorded: ' + probe.path)
+      } else {
+        fail('the menu did not resolve the row’s Host path: ' + JSON.stringify({ path: probe.path, described: probe.described }))
+      }
+      await shoot(cdp, sessionId, 'changes-file-menu.png')
+      // Escape is the shipped Menu's own key.
+      await pressEscape(cdp, sessionId)
+      const closed = await settleMenus(cdp, sessionId, 0)
+      if (closed === 0) pass('Escape closes the changed-file menu')
+      else fail('Escape did not close the changed-file menu')
+      // Neither entry is chosen on purpose: both launch a real application on the
+      // human's desktop. The request each one sends is pinned by unit tests.
+    }
+
+    // The lookup above opened another Session — or tried several and found none
+    // with a card; put the one the run started on back either way.
+    if (current !== null) {
+      await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(current) + ']').catch(() => {
+        // Best effort: the row may have been filtered out since.
+      })
+      await sleep(600)
+    }
 
     // ---- F. the 心流 switch owns the link hand-off ----------------------
     await stubOpenRoutes(cdp, sessionId)

@@ -62,6 +62,17 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 排除：`pre` 内（多行代码块）、`[contenteditable]` 内（输入框与快捷键编辑器）、`<a href>` 内（链接已归外链接管）、文本 trim 后为空、目标不在 `code` 内。
 - 收窄：必须落在 `[class*="_markdown_"]` 祖先里。实拉运行中的实例，正文里的行内代码是 `code < li < ol < div._markdown_1ypvv_5 < div.hWmORq_body < …`；`_markdown_` 是 CSS module 的 local name（哈希会变），与本仓库既有的 `[class*="listArea"]` / `[class*="sectionHeader"]` 是同一类依赖，也让工具卡、设置页、别的插件面板里的 `code` 不被误接管。**不要**改去写 `hWmORq_root` 之类的会话容器选择器 —— 那是构建哈希。
 - 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`，它断言「打开」派发的合成 click 落在 `BUTTON` 上。
+## 「已编辑 N 个文件」卡片的右键菜单（用默认应用打开 / 显示位置）
+
+已完成轮次末尾的改动文件卡片（官方 `dsh-client-ui-deliverables`，0.2.0-rc.2 起标题是「已编辑 N 个文件」）里，每个文件行右键浮出一个两项菜单：`用默认应用打开` 与 `在文件管理器中显示`。这条链路整个交给宿主，本插件不自己 spawn：
+
+- **路径来自卡片自己的无障碍描述，不是本插件解析出来的**：卡片把每个文件渲染成 `button[aria-describedby="<id>"]`（单文件形态的标题按钮同形），那个 id 指向的隐藏元素里是卡片自己算好的 Host 路径。`changedFileTarget()` 取 `button[aria-describedby]` → `ownerDocument.getElementById(id)` 的 `textContent`；取不到 id、取不到元素、或文本为空就整条放弃，绝不猜路径。
+- **正向范围是卡片根**：`element.closest('[data-changed-files]')` 必须非空；同一形状的 button 在别的面板里不动。
+- **执行走官方 Session Remote，不加宿主路由**：`openChangedFile()` 调 `ctx.remote.session.openWorkspacePath({ path })`（显示位置时多一个 `action: 'reveal'`）。这条 API 由 `@deepseek-ai/dsh-api-session-controller` 提供，宿主会重新校验路径、也能拒绝没有桌面的部署；返回 Result 信封 `{ok:true}` / `{ok:false}`，不是抛错。拒绝、抛错、`ctx.remote` 不存在三种情形给同一条提示，绝不当成功。`action: 'open'` 照文件关联打开，包括 HTML 与 SVG。
+- **监听只在偏好打开时存在**（与行内代码菜单同一范式）：`readChangesFileOpen` 翻到 false 就 detach，并顺手关掉可能还开着的菜单。`tests/client.test.mjs` 钉住「关闭时不注册 `contextmenu` 监听」「开启时只加这一条」。
+- **`shell.overlay` 上是本插件的第三个 cell**：id 用 `flow.changes-menu`，与 `flow`（复制提示）、`flow.code-menu` 各自独立；复用 id 会顶掉那个 cell 的内容。
+- **验收不按菜单项**：两个动作都会在真人桌面上真的拉起应用，`scripts/verify-browser.mjs` 的 H 段只断言「右键浮出菜单、两项文案、菜单锚点上带的路径等于卡片描述的路径、Esc 能关」，不点那一项；请求载荷由单测钉住。
+
 ## 发送键对调（为什么是「换手势」而不是「改快捷键」）
 
 设置 → 心流 → 「⌘+Enter 发送」打开后，对话输入框里 Enter 换行、⌘/Ctrl+Enter 发送。实现只有一条：**document 捕获阶段的 keydown 监听 + 合成官方本来就认的另一个手势**。
@@ -75,15 +86,17 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 ## 依赖的官方契约（脆弱点集中在这里）
 
-- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占两个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单）。
+- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占三个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单，`flow.changes-menu` 放改动文件菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
+- DOM（改动文件菜单）：改动文件卡片根 `[data-changed-files]`，以及卡内带 `aria-describedby` 的按钮——那个 id 指向的隐藏元素里是 Host 路径。两者都是**静默失效型**依赖：官方改渲染形状后症状只是「右键没菜单」，不报错，所以改完必须跑真浏览器验收。
 - 服务与数据（`~/…` 打开）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）。目录走宿主既有的 `dsh-host-open-in-app`：`GET /open-in-app/apps` 列可用应用，`POST /open-in-app/open` 收 `{app, path}`（`path` 必须**绝对且存在**的目录，否则 400/404；未认证 401）。文件管理器 catalog id 按 `finder` / `explorer` / `filemanager` 依次取第一个可用的（本机实拉 apps = `["finder","vscode","zed","xcode","androidstudio","intellij","pycharm","iterm","terminal"]`）。三条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开。
 - DOM（发送键）：对话输入框根 `[data-composer-input]`（实拉时它的类名是 `uV2eYG_input` —— 构建哈希，不要依赖；属性 `data-composer-input` 才是契约，带 contenteditable 与 Lexical 的 `__lexicalEditor`）、触发菜单容器 `[data-trigger-menu]` 与其中的 `[role="listbox"][aria-activedescendant]`。这两处都是**静默失效型**依赖：属性改名后症状只是「开关开了但 Enter 还是发送」，所以改完必须跑真浏览器验收。
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
-- 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts` / `remote` / `remote.workspaceFiles` / `sidebarRight`。**本文件里出现的每一个 `ctx.<service>` 都必须在 inject 里列出**：cordis 不会给没声明的插件挂命名空间，而且症状是静默的——少 `remote.workspaceFiles` 时 `ctx.remote.workspaceFiles.stat` 是 `undefined`，探测恒 unknown、每次按压退回壳；少 `sidebarRight` 时按压被认领却什么都不打开。2026-10-08 两种都实拉踩到。宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
+- 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts` / `remote` / `remote.workspaceFiles` / `remote.session` / `sidebarRight`。**本文件里出现的每一个 `ctx.<service>` 都必须在 inject 里列出**：cordis 不会给没声明的插件挂命名空间，而且症状是静默的——少 `remote.workspaceFiles` 时 `ctx.remote.workspaceFiles.stat` 是 `undefined`，探测恒 unknown、每次按压退回壳；少 `sidebarRight` 时按压被认领却什么都不打开；少 `remote.session` 时改动文件菜单每次都报「无法打开」。2026-10-08 前两种都实拉踩到。宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
+- 服务与数据（改动文件打开）：`ctx.remote.session.openWorkspacePath({ path, action? })`（`@deepseek-ai/dsh-api-session-controller`，返回 Result 信封；`action` 省略即默认应用，`'reveal'` 为文件管理器）。它由 inject 保证存在；运行时仍按可选读（`ctx.remote?.session`），拿不到就把按下的那一下说成失败，绝不抛错。
 - 存在性探测：宿主 remote `workspaceFiles.stat(sessionId, path, signal)`（位置参数，第一个是会话 id，descriptor 里叫 `workspaceFileScope`）。**它返回 Result 信封** `{ok:true,value}` / `{ok:false,error}`，不是抛错——「不存在」是值不是异常，所以判定读 `error.code` / `error.message` 是否含 not-found 一类字样；其余失败归为 unknown。调用点原文见官方包 `workspaceFiles.stat(sessionId, path, signal)`。探测带 2s 上限，超时按 unknown 处理。
 - 模块：`@deepseek-ai/dsh-client-ui-primitives` 是动态客户端包的隐式 baseline external，本轮用到 `MenuItemButton` / `Toast` / `writeClipboard`（同一个 `require`）。`writeClipboard` 只出现在导出清单里，官方 README 没写它 —— 它不存在时症状是复制永远报失败，所以改动后要跑真浏览器验收，不能只看单测。
 - 复制行直接用官方包里的 `IconCopyOutlineRegular`，**没有**内联进本仓库，因此 `THIRD-PARTY-NOTICES.md` 不需要新增条目；`LocateIcon` 的内联约定不受影响。
@@ -92,7 +105,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, modEnterSend })`，五个字段都是 `z.boolean().volatile()` —— 前四个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, modEnterSend })`，六个字段都是 `z.boolean().volatile()` —— 前五个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -105,9 +118,9 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 88 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 96 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
-npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
+npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
 ```
 

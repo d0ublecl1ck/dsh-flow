@@ -1135,6 +1135,160 @@ window.__ModuleLoader__.load({
       return value.modEnterSend === true
     }
 
+    /** The changed-files card the shipped deliverables plugin renders at a turn's tail. */
+    const CHANGES_CARD = '[data-changed-files]'
+
+    /**
+     * The changed-file row a context-menu press landed in, with the Host path.
+     *
+     * The shipped card renders every changed file as a `button[aria-describedby]`
+     * and keeps the path in the hidden element that id names; the card resolved
+     * it against the Session workspace, so this plugin never guesses one. The
+     * card root is the positive half of the scope: the same button shape in some
+     * other surface is left alone.
+     *
+     * @param event - the document `contextmenu` event.
+     * @returns `{element, path}`, or null when this press is not ours.
+     */
+    function changedFileTarget(event) {
+      const target = event?.target
+      if (!isElement(target) || typeof target.closest !== 'function') return null
+      const element = target.closest('button[aria-describedby]')
+      if (!isElement(element) || typeof element.closest !== 'function') return null
+      if (element.closest(CHANGES_CARD) === null) return null
+      const describedBy = element.getAttribute('aria-describedby')
+      if (typeof describedBy !== 'string') return null
+      const id = describedBy.trim().split(/\s+/)[0]
+      if (id === '') return null
+      const doc = element.ownerDocument
+      if (doc === null || doc === undefined || typeof doc.getElementById !== 'function') return null
+      const description = doc.getElementById(id)
+      if (!isElement(description)) return null
+      const path = String(description.textContent ?? '').trim()
+      if (path === '') return null
+      return { element, path }
+    }
+
+    /**
+     * Capture-phase `contextmenu` handler for the changed-file rows.
+     *
+     * Same rule as the inline-code menu: the press is taken away from the
+     * browser only when the menu is really about to open, so every other
+     * right-click keeps the shipped behaviour.
+     *
+     * @param event - the document `contextmenu` event.
+     * @param input.open - place the menu: `({x, y, path, element}) => void`.
+     * @returns whether this press was claimed.
+     */
+    function handleChangesContextMenu(event, input) {
+      const hit = changedFileTarget(event)
+      if (hit === null) return false
+      event.preventDefault()
+      event.stopPropagation()
+      input.open({ x: event.clientX, y: event.clientY, path: hit.path, element: hit.element })
+      return true
+    }
+
+    /**
+     * Hand one changed file to the Host, or ask it to show the file's location.
+     *
+     * The Session Remote the Sidebar's own file controls use is the one route
+     * here: it re-validates the path against the current filesystem and refuses
+     * a Host without a desktop, and it answers a Result envelope rather than
+     * throwing. A refusal envelope, a rejection and an absent remote all read as
+     * the same spoken refusal, so a press never looks like it worked when it
+     * did not.
+     *
+     * @param input.path - the absolute Host path the card recorded.
+     * @param input.action - `open` for the default application, `reveal` for the file manager.
+     * @param input.remote - the plugin's `ctx.remote`, when the connection exposes one.
+     * @param input.notify - raise a notice.
+     * @param input.t - the plugin's localized copy.
+     * @returns whether the Host acknowledged the hand-off.
+     */
+    function openChangedFile(input) {
+      const action = input.action === 'reveal' ? 'reveal' : 'open'
+      const failed = () => {
+        input.notify(input.t(action === 'open' ? 'changesFile.failed' : 'changesFile.revealFailed'), 'warning')
+        return false
+      }
+      const session = input.remote?.session
+      const open = session?.openWorkspacePath
+      if (typeof open !== 'function') return Promise.resolve(failed())
+      const request = action === 'open' ? { path: input.path } : { path: input.path, action }
+      return Promise.resolve()
+        .then(() => open.call(session, request))
+        .then((result) => (result?.ok === true ? true : failed()), () => failed())
+    }
+
+    /**
+     * The one-slot seat the changed-file menu renders from.
+     *
+     * Same contract as the inline-code seat: every open mints a new snapshot
+     * carrying a new sequence, so re-opening at the very same press point still
+     * re-renders.
+     *
+     * @returns the store the capture listener writes and the overlay entry reads.
+     */
+    function createChangesMenuStore() {
+      let snapshot = null
+      let seq = 0
+      const listeners = new Set()
+      const emit = () => {
+        for (const listener of [...listeners]) listener()
+      }
+      return {
+        /** @returns the menu on screen, or null. */
+        getSnapshot: () => snapshot,
+        /**
+         * @param listener - called on every change.
+         * @returns a disposer removing only this listener.
+         */
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        /**
+         * Show one menu at one press point.
+         * @param input.x - viewport x of the press.
+         * @param input.y - viewport y of the press.
+         * @param input.path - the Host path the row named.
+         * @param input.element - the row button the press landed in.
+         */
+        open: (input) => {
+          seq += 1
+          snapshot = { seq, x: input.x, y: input.y, path: input.path, element: input.element }
+          emit()
+        },
+        /** Retire the menu on screen; an empty seat is not a change. */
+        close: () => {
+          if (snapshot === null) return
+          snapshot = null
+          emit()
+        },
+      }
+    }
+
+    /**
+     * Read the changed-file menu preference off the plugin's config form.
+     *
+     * The default is on, and an unreadable form keeps that default: a Host that
+     * does not project the field yet must not silently take the feature away.
+     *
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether a right-click on a changed-file row opens the menu.
+     */
+    function readChangesFileOpen(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.changesFileOpen !== false
+    }
+
     /**
      * Create the one-slot seat the mounted button and the plugin-scope command
      * share.
@@ -1192,6 +1346,15 @@ window.__ModuleLoader__.load({
      * of sharing it — two surfaces, two lifespans.
      */
     const CODE_MENU_ID = 'flow.code-menu'
+
+    /**
+     * Cell key of the changed-file menu's own entry in `shell.overlay`.
+     *
+     * Same rule as the inline-code menu: a fresh id is a new cell beside the
+     * entries already in the slot, so the copy notice and the two menus never
+     * replace one another.
+     */
+    const CHANGES_MENU_ID = 'flow.changes-menu'
 
     /**
      * The shipped composer's editable root, which is the only place a swapped
@@ -1346,6 +1509,7 @@ window.__ModuleLoader__.load({
 .flow-locate:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,currentColor);outline-offset:-2px}
 .flow-locate[data-miss="true"]{color:var(--dsw-alias-state-warning-primary,currentColor)}
 .flow-code-menu-anchor{display:none}
+.flow-changes-menu-anchor{display:none}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -1388,6 +1552,10 @@ window.__ModuleLoader__.load({
       'codeMenu.copy': '复制',
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
+      'changesFile.open': '用默认应用打开',
+      'changesFile.reveal': '在文件管理器中显示',
+      'changesFile.failed': '无法用默认应用打开这个文件',
+      'changesFile.revealFailed': '无法在文件管理器中显示这个文件',
       'linkMissing.notice': '找不到这个路径',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
@@ -1398,6 +1566,8 @@ window.__ModuleLoader__.load({
       'section.external.description': '点击非本站的 http、https、mailto、tel 链接时，交给操作系统的默认应用打开（macOS 用 open、Windows 用 start、Linux 用 xdg-open），包括本来会开在内置窗口里的 localhost 地址。关闭后恢复壳自身的打开方式。',
       'section.codeMenu.title': '行内代码右键菜单',
       'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：复制把代码原文写进剪贴板；打开对 ~/… 家目录路径会先展开、再由插件在侧栏打开（壳自己解析不了），其余仍走壳自己的链路。单击一条指向不存在路径的行内代码会换成一条非阻塞提示；关闭后右键与这条接管都不注册。',
+      'section.changesFile.title': '改动文件右键菜单',
+      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开 / 在文件管理器中显示」菜单，两条都交给宿主自己的会话 Remote 执行。关闭后不注册这个右键菜单。',
       'section.sendKey.title': '⌘+Enter 发送',
       'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
       'section.saveError': '偏好没有保存成功，请重试',
@@ -1419,6 +1589,10 @@ window.__ModuleLoader__.load({
       'codeMenu.copy': 'Copy',
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
+      'changesFile.open': 'Open in Default App',
+      'changesFile.reveal': 'Show in File Manager',
+      'changesFile.failed': 'Could not open this file in the default application',
+      'changesFile.revealFailed': 'Could not show this file in the file manager',
       'linkMissing.notice': 'No such path',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
@@ -1429,6 +1603,8 @@ window.__ModuleLoader__.load({
       'section.external.description': 'Off-origin http, https, mailto and tel links open in the operating system’s default application (open on macOS, start on Windows, xdg-open on Linux), including the localhost addresses that would otherwise open in an in-app window. Switching this off restores the shell’s own behaviour.',
       'section.codeMenu.title': 'Inline code right-click menu',
       'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Copy puts the code’s text on the clipboard, and Open expands a ~/… home path and opens it in the Sidebar itself — the shell cannot resolve that one; everything else keeps the shell’s own path. Left-clicking code whose path does not exist becomes a non-blocking notice instead; switching this off registers neither.',
+      'section.changesFile.title': 'Changed-file right-click menu',
+      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App / Show in File Manager”; both run through the Host’s own Session Remote. Switching this off registers no such menu.',
       'section.sendKey.title': '⌘+Enter to send',
       'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
       'section.saveError': 'The preference was not saved. Try again.',
@@ -1758,6 +1934,74 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Observe the changed-file menu's one slot.
+     *
+     * @param store - `createChangesMenuStore()`.
+     * @returns the menu on screen, or null.
+     */
+    function useChangesMenuSnapshot(store) {
+      const subscribe = useCallback((listener) => store.subscribe(listener), [store])
+      const snapshot = useCallback(() => store.getSnapshot(), [store])
+      return useSyncExternalStore(subscribe, snapshot, snapshot)
+    }
+
+    /**
+     * The changed-file menu itself: 「用默认应用打开」 and 「在文件管理器中显示」.
+     *
+     * The shell's own `Menu`, for the same reasons the inline-code menu uses it:
+     * the keyboard walk, Escape and dismissal on an outside pointerdown are
+     * shipped behaviours this feature does not reimplement. The anchor carries
+     * the resolved path as a data attribute, so the acceptance script can check
+     * the path the live card handed over without launching anything.
+     *
+     * @param props - the seat, the config form, the opener, and the localized copy.
+     */
+    function ChangesFileMenu(props) {
+      const { store, config, t } = props
+      // Every Hook runs before the preference is consulted, so the entry keeps
+      // one call order across a toggle.
+      const enabled = useConfigValue(config, readChangesFileOpen)
+      const menu = useChangesMenuSnapshot(store)
+      props.useLocaleRevision()
+      const anchorRect = useCallback(
+        () => cursorRect(menu?.x ?? 0, menu?.y ?? 0),
+        [menu?.x, menu?.y],
+      )
+
+      if (!enabled || menu === null) return null
+
+      const choose = (action) => {
+        const { path, element } = menu
+        // Closing first keeps the menu's own dismissal out of the way of
+        // whatever this is about to open.
+        store.close()
+        props.openFile({ path, element, action })
+      }
+
+      return h(
+        Menu,
+        {
+          open: true,
+          portal: true,
+          autoFocus: true,
+          anchor: h('span', { className: 'flow-changes-menu-anchor', 'data-flow-changes-path': menu.path }),
+          getAnchorRect: anchorRect,
+          onClose: () => { store.close() },
+        },
+        h(
+          MenuItemButton,
+          { key: 'open', onSelect: () => { choose('open') } },
+          t('changesFile.open'),
+        ),
+        h(
+          MenuItemButton,
+          { key: 'reveal', onSelect: () => { choose('reveal') } },
+          t('changesFile.reveal'),
+        ),
+      )
+    }
+
+    /**
      * One settings row: a title, a description, a switch, and its own save state.
      *
      * The write state belongs to the row, not to the page: a refused write on one
@@ -1853,6 +2097,15 @@ window.__ModuleLoader__.load({
         }),
         h(SettingsRow, {
           config,
+          field: 'changesFileOpen',
+          read: readChangesFileOpen,
+          title: t('section.changesFile.title'),
+          description: t('section.changesFile.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
           field: 'modEnterSend',
           read: readModEnterSend,
           title: t('section.sendKey.title'),
@@ -1881,8 +2134,9 @@ window.__ModuleLoader__.load({
       // Every `ctx.<service>` this file touches has to be declared here: cordis does
       // not hang a namespace on the context for a plugin that never asked. Omitting
       // them is silent — `ctx.remote.workspaceFiles` answers `undefined` (every probe
-      // says "unknown" and hands the press back to the shell) and `ctx.sidebarRight`
-      // is missing (the press is claimed but nothing opens).
+      // says "unknown" and hands the press back to the shell), `ctx.sidebarRight` is
+      // missing (the press is claimed but nothing opens), and `ctx.remote.session` is
+      // missing (every changed-file hand-off answers "could not open").
       inject: [
         'slots',
         'locale',
@@ -1892,6 +2146,7 @@ window.__ModuleLoader__.load({
         'shortcuts',
         'remote',
         'remote.workspaceFiles',
+        'remote.session',
         'sidebarRight',
       ],
       apply(ctx) {
@@ -1949,6 +2204,16 @@ window.__ModuleLoader__.load({
             return typeof home === 'string' && home !== '' ? home : null
           } catch {
             return null
+          }
+        }
+        // The Remote service the page's connection exposes, read lazily: a
+        // deployment without one is a refusal the caller speaks, never a load
+        // error.
+        const remoteOf = () => {
+          try {
+            return ctx.remote
+          } catch {
+            return undefined
           }
         }
         // The plugin's own open for a path the shell cannot resolve: one
@@ -2068,6 +2333,34 @@ window.__ModuleLoader__.load({
             detach?.()
           }
         }, 'flow: inline code menu')
+        // The changed-file menu: the same shape as the inline-code menu — one
+        // capture-phase listener, present only while the preference is on.
+        const changesMenu = createChangesMenuStore()
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          let detach = null
+          const sync = () => {
+            if (!readChangesFileOpen(config)) {
+              // Turning the feature off also retires a menu it left open.
+              changesMenu.close()
+              detach?.()
+              detach = null
+              return
+            }
+            if (detach !== null) return
+            const onContextMenu = (event) => {
+              handleChangesContextMenu(event, { open: (hit) => { changesMenu.open(hit) } })
+            }
+            document.addEventListener('contextmenu', onContextMenu, true)
+            detach = () => { document.removeEventListener('contextmenu', onContextMenu, true) }
+          }
+          sync()
+          const unsubscribe = config.subscribe(sync)
+          return () => {
+            if (typeof unsubscribe === 'function') unsubscribe()
+            detach?.()
+          }
+        }, 'flow: changed files menu')
         // The swapped send key: the same shape as the code-menu listener — one
         // capture-phase listener for the whole page, present only while the
         // preference is on — but it has to run before the *editor's* own
@@ -2189,6 +2482,22 @@ window.__ModuleLoader__.load({
           }),
         }, CodeMenu)), 'flow: inline code menu overlay')
 
+        // The changed-file menu is a third cell in the same list slot.
+        ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: CHANGES_MENU_ID,
+          locale: ENTRY_ID,
+          inject: () => ({
+            store: changesMenu,
+            config,
+            notify,
+            useLocaleRevision,
+            openFile: (hit) => {
+              openChangedFile({ path: hit.path, action: hit.action, remote: remoteOf(), notify, t })
+            },
+          }),
+        }, ChangesFileMenu)), 'flow: changed files menu overlay')
+
         // The page follows the Host's own namespace: a deployment that never
         // served `flow` shows no trace of the section.
         ctx.effect(() => forms.whileServed([ENTRY_ID], () => ctx.slots.inject(
@@ -2240,6 +2549,12 @@ window.__ModuleLoader__.load({
         createCodeMenuStore,
         cursorRect,
         readCodeMenuEnabled,
+        CHANGES_MENU_ID,
+        changedFileTarget,
+        handleChangesContextMenu,
+        createChangesMenuStore,
+        readChangesFileOpen,
+        openChangedFile,
         isPlainLeftPress,
         codeOpenTarget,
         shellWiredControl,
