@@ -2,6 +2,10 @@
 
 `dsh-flow` 历次洁癖审查留下的待核查线索。只记「下次该优先看哪里」，权威结论在 `README.md` / `AGENTS.md`。
 
+- [ ] **历史消息的 I 段还没在真宿主上跑过**（`2026-10-08`）：实例激活的宿主半边不是本 checkout，`flow.composerHistory` 不会被 settings 域投影，I 段按约定记 `SKIP`。功能本身已用独立无头探针在真实例上实测：空草稿 ↑ 回填出真实用户消息「1 只要用户本机装了 就留…」，非空草稿 ↑ 草稿不变。要让 I 段真跑，得让实例激活本 checkout 的 `index.js`（`remove` 再 `add`）后跑 `npm run verify:browser -- --client ./client.js`。
+- [ ] **验收脚本同一天多次运行会抖**（`2026-10-08`）：三次运行里「复制偏好写不回去」「openContentSession 找不到有 code 的会话」「link 偏好未复原」随机出现；用未改动的 client 做对照也红，因此不是本功能的回归。已加 `clearStartupVeil()`（点启动面板的「稍后处理」）与 `aim()` 的诊断输出；下次动这段前先比三次运行的重合项。
+- [ ] `assets/` 还缺历史消息的示意图（README 该节暂时没有图）；补图要改 `scripts/render-assets.mjs` 再跑 `npm run assets`。
+
 - [ ] **发送键对调（`flow.modEnterSend`）的 H 段还没在真浏览器里跑过**：与下面那条同一个根因 —— 实例激活的宿主半边不是本 checkout，`--client` 只换浏览器半边，`modEnterSend` 不会被 settings 域投影，开关写不进去，H 段照约定记 `SKIP`。要在真浏览器里跑到它，必须让实例激活本 checkout 的 `index.js`（`remove` 再 `add`，必要时重启 DSH Desktop），再跑 `npm run verify:browser --client ./client.js`。合成手势本身的可行性已经用临时探针实测过（真 Enter 变 「+1 换行且草稿保留」，⌘Enter 命中提交判定且不换行）。记录：`2026-10-07`
 - [ ] 行内代码右键菜单的「开关关闭」那一段（`scripts/verify-browser.mjs` 里 ⑥）**本轮没在真浏览器里跑过**：运行中实例激活的宿主半边不是本 checkout（没有 `flow.codeMenu`），`--client` 只替换浏览器半边，设置写入会被拒，那一段照约定记 `SKIP`。要让 ⑥ 真跑，得让实例激活本 checkout 的 `index.js`（`remove` 再 `add`，实例在跑会话时不要做）。`readCodeMenuEnabled` 的默认值与「关闭时不注册监听」由 `tests/client.test.mjs` 钉住。记录：`2026-10-07`
 - [ ] 「打开」把合成 click 派发到 `code > button`（文件引用的行内代码），**不是** `<code>` 本身；依据是运行实例实拉 + primitives 里 `onClick: mention.open` 挂在该 button 上。官方若改成 `<code>` 自身带 `onClick`，症状是「右键菜单在、点打开没反应」，不报错。记录：`2026-10-07`

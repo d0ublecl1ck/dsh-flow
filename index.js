@@ -4,8 +4,8 @@
  * Owns three facts:
  *
  *  - the plugin's preference surface. `locateButton`, `copySessionId`,
- *    `externalLink`, `codeMenu`, `changesFileOpen` and `modEnterSend` are
- *    volatile Config fields,
+ *    `externalLink`, `codeMenu`, `changesFileOpen`, `composerHistory` and
+ *    `modEnterSend` are volatile Config fields,
  *    which is what makes the settings provider project them into the namespace
  *    named by this row's id (`flow`); the browser half reads and writes that
  *    namespace through `ctx.configForms`.
@@ -46,6 +46,7 @@ export const name = 'flow'
  * @property {boolean} externalLink - whether off-origin links leave through the platform opener instead of the shell.
  * @property {boolean} codeMenu - whether right-clicking inline code in a conversation offers "open" and "copy".
  * @property {boolean} changesFileOpen - whether right-clicking a file row on the edited-files card offers opening it with the default application.
+ * @property {boolean} composerHistory - whether ↑/↓ in an empty composer recalls the messages this conversation already sent.
  * @property {boolean} modEnterSend - whether Cmd/Ctrl+Enter sends and a plain Enter inserts a newline, instead of the shipped Enter-sends pair.
  */
 export const Config = z.object({
@@ -54,6 +55,7 @@ export const Config = z.object({
   externalLink: z.boolean().default(true).volatile(),
   codeMenu: z.boolean().default(true).volatile(),
   changesFileOpen: z.boolean().default(true).volatile(),
+  composerHistory: z.boolean().default(true).volatile(),
   modEnterSend: z.boolean().default(false).volatile(),
 })
 

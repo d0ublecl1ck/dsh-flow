@@ -643,7 +643,7 @@ test('the inline-code listeners exist only while the preference is on', async ()
   try {
     // The changed-file menu is another feature's listener; it is held off here
     // so this assertion stays about the inline-code pair alone.
-    const form = fakeForm({ codeMenu: true, changesFileOpen: false })
+    const form = fakeForm({ codeMenu: true, changesFileOpen: false, composerHistory: false })
     module.apply(fakeContext([], [], { form }))
     // `click` first is the off-origin link hand-off, which is a separate
     // feature; the menu press and the path press are the two below it.
@@ -654,18 +654,18 @@ test('the inline-code listeners exist only while the preference is on', async ()
 
     // A Host echo that turns the feature off detaches both listeners instead of
     // leaving ones behind that decide to do nothing.
-    form.publish({ codeMenu: false, changesFileOpen: false })
+    form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false })
     assert.deepEqual(removed, [
       { type: 'contextmenu', listener: added[1].listener, capture: true },
       { type: 'click', listener: added[2].listener, capture: true },
     ])
     assert.deepEqual([...cursor], [], 'turning the feature off takes the cursor with it')
-    form.publish({ codeMenu: false, changesFileOpen: false })
+    form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false })
     assert.equal(removed.length, 2, 'already detached listeners are not removed twice')
 
     // Turning it back on binds both again, and nothing else. The changed-file
     // menu keeps its own preference off throughout, so it never joins in.
-    form.publish({ codeMenu: true, changesFileOpen: false })
+    form.publish({ codeMenu: true, changesFileOpen: false, composerHistory: false })
     assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'click', 'contextmenu', 'click'])
     assert.equal(added[3].capture, true)
     assert.equal(added[4].capture, true)
@@ -983,11 +983,11 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // Five separate capture-phase listeners: the link hand-off, the inline-code
-    // menu press, the inline-code path press, the changed-file menu press, and
-    // the hover that warms that menu's association query. None can be reached
-    // through another's registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['pointerover', true]])
+    // Six separate capture-phase listeners: the link hand-off, the inline-code
+    // menu press, the inline-code path press, the changed-file menu press, the
+    // hover that warms that menu's association query, and the recalled-messages
+    // arrow press. None can be reached through another's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['pointerover', true], ['keydown', true]])
     assert.deepEqual(removed, [])
     // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
@@ -997,6 +997,7 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
       { type: 'click', listener: listeners[2].listener },
       { type: 'contextmenu', listener: listeners[3].listener },
       { type: 'pointerover', listener: listeners[4].listener },
+      { type: 'keydown', listener: listeners[5].listener },
     ])
   } finally {
     delete globalThis.document
@@ -1648,7 +1649,7 @@ test('the composer listener exists only while the preference is on', async () =>
     removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
   }
   try {
-    const form = fakeForm({ modEnterSend: false })
+    const form = fakeForm({ modEnterSend: false, composerHistory: false })
     module.apply(fakeContext([], [], { form }))
     // Only this feature's own listener is asserted: the other capture listeners
     // belong to the link hand-off and the inline-code press, and each of those
@@ -1656,7 +1657,7 @@ test('the composer listener exists only while the preference is on', async () =>
     const keydowns = () => added.filter((entry) => entry.type === 'keydown')
     assert.deepEqual(keydowns(), [], 'an off feature adds no keydown listener')
 
-    form.publish({ modEnterSend: true })
+    form.publish({ modEnterSend: true, composerHistory: false })
     assert.deepEqual(keydowns().map((entry) => entry.capture), [true])
     // A press in the composer is claimed; the same press outside it is not.
     const composer = { nodeType: 1, closest: (selector) => (selector === '[data-composer-input]' ? composer : null), dispatchEvent: () => true }
@@ -1666,13 +1667,17 @@ test('the composer listener exists only while the preference is on', async () =>
     const outside = Object.assign(press('Enter'), { target: { nodeType: 1, closest: () => null } })
     assert.equal(outside.prevented, 0)
 
-    form.publish({ modEnterSend: false })
+    form.publish({ modEnterSend: false, composerHistory: false })
     assert.deepEqual(removed, [{ type: 'keydown', listener: keydowns()[0].listener, capture: true }])
-    form.publish({ modEnterSend: false })
+    form.publish({ modEnterSend: false, composerHistory: false })
     assert.equal(removed.length, 1, 'an already detached listener is not removed twice')
 
-    form.publish({ modEnterSend: true })
+    // The recalled-messages switch rides the same capture-phase slot: turning it
+    // on alone registers exactly one listener, and turning it off removes it.
+    form.publish({ modEnterSend: false, composerHistory: true })
     assert.deepEqual(keydowns().map((entry) => entry.capture), [true, true])
+    form.publish({ modEnterSend: false, composerHistory: false })
+    assert.equal(removed.length, 2, 'the recalled-messages listener is detached with its switch')
   } finally {
     delete globalThis.document
   }
@@ -1975,6 +1980,234 @@ test('a default editor row wears the dictionary marker with its own name', async
   assert.equal(changesFileRowLabel({ kind: 'app', app: { label: 'Zed', default: false } }, t), 'Zed')
   assert.equal(changesFileRowLabel({ kind: 'reveal', labelKey: 'changesFile.reveal' }, t), '在文件管理器中显示')
   assert.equal(changesFileRowLabel({ kind: 'open', labelKey: 'changesFile.open' }, t), '用默认应用打开')
+})
+
+
+// --- ↑↓ 切换当前会话发过的消息 ---------------------------------------------
+
+/** One durable user/message entry exactly as the Session event window carries it. */
+function userEntry(seq, content, source = { kind: 'user' }) {
+  return {
+    type: 'event',
+    event: { type: 'user/message', seq, time: seq, data: { id: 'm' + seq, role: 'user', content, source } },
+  }
+}
+
+/** One text content block. */
+const textBlock = (text) => ({ type: 'text', text })
+/** One durable image content block. */
+const imageBlock = (attachmentId) => ({ type: 'image', attachment: { attachmentId, mediaType: 'image/png', bytes: 3 } })
+/** One durable file content block. */
+const fileBlock = (attachmentId, name) => ({ type: 'file', attachment: { attachmentId, name, bytes: 3 } })
+
+test('sentUserMessages keeps only what the user produced, with its attachments', async () => {
+  const { sentUserMessages } = (await load()).internals
+  const entries = [
+    { type: 'event', event: { type: 'permission/preset', seq: 1, data: {} } },
+    // A plugin-injected user-role message (workspace instructions, reminders) is
+    // not something the user typed, so it never enters the recall list.
+    userEntry(2, [textBlock('<system-reminder>rules</system-reminder>')], { kind: 'plugin', plugin: 'dsh-agent-instructions', form: 'instructions' }),
+    userEntry(3, [textBlock('第一条')]),
+    userEntry(4, [imageBlock('img-1')]),
+    userEntry(5, [textBlock('带附件'), fileBlock('file-1', 'report.pdf')]),
+    userEntry(6, []),
+    { type: 'transient', event: { type: 'assistant/live-chunk', seq: 7 } },
+    null,
+    'garbage',
+  ]
+  const messages = sentUserMessages(entries)
+  assert.deepEqual(messages.map((m) => [m.seq, m.text]), [[3, '第一条'], [4, ''], [5, '带附件']])
+  assert.deepEqual(messages[1].images.map((a) => a.attachmentId), ['img-1'])
+  assert.deepEqual(messages[2].files.map((a) => a.name), ['report.pdf'])
+  assert.deepEqual(messages[0].images, [])
+  // A missing or malformed window degrades to nothing rather than throwing.
+  assert.deepEqual(sentUserMessages(undefined), [])
+  assert.deepEqual(sentUserMessages([{ type: 'event' }]), [])
+})
+
+test('composerHistoryStep walks the list by seq and only asks for older pages at its head', async () => {
+  const { composerHistoryStep } = (await load()).internals
+  const messages = [{ seq: 3, text: 'a' }, { seq: 5, text: 'b' }, { seq: 9, text: 'c' }]
+  const draft = { anchorSeq: null, hasMore: false }
+
+  // From the draft, Up lands on the newest message; Down stays out of recall.
+  assert.deepEqual(composerHistoryStep(draft, 'ArrowUp', messages), { kind: 'show', message: messages[2] })
+  assert.deepEqual(composerHistoryStep(draft, 'ArrowDown', messages), { kind: 'idle' })
+  // Walking back stops at the oldest loaded message instead of wrapping.
+  assert.deepEqual(composerHistoryStep({ anchorSeq: 9, hasMore: false }, 'ArrowUp', messages), { kind: 'show', message: messages[1] })
+  assert.deepEqual(composerHistoryStep({ anchorSeq: 3, hasMore: false }, 'ArrowUp', messages), { kind: 'idle' })
+  // Down walks forward and, past the newest, restores the draft.
+  assert.deepEqual(composerHistoryStep({ anchorSeq: 3, hasMore: false }, 'ArrowDown', messages), { kind: 'show', message: messages[1] })
+  assert.deepEqual(composerHistoryStep({ anchorSeq: 9, hasMore: false }, 'ArrowDown', messages), { kind: 'restore' })
+  // At the head with earlier history still unloaded, ask for one more page.
+  assert.deepEqual(composerHistoryStep({ anchorSeq: 3, hasMore: true }, 'ArrowUp', messages), { kind: 'load-older' })
+  assert.deepEqual(composerHistoryStep({ anchorSeq: null, hasMore: true }, 'ArrowUp', []), { kind: 'load-older' })
+  assert.deepEqual(composerHistoryStep({ anchorSeq: null, hasMore: false }, 'ArrowUp', []), { kind: 'idle' })
+  // Anything that is not an arrow is not this feature's business.
+  assert.deepEqual(composerHistoryStep({ anchorSeq: 9, hasMore: false }, 'Enter', messages), { kind: 'idle' })
+})
+
+test('historyDraftText keeps the text and names the files it cannot bring back', async () => {
+  const { historyDraftText } = (await load()).internals
+  const label = (file) => '[附件：' + file.name + ']'
+  assert.equal(historyDraftText({ text: '正文', files: [] }, label), '正文')
+  assert.equal(historyDraftText({ text: '', files: [] }, label), '')
+  assert.equal(
+    historyDraftText({ text: '正文', files: [{ name: 'a.pdf' }, { name: 'b.png' }] }, label),
+    '正文\n[附件：a.pdf]\n[附件：b.png]',
+  )
+  assert.equal(historyDraftText({ text: '', files: [{ name: 'a.pdf' }] }, label), '[附件：a.pdf]')
+})
+
+/** One arrow press in the composer. */
+function arrowPress(key, overrides = {}) {
+  const event = {
+    key,
+    isComposing: false,
+    keyCode: 0,
+    altKey: false,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    defaultPrevented: false,
+    stopped: false,
+    preventDefault() { event.defaultPrevented = true },
+    stopImmediatePropagation() { event.stopped = true },
+    ...overrides,
+  }
+  return event
+}
+
+/** A recording seat over a mutable message list. */
+async function historySeat(overrides = {}) {
+  const { createComposerHistory } = (await load()).internals
+  const state = {
+    draft: '',
+    session: 's1',
+    messages: [
+      { seq: 3, text: '第一条', images: [], files: [] },
+      { seq: 5, text: '第二条', images: [], files: [] },
+    ],
+    hasMore: false,
+    writes: [],
+    pasted: [],
+    loaded: 0,
+  }
+  const seat = createComposerHistory({
+    enabled: () => true,
+    inComposer: () => true,
+    menuOwnsKey: () => false,
+    sessionId: () => state.session,
+    draft: () => state.draft,
+    setDraft: (text) => { state.draft = text; state.writes.push(text) },
+    messages: () => state.messages,
+    hasMore: () => state.hasMore,
+    loadOlder: async () => { state.loaded += 1 },
+    pasteImages: (images) => { state.pasted.push(...images.map((image) => image.attachmentId)) },
+    fileLabel: (file) => '[附件：' + file.name + ']',
+    ...overrides,
+  })
+  return { seat, state }
+}
+
+test('the composer history seat takes over an empty draft and puts it back on the way down', async () => {
+  const { seat, state } = await historySeat()
+  const up = arrowPress('ArrowUp')
+  assert.equal(seat.handle(up), true)
+  assert.equal(up.defaultPrevented, true)
+  assert.equal(up.stopped, true)
+  assert.equal(state.draft, '第二条')
+  assert.deepEqual(state.writes, ['第二条'])
+
+  seat.handle(arrowPress('ArrowUp'))
+  assert.equal(state.draft, '第一条')
+  // The oldest loaded message is the end of the line while no older page exists.
+  const stuck = arrowPress('ArrowUp')
+  assert.equal(seat.handle(stuck), false)
+  assert.equal(stuck.defaultPrevented, false)
+  assert.equal(state.draft, '第一条')
+
+  seat.handle(arrowPress('ArrowDown'))
+  assert.equal(state.draft, '第二条')
+  seat.handle(arrowPress('ArrowDown'))
+  assert.equal(state.draft, '')
+})
+
+test('the composer history seat leaves every press it does not own alone', async () => {
+  const { seat, state } = await historySeat()
+  // Option A: a non-empty draft keeps Up with the editor, so the cursor moves.
+  state.draft = '用户在打字'
+  assert.equal(seat.handle(arrowPress('ArrowUp')), false)
+  assert.deepEqual(state.writes, [])
+  assert.equal(state.draft, '用户在打字')
+
+  // Guards: IME, alt, other modifiers, a press outside the composer, the
+  // trigger menu owning the arrow, a non-arrow key, and the switch itself.
+  assert.equal(seat.handle(arrowPress('ArrowUp', { isComposing: true })), false)
+  assert.equal(seat.handle(arrowPress('ArrowUp', { keyCode: 229 })), false)
+  assert.equal(seat.handle(arrowPress('ArrowUp', { altKey: true })), false)
+  assert.equal(seat.handle(arrowPress('ArrowUp', { metaKey: true })), false)
+  assert.equal(seat.handle(arrowPress('ArrowUp', { ctrlKey: true })), false)
+  assert.equal(seat.handle(arrowPress('ArrowUp', { shiftKey: true })), false)
+  assert.equal(seat.handle(arrowPress('Enter')), false)
+  state.draft = ''
+  const elsewhere = await historySeat({ inComposer: () => false })
+  assert.equal(elsewhere.seat.handle(arrowPress('ArrowUp')), false)
+  const menu = await historySeat({ menuOwnsKey: () => true })
+  assert.equal(menu.seat.handle(arrowPress('ArrowUp')), false)
+  const off = await historySeat({ enabled: () => false })
+  assert.equal(off.seat.handle(arrowPress('ArrowUp')), false)
+  assert.deepEqual(state.writes, [])
+})
+
+test('the composer history seat stops taking over once the browsing draft is edited', async () => {
+  const { seat, state } = await historySeat()
+  seat.handle(arrowPress('ArrowUp'))
+  assert.equal(state.draft, '第二条')
+  // The user edited the recalled text: walking on would throw that edit away.
+  state.draft = '第二条（改过）'
+  assert.equal(seat.handle(arrowPress('ArrowUp')), false)
+  assert.equal(state.draft, '第二条（改过）')
+})
+
+test('the composer history seat pulls one older page when it runs off the head', async () => {
+  const { seat, state } = await historySeat()
+  state.messages = [{ seq: 3, text: '第一条', images: [], files: [] }]
+  state.hasMore = true
+  assert.equal(seat.handle(arrowPress('ArrowUp')), true)
+  assert.equal(state.draft, '第一条')
+  assert.equal(seat.handle(arrowPress('ArrowUp')), true)
+  assert.equal(state.loaded, 1)
+  // The prepended page lands after the load resolves; the seat re-reads the
+  // window instead of remembering an index that the prepend would shift.
+  state.messages = [{ seq: 1, text: '更早', images: [], files: [] }, ...state.messages]
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(state.draft, '更早')
+})
+
+test('the composer history seat resets its recall position when the session changes', async () => {
+  const { seat, state } = await historySeat()
+  seat.handle(arrowPress('ArrowUp'))
+  assert.equal(state.draft, '第二条')
+  state.session = 's2'
+  assert.equal(seat.handle(arrowPress('ArrowDown')), false)
+  assert.equal(state.draft, '第二条')
+})
+
+test('a recalled message brings its picture back and names the files it cannot', async () => {
+  const { seat, state } = await historySeat()
+  state.messages = [{ seq: 3, text: '看图', images: [{ attachmentId: 'img-1' }], files: [] }]
+  seat.handle(arrowPress('ArrowUp'))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(state.pasted, ['img-1'])
+  assert.equal(state.draft, '看图')
+
+  // A file attachment has no readable bytes, so the draft keeps its name as a
+  // placeholder line the user can delete before sending.
+  const files = await historySeat()
+  files.state.messages = [{ seq: 4, text: '看文件', images: [], files: [{ name: 'a.pdf' }] }]
+  files.seat.handle(arrowPress('ArrowUp'))
+  assert.equal(files.state.draft, '看文件\n[附件：a.pdf]')
 })
 
 

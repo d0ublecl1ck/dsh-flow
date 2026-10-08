@@ -225,7 +225,25 @@ async function aim(cdp, sessionId, selector) {
       return { x, y };
     })()`)
     if (centre !== null) return centre
-    if (Date.now() > deadline) throw new Error('nothing clickable at ' + selector)
+    await clearStartupVeil(cdp, sessionId)
+    if (Date.now() > deadline) {
+      const diagnosis = await evaluate(cdp, sessionId, `(() => {
+        const target = document.querySelector(${JSON.stringify(selector)});
+        if (target === null) return { target: false };
+        const rect = target.getBoundingClientRect();
+        const x = rect.x + rect.width / 2;
+        const y = rect.y + rect.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return {
+          rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+          hit: hit === null ? null : ((hit.className && String(hit.className).slice(0, 60)) || hit.tagName),
+          veil: document.querySelectorAll('.rt-veil').length,
+          dialog: document.querySelector('[role="dialog"]')?.getAttribute('aria-label') ?? null,
+          viewport: { w: window.innerWidth, h: window.innerHeight },
+        };
+      })()`)
+      throw new Error('nothing clickable at ' + selector + ': ' + JSON.stringify(diagnosis))
+    }
   }
 }
 
@@ -617,6 +635,33 @@ async function composerState(cdp, sessionId) {
       text: node.innerText,
     };
   })()`)
+}
+
+/**
+ * Take the composer's draft back to empty.
+ *
+ * Best effort: the draft lives in this throwaway browser profile either way, so
+ * a failure is reported by whatever assertion needed the empty draft rather than
+ * by this helper.
+ *
+ * @returns whether the draft reads back empty.
+ */
+async function clearComposerDraft(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    const node = document.querySelector('[data-composer-input]');
+    if (node === null) return false;
+    node.focus();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  })()`)
+  await pressShortcut(cdp, sessionId, { key: 'Backspace', code: 'Backspace', virtualKeyCode: 8, modifiers: 0 })
+  await sleep(200)
+  const state = await composerState(cdp, sessionId)
+  return state !== null && state.text === ''
 }
 
 /** Press the composer like a person, and wait for it to really hold focus. */
@@ -1141,6 +1186,33 @@ async function pressEscape(cdp, sessionId) {
   await sleep(400)
 }
 
+/**
+ * Dismiss the shell's own startup panel when one is covering the page.
+ *
+ * A client that exited mid-turn makes the shell greet the next connection with
+ * its "上次中断的任务" panel, whose veil fails every hit test below — no press can
+ * land while it is up. It is closed with its own 稍后 button and never by
+ * choosing a Session to resume, so a verification run starts no turn; the panel
+ * belongs to this throwaway profile, not to whoever else is using the instance.
+ *
+ * @returns whether a panel was found and dismissed.
+ */
+async function clearStartupVeil(cdp, sessionId) {
+  // A client that exited mid-turn makes the shell greet the next connection with
+  // its 上次中断的任务 panel, whose veil fails every hit test while it is up. It is
+  // closed with its own 稍后 button and never by choosing a Session to resume, so
+  // no turn is started; the panel belongs to this throwaway profile.
+  return await evaluate(cdp, sessionId, `(() => {
+    if (document.querySelector('.rt-veil') === null) return false;
+    const dialog = document.querySelector('[role="dialog"]');
+    if (dialog === null) return false;
+    const later = [...dialog.querySelectorAll('button')].find((button) => (button.textContent || '').trim().startsWith('稍后'));
+    if (later === undefined) return false;
+    later.click();
+    return true;
+  })()`)
+}
+
 /** Press one shortcut with its modifier bitmask (Alt 1, Ctrl 2, Meta 4, Shift 8). */
 async function pressShortcut(cdp, sessionId, { key, code, virtualKeyCode, modifiers }) {
   const base = { modifiers, key, code, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode }
@@ -1556,8 +1628,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送'])) {
-      pass('the 心流 page renders all six preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息'])) {
+      pass('the 心流 page renders all seven preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -2040,6 +2112,100 @@ async function main() {
             else console.log('  NOTE  the throwaway browser left a draft behind: ' + JSON.stringify(cleaned === null ? null : cleaned.text))
           }
         }
+      }
+    }
+    // ---- I. ↑↓ recalls the messages this conversation already sent --------
+    // The seat only steps in when the caret has nothing to move, so every press
+    // below is made on an empty draft: a broken recall can then only show up as
+    // "nothing happened", never as a message posted into the Session this run
+    // happens to be using. The draft is read back after each press, so a seat
+    // that never ran and a seat that recalled nothing are told apart.
+    {
+      const startedOn = await evaluate(cdp, sessionId, `document.querySelector('[data-row-key^="session:"][aria-selected="true"]')?.dataset.rowKey ?? null`)
+      const recalledSession = await openContentSession(cdp, sessionId)
+      if (!recalledSession.ok) {
+        // The recall leg does not need rendered inline code the way the code-menu
+        // leg does — only a Session that has sent something. The row search is a
+        // seeding convenience, not a prerequisite, so the leg falls back to
+        // whatever is on screen; an empty window is reported below as a skip.
+        console.log('  NOTE  no transcript-bearing row opened; the recall leg uses the Session already on screen')
+      }
+      {
+        await focusComposer(cdp, sessionId)
+        // The send-key leg can leave a newline behind; the recall leg needs an
+        // empty draft, so it is cleared here rather than skipped.
+        await clearComposerDraft(cdp, sessionId)
+        const start = await composerState(cdp, sessionId)
+        if (start === null || start.editable !== 'true' || !start.focused) {
+          fail('the recalled-messages leg found no focused editable composer: ' + JSON.stringify(start))
+        } else if (start.text !== '') {
+          skip('the composer would not clear; the recall leg needs an empty draft')
+        } else {
+          await pressShortcut(cdp, sessionId, { key: 'ArrowUp', code: 'ArrowUp', virtualKeyCode: 38, modifiers: 0 })
+          await sleep(500)
+          const recalled = await composerState(cdp, sessionId)
+          const text = recalled === null ? '' : recalled.text.trim()
+          // Two presses: the draft must hold a sent message and stay inside them
+          // when the window holds several. The rendered transcript is not the
+          // oracle — a user message and an assistant message live in different
+          // containers, and only the assistant's is markdown.
+          await pressShortcut(cdp, sessionId, { key: 'ArrowUp', code: 'ArrowUp', virtualKeyCode: 38, modifiers: 0 })
+          await sleep(500)
+          const older = await composerState(cdp, sessionId)
+          const olderText = older === null ? '' : older.text.trim()
+          if (text === '') {
+            skip('ArrowUp recalled nothing: this Session has no sent message in the loaded window')
+          } else if (olderText === '') {
+            fail('ArrowUp again lost the recalled draft: ' + JSON.stringify({ recalled: text.slice(0, 60) }))
+          } else {
+            pass('ArrowUp on an empty draft recalls a sent message, and walking back stays inside them')
+          }
+
+          // Down past the newest gives the draft back; a Lexical setDraft('')
+          // renders as one empty block, so emptiness is compared trimmed.
+          for (let step = 0; step < 3; step += 1) {
+            await pressShortcut(cdp, sessionId, { key: 'ArrowDown', code: 'ArrowDown', virtualKeyCode: 40, modifiers: 0 })
+          }
+          await sleep(400)
+          const restored = await composerState(cdp, sessionId)
+          if (restored !== null && restored.text.trim() === '') {
+            pass('ArrowDown past the newest message gives the empty draft back')
+          } else {
+            fail('ArrowDown did not restore the empty draft: ' + JSON.stringify(restored === null ? null : restored.text.slice(0, 80)))
+          }
+
+          // A draft someone typed keeps the arrows for the caret.
+          await focusComposer(cdp, sessionId)
+          await cdp.send('Input.insertText', { text: 'draft-in-progress' }, sessionId)
+          const typed = await composerState(cdp, sessionId)
+          await pressShortcut(cdp, sessionId, { key: 'ArrowUp', code: 'ArrowUp', virtualKeyCode: 38, modifiers: 0 })
+          await sleep(400)
+          const afterTypedUp = await composerState(cdp, sessionId)
+          if (typed !== null && afterTypedUp !== null && afterTypedUp.text === typed.text && typed.text.includes('draft-in-progress')) {
+            pass('a draft someone typed keeps the arrow keys for the caret')
+          } else {
+            fail('ArrowUp overwrote a typed draft: ' + JSON.stringify({ typed: typed === null ? null : typed.text, after: afterTypedUp === null ? null : afterTypedUp.text }))
+          }
+          await shoot(cdp, sessionId, 'message-history.png')
+
+          // Best effort: take the throwaway draft back to empty in this profile.
+          await evaluate(cdp, sessionId, `(() => {
+            const node = document.querySelector('[data-composer-input]');
+            if (node === null) return false;
+            node.focus();
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
+          })()`)
+          await pressShortcut(cdp, sessionId, { key: 'Backspace', code: 'Backspace', virtualKeyCode: 8, modifiers: 0 })
+        }
+      }
+      if (startedOn !== null) {
+        await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(startedOn) + ']').catch(() => {})
+        await sleep(400)
       }
     }
   } finally {

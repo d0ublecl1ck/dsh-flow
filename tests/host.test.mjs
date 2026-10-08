@@ -303,6 +303,14 @@ test('apply survives a deployment without the settings service', () => {
   assert.equal(ran, true)
 })
 
+test('the recalled-message switch defaults to on, and is volatile like its siblings', () => {
+  assert.equal(z.resolve({}, Config)[0].composerHistory.get(), true)
+  assert.equal(z.resolve({ composerHistory: false }, Config)[0].composerHistory.get(), false)
+  const field = Config.dict.composerHistory
+  assert.equal(field.meta.volatile, true)
+  assert.equal(field.type, 'boolean')
+})
+
 test('apply injects the web transport separately, so a shell without it still loads', () => {
   const injected = []
   apply({ fiber: {}, inject: (names, _callback) => { injected.push(names) } })

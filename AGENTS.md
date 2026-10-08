@@ -1,6 +1,6 @@
 # dsh-flow
 
-DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由、对话输入框里把 Enter 与 ⌘/Ctrl+Enter 对调的发送键开关，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
+DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由、对话输入框里把 Enter 与 ⌘/Ctrl+Enter 对调的发送键开关、用 ↑/↓ 在当前对话发过的消息之间切换的历史回填，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
 
 ## 结构与约定
 
@@ -90,6 +90,18 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **⇧⌘Enter 保留加速档**：换行分支丢掉 Shift 会顺手丢掉「另一种发送方式」，所以 ⇧⌘Enter 补发的是**保留主修饰键**的 Enter。这是刻意的补偿，不是漏改。
 - **监听只在偏好打开时存在**（与行内代码菜单同一范式）：表单的 subscribe 当 Host 回声用，翻到 false 就 detach，翻回来再 attach；关掉时 document 上根本没有 keydown 监听。设置页的开关文案与这条实现一一对应。
 
+## ↑↓ 回忆发过的消息（为什么是「读官方事件窗口 + 写官方草稿」）
+
+输入框为空时按 ↑ 把当前会话最近发过的用户消息放回草稿，↑ 往前、↓ 往后，越过最新一条回到原草稿。
+
+- **历史来自 `ctx.sessions.binding(id).eventSource`**：窗口 entries 里 `event.type === 'user/message'` 且 `event.data.source.kind === 'user'` 的才是用户发的；插件注入的规则提醒/系统提示走 `source.kind === 'plugin'`，必须排除（实拉的会话语料里两类都真实存在）。文本块按换行连接，图片与文件引用从 `content[]` 的 `attachment` 取。
+- **回填走官方输入面**：`ctx.conversation.input.for(ctx.sessions.scope(id)).setDraft(text)`（`@deepseek-ai/dsh-client-ui-conversation` 的 `SessionInput`）真的改官方 Lexical 草稿；读草稿用同一个 face 的 `state.getSnapshot().draft`，不读 DOM 文本。**`conversation` 必须在 inject 里声明**，否则属性访问直接抛 `cannot get property "conversation" without inject`。
+- **图片回填 = 从宿主读回字节再走官方粘贴入口**：`binding.session.readAttachment(attachmentId)` → `{ok, data}` → `new File([data], name, {type})` → 对 `[data-composer-input]` 派发带 `DataTransfer` 的合成 `ClipboardEvent('paste')`。实测官方 intake 接住（草稿附件数 0 → 1）。**文件附件没有客户端读取入口**（`FileAttachmentRef` 只有 id/name/bytes），草稿里只留一行词典占位。
+- **游标按 seq 锚定，不按数组下标**：`loadOlder()` 会把更早的一页 prepend 进窗口，下标会指到别的消息；到窗口最早一条且 `hasMore === true` 时用官方 `session.loadOlder()` 再取一页，回来按 seq 重算。
+- **接管条件只有两种**：非浏览态要求草稿为空（选项 A：非空草稿的方向键留给光标）；浏览态要求草稿仍等于当前展示的那条（被改过就放行，不丢编辑）。IME、四个修饰键、非 composer 目标、`/`/`@` 候选菜单有高亮时一律放行。
+- **监听只在偏好打开时存在**（与行内代码菜单同一范式）；关掉时 document 上没有 keydown 监听。
+- 真浏览器实测（无头 Chrome，worktree client）：空草稿 ↑ 回填出真实用户消息，非空草稿 ↑ 不动草稿。**宿主是旧版时 I 段记 `SKIP`**（`composerHistory` 没被 settings 域投影）。
+
 ## 依赖的官方契约（脆弱点集中在这里）
 
 - 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占三个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单，`flow.changes-menu` 放改动文件菜单）。
@@ -101,8 +113,9 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
-- 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts` / `remote` / `remote.workspaceFiles` / `remote.session` / `sidebarRight`。**本文件里出现的每一个 `ctx.<service>` 都必须在 inject 里列出**：cordis 不会给没声明的插件挂命名空间，而且症状是静默的——少 `remote.workspaceFiles` 时 `ctx.remote.workspaceFiles.stat` 是 `undefined`，探测恒 unknown、每次按压退回壳；少 `sidebarRight` 时按压被认领却什么都不打开；少 `remote.session` 时改动文件菜单每次都报「无法打开」。2026-10-08 前两种都实拉踩到。宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
+- 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `conversation` / `workspaces` / `shortcuts` / `remote` / `remote.workspaceFiles` / `remote.session` / `sidebarRight`。**本文件里出现的每一个 `ctx.<service>` 都必须在 inject 里列出**：cordis 不会给没声明的插件挂命名空间，而且症状是静默的——少 `remote.workspaceFiles` 时 `ctx.remote.workspaceFiles.stat` 是 `undefined`，探测恒 unknown、每次按压退回壳；少 `sidebarRight` 时按压被认领却什么都不打开；少 `remote.session` 时改动文件菜单每次都报「无法打开」。2026-10-08 前两种都实拉踩到。宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
 - 服务与数据（改动文件打开）：`ctx.remote.session.openWorkspacePath({ path, action?, application? })` 与 `ctx.remote.session.workspacePathApplications({ path })`（`@deepseek-ai/dsh-api-session-controller`，都返回 Result 信封；`action` 省略即默认应用、`'reveal'` 为文件管理器；`application` 必须是后者给的 `id`）。两条都由 inject 保证存在；运行时仍按可选读（`ctx.remote?.session`），拿不到就把按下的那一下说成失败，绝不抛错。
+- 服务与数据（历史消息）：`ctx.sessions.binding(id).eventSource.getSnapshot()` 给窗口（`entries` / `hasMore`），`binding.session.readAttachment(attachmentId)` 给图片字节与引用，`binding.session.loadOlder()` 翻更早一页 —— 三者都按可选读，拿不到就放行或只写文本；`ctx.conversation.input.for(scope)` 是回填草稿的唯一入口（`@deepseek-ai/dsh-client-ui-conversation`，`conversation` 已进 inject）。
 - 存在性探测：宿主 remote `workspaceFiles.stat(sessionId, path, signal)`（位置参数，第一个是会话 id，descriptor 里叫 `workspaceFileScope`）。**它返回 Result 信封** `{ok:true,value}` / `{ok:false,error}`，不是抛错——「不存在」是值不是异常，所以判定读 `error.code` / `error.message` 是否含 not-found 一类字样；其余失败归为 unknown。调用点原文见官方包 `workspaceFiles.stat(sessionId, path, signal)`。探测带 2s 上限，超时按 unknown 处理。
 - 模块：`@deepseek-ai/dsh-client-ui-primitives` 是动态客户端包的隐式 baseline external，本轮用到 `MenuItemButton` / `Toast` / `writeClipboard`（同一个 `require`）。`writeClipboard` 只出现在导出清单里，官方 README 没写它 —— 它不存在时症状是复制永远报失败，所以改动后要跑真浏览器验收，不能只看单测。
 - 复制行直接用官方包里的 `IconCopyOutlineRegular`，**没有**内联进本仓库，因此 `THIRD-PARTY-NOTICES.md` 不需要新增条目；`LocateIcon` 的内联约定不受影响。
@@ -111,7 +124,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, modEnterSend })`，六个字段都是 `z.boolean().volatile()` —— 前五个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, composerHistory, modEnterSend })`，七个字段都是 `z.boolean().volatile()` —— 前六个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -124,7 +137,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 107 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 117 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
@@ -132,7 +145,13 @@ npm run assets           # 重新生成 assets/ 里的示意图（需要本机 C
 
 `verify:browser` 会改变界面状态（展开分组、开关偏好），结束时全部复原；它只用无头 Chrome，不弹可见窗口，手势一律走 `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`。
 
-两处必须知道的边界：
+边界里最常踩的三条：
+
+- **启动面板会挡住一切按压**：客户端上次意外退出后，shell 会给下一个连接弹「上次中断的任务」面板，它的 `.rt-veil` 让 `elementFromPoint` 命中遮罩，`aim()` 恒失败（症状是「按钮明明在，却报 nothing clickable」）。`aim()` 现在会调 `clearStartupVeil()` 点它自己的「稍后处理」把面板关掉（**绝不点「重试选中 N 个」**，那会真的续跑），这是 throwaway profile 里的本地动作。
+- **验收脚本会抖**：同一次运行里「复制偏好写不回去」「openContentSession 找不到有 code 的会话」这类失败与功能改动无关，是偏好残留与面板时序造成的；判断回归要拿同一份脚本的前后两次运行对比，不要只看一次红。
+- **下面的两条也必须知道**：
+
+
 
 - `--client <path>` 把指定文件的浏览器半边在飞行中替换进**合并后的**插件包（`replaceSegment()` 按 `window.__ModuleLoader__.load(` 注册调用与 `\n;\n` 分隔符定位片段，不按字节数：官方包被包装过，本地 `link:` 包是原样拼进去的，两种形状都得认）。它**只替换浏览器半边**：新加的 Config 字段要被 settings 域投影、要能保存，实例激活的宿主半边也得是这份代码。实例加载的是旧宿主时，设置写入那一段会 `SKIP` 并附原因（页面上同时如实显示保存失败），不会假装通过；片段定位失败则直接 `FAIL`，不会静默跑回旧代码。
 - 右键手势要拆成两半：CDP 的真实右键按下 + 在行坐标上补发 `contextmenu`。无头 Chrome 不会把右键按下变成 `contextmenu`，而 `contextmenu` 是官方行处理器与行内代码菜单共同的唯一入口，不补发就永远测不到那个菜单。

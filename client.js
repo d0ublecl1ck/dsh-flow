@@ -1216,6 +1216,229 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Every message the user really sent, oldest first.
+     *
+     * The Session event window also carries user-role messages a plugin
+     * injected (workspace instructions, reminders); the source kind is what
+     * tells them apart, so only a user-produced message survives. Text blocks
+     * are joined and durable attachments ride along, so the caller can decide
+     * what it can bring back.
+     *
+     * @param entries - the Session event window's entries.
+     * @returns one row per sent message: seq, joined text, image and file refs.
+     */
+    function sentUserMessages(entries) {
+      const messages = []
+      if (!Array.isArray(entries)) return messages
+      for (const entry of entries) {
+        const event = entry?.event ?? entry
+        if (event?.type !== 'user/message') continue
+        const data = event.data
+        if (data?.source?.kind !== 'user') continue
+        const content = Array.isArray(data.content) ? data.content : []
+        const texts = []
+        const images = []
+        const files = []
+        for (const block of content) {
+          if (block === null || typeof block !== 'object') continue
+          if (block.type === 'text' && typeof block.text === 'string') {
+            texts.push(block.text)
+          } else if (block.type === 'image' && typeof block.attachment?.attachmentId === 'string') {
+            images.push(block.attachment)
+          } else if (block.type === 'file' && typeof block.attachment?.attachmentId === 'string') {
+            files.push(block.attachment)
+          }
+        }
+        if (texts.length === 0 && images.length === 0 && files.length === 0) continue
+        messages.push({ seq: event.seq, text: texts.join('\n'), images, files })
+      }
+      return messages
+    }
+
+    /**
+     * Where one arrow press wants the recall cursor to go.
+     *
+     * The list is addressed by seq, never by index: pulling an older page
+     * prepends entries, and an index would then point at another message.
+     *
+     * @param state - the message on screen (anchorSeq) and whether an older page is unloaded.
+     * @param key - the pressed key.
+     * @param messages - sentUserMessages output, oldest first.
+     * @returns the step: idle (leave the press alone), show, restore, or load-older.
+     */
+    function composerHistoryStep(state, key, messages) {
+      const list = Array.isArray(messages) ? messages : []
+      const anchor = state?.anchorSeq ?? null
+      const hasMore = state?.hasMore === true
+      if (key === 'ArrowUp') {
+        if (anchor === null) {
+          if (list.length > 0) return { kind: 'show', message: list[list.length - 1] }
+          return hasMore ? { kind: 'load-older' } : { kind: 'idle' }
+        }
+        for (let index = list.length - 1; index >= 0; index -= 1) {
+          if (list[index].seq < anchor) return { kind: 'show', message: list[index] }
+        }
+        return hasMore ? { kind: 'load-older' } : { kind: 'idle' }
+      }
+      if (key === 'ArrowDown') {
+        if (anchor === null) return { kind: 'idle' }
+        for (const message of list) {
+          if (message.seq > anchor) return { kind: 'show', message }
+        }
+        return { kind: 'restore' }
+      }
+      return { kind: 'idle' }
+    }
+
+    /**
+     * What one recalled message puts in the composer.
+     *
+     * @param message - one sentUserMessages row.
+     * @param fileLabel - localizes the placeholder for a file attachment whose
+     *   bytes this plugin has no client API to read back.
+     * @returns the draft text.
+     */
+    function historyDraftText(message, fileLabel) {
+      const lines = []
+      const text = typeof message?.text === 'string' ? message.text : ''
+      if (text !== '') lines.push(text)
+      const files = Array.isArray(message?.files) ? message.files : []
+      for (const file of files) lines.push(fileLabel(file))
+      return lines.join('\n')
+    }
+
+    /**
+     * Hand files back to the shipped composer the way a paste would.
+     *
+     * The composer's own intake is the only thing that registers a browser
+     * attachment draft, so a synthetic paste carrying a real File is the one
+     * route that needs no private API. The constructors come from the element's
+     * own window, which is also what lets a test supply stand-ins.
+     *
+     * @param target - the composer's editable root.
+     * @param files - the File objects to attach.
+     * @param view - the window that owns the constructors.
+     * @returns whether a paste event could be dispatched.
+     */
+    function pasteComposerFiles(target, files, view) {
+      const DataTransferCtor = view?.DataTransfer
+      const ClipboardEventCtor = view?.ClipboardEvent
+      if (typeof DataTransferCtor !== 'function' || typeof ClipboardEventCtor !== 'function') return false
+      if (!isElement(target) || typeof target.dispatchEvent !== 'function') return false
+      const transfer = new DataTransferCtor()
+      for (const file of files) transfer.items.add(file)
+      target.dispatchEvent(new ClipboardEventCtor('paste', {
+        clipboardData: transfer,
+        bubbles: true,
+        cancelable: true,
+      }))
+      return true
+    }
+
+    /**
+     * The recalled-messages seat: one capture-phase listener's worth of behavior
+     * over the composer.
+     *
+     * The draft is the gate. The shipped arrows move the caret, and this feature
+     * only steps in when the caret has nothing to move: an empty draft, or the
+     * text it put there itself. Every DOM read is an injected thunk, so the
+     * whole state machine is asserted without a browser.
+     *
+     * @param input.enabled - reads the live preference.
+     * @param input.inComposer - whether the press landed in the composer.
+     * @param input.menuOwnsKey - whether the trigger menu has a highlighted candidate.
+     * @param input.sessionId - the Session on screen, or null.
+     * @param input.draft - the composer's live draft text, or null when unreadable.
+     * @param input.setDraft - replaces the draft; false when it could not.
+     * @param input.messages - sentUserMessages over the live window.
+     * @param input.hasMore - whether older history is still unloaded.
+     * @param input.loadOlder - pulls one older page.
+     * @param input.pasteImages - brings durable pictures back into the draft.
+     * @param input.fileLabel - localizes the file-attachment placeholder.
+     * @returns the seat the document listener drives.
+     */
+    function createComposerHistory(input) {
+      let anchorSeq = null
+      let shownText = ''
+      let stash = ''
+      let session = null
+      let loading = false
+
+      const forget = () => {
+        anchorSeq = null
+        shownText = ''
+        stash = ''
+      }
+      const show = (message) => {
+        const text = historyDraftText(message, input.fileLabel)
+        if (input.setDraft(text) === false) return false
+        anchorSeq = message.seq
+        shownText = text
+        input.pasteImages(Array.isArray(message.images) ? message.images : [])
+        return true
+      }
+
+      return {
+        /**
+         * Recall one step, or let the press through.
+         *
+         * @param event - the document keydown event.
+         * @returns whether this press was taken away from the shell.
+         */
+        handle(event) {
+          if (loading) return false
+          if (input.enabled() !== true) return false
+          const key = event?.key
+          if (key !== 'ArrowUp' && key !== 'ArrowDown') return false
+          // An IME owns its own arrows, and every modifier chord belongs to
+          // whatever the shell already made of it.
+          if (event?.isComposing === true || event?.keyCode === 229) return false
+          if (event?.altKey === true || event?.metaKey === true || event?.ctrlKey === true || event?.shiftKey === true) return false
+          if (input.inComposer(event) !== true) return false
+          if (input.menuOwnsKey() === true) return false
+
+          const current = input.sessionId()
+          if (current !== session) {
+            // A different conversation starts from scratch: the anchors and the
+            // stashed draft belong to a composer that is no longer on screen.
+            session = current
+            forget()
+          }
+
+          const draft = input.draft()
+          if (typeof draft !== 'string') return false
+          // A draft this seat did not put there keeps the arrows for the caret,
+          // and so does an edit made to the text it did put there.
+          if (anchorSeq === null ? draft !== '' : draft !== shownText) return false
+
+          const step = composerHistoryStep({ anchorSeq, hasMore: input.hasMore() === true }, key, input.messages())
+          if (step.kind === 'idle') return false
+          if (step.kind === 'load-older') {
+            loading = true
+            event.preventDefault()
+            event.stopImmediatePropagation()
+            Promise.resolve(input.loadOlder()).then(() => {
+              loading = false
+              const next = composerHistoryStep({ anchorSeq, hasMore: input.hasMore() === true }, key, input.messages())
+              if (next.kind === 'show') show(next.message)
+            }, () => { loading = false })
+            return true
+          }
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          if (step.kind === 'restore') {
+            input.setDraft(stash)
+            forget()
+            return true
+          }
+          if (anchorSeq === null) stash = draft
+          return show(step.message)
+        },
+      }
+    }
+
+
+    /**
      * The one-slot seat the inline-code menu renders from.
      *
      * A press that lands on another `code` while the menu is open replaces the
@@ -1338,6 +1561,26 @@ window.__ModuleLoader__.load({
       }
       if (value === null || typeof value !== 'object') return false
       return value.modEnterSend === true
+    }
+
+    /**
+     * Read the recalled-messages preference off the plugin's config form.
+     *
+     * The default is on, and an unreadable form keeps that default: a Host that
+     * does not project the field yet must not silently take the feature away.
+     *
+     * @param form - the plugin's config form.
+     * @returns whether an empty composer recalls sent messages on arrow keys.
+     */
+    function readComposerHistoryEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.composerHistory !== false
     }
 
     /** The changed-files card the shipped deliverables plugin renders at a turn's tail. */
@@ -1945,6 +2188,9 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开 / 在文件管理器中显示」；系统为该文件注册的编辑器与 IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等）会作为额外行出现，带图标，当前默认那个标「（默认）」。都交给宿主自己的会话 Remote 执行，关闭后不注册这个右键菜单。',
       'section.sendKey.title': '⌘+Enter 发送',
       'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
+      'history.file': '[附件：{name}]',
+      'section.history.title': '↑↓ 切换发过的消息',
+      'section.history.description': '草稿为空时，用 ↑/↓ 在当前对话发过的消息之间切换：↑ 更早、↓ 更新，越过最新一条回到原来的草稿。带图片的消息会把图片重新粘回草稿；文件附件（本插件读不回内容）以一行占位文字保留，可自行删除。',
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -2019,6 +2265,9 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App / Show in File Manager”, and the editors and IDEs the OS registered for that file (VS Code, Zed, Xcode, IntelliJ IDEA…) appear as extra rows with their icons, the current default marked “(default)”. All of them run through the Host’s own Session Remote; switching this off registers no such menu.',
       'section.sendKey.title': '⌘+Enter to send',
       'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
+      'history.file': '[attachment: {name}]',
+      'section.history.title': 'Recall sent messages with ↑/↓',
+      'section.history.description': 'With an empty draft, ↑/↓ walks the messages this conversation already sent: ↑ older, ↓ newer, and ↓ past the newest restores your draft. A recalled image is pasted back into the draft; a file attachment, whose bytes this plugin cannot read back, stays as one placeholder line you can delete.',
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -2540,6 +2789,15 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
+        h(SettingsRow, {
+          config,
+          field: 'composerHistory',
+          read: readComposerHistoryEnabled,
+          title: t('section.history.title'),
+          description: t('section.history.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
       )
     }
 
@@ -2569,6 +2827,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         'locale',
         'configForms',
         'sessions',
+        'conversation',
         'workspaces',
         'shortcuts',
         'remote',
@@ -2993,6 +3252,110 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
             detach?.()
           }
         }, 'flow: swapped send key')
+        // The recalled sent messages: the same shape as the swapped send key —
+        // one capture-phase listener, present only while the preference is on —
+        // because the shipped arrows belong to the caret, and this seat only
+        // steps in when the caret has nothing to move. The Session event window
+        // is the source: it carries the durable user messages the conversation
+        // really sent, and an older page is the shell's own pagination.
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          const currentBinding = () => {
+            const sessionId = currentSessionId(sessions.getSnapshot())
+            if (sessionId === null) return null
+            const binding = ctx.sessions.binding(sessionId)
+            if (binding === undefined || binding === null) return null
+            return { sessionId, binding }
+          }
+          const currentInput = () => {
+            const current = currentBinding()
+            if (current === null) return null
+            const scope = ctx.sessions.scope(current.sessionId)
+            if (scope === undefined || scope === null) return null
+            try {
+              return { face: ctx.conversation.input.for(scope) }
+            } catch {
+              return null
+            }
+          }
+          const readWindow = () => {
+            const source = currentBinding()?.binding?.eventSource
+            if (source === undefined || source === null || typeof source.getSnapshot !== 'function') return null
+            return source.getSnapshot()
+          }
+          const history = createComposerHistory({
+            enabled: () => readComposerHistoryEnabled(config),
+            inComposer: (event) => isComposerTarget(event?.target),
+            menuOwnsKey: () => document.querySelector(TRIGGER_MENU_PICK) !== null,
+            sessionId: () => currentBinding()?.sessionId ?? null,
+            draft: () => {
+              const current = currentInput()
+              if (current === null) return null
+              try {
+                return String(current.face.state.getSnapshot().draft)
+              } catch {
+                return null
+              }
+            },
+            setDraft: (text) => {
+              const current = currentInput()
+              if (current === null) return false
+              try {
+                current.face.setDraft(text)
+                return true
+              } catch {
+                return false
+              }
+            },
+            messages: () => sentUserMessages(readWindow()?.entries),
+            hasMore: () => readWindow()?.hasMore === true,
+            loadOlder: () => {
+              const session = currentBinding()?.binding?.session
+              if (session === undefined || session === null || typeof session.loadOlder !== 'function') return Promise.resolve(false)
+              return Promise.resolve(session.loadOlder()).then(() => true, () => false)
+            },
+            pasteImages: (images) => {
+              const current = currentInput()
+              const active = typeof document.activeElement?.closest === 'function'
+                ? document.activeElement.closest(COMPOSER_INPUT)
+                : null
+              const session = current?.binding?.session
+              if (current === null || !isElement(active) || typeof session?.readAttachment !== 'function') return
+              const view = active.ownerDocument?.defaultView ?? globalThis
+              const FileCtor = view?.File ?? globalThis.File
+              if (typeof FileCtor !== 'function') return
+              Promise.all(images.map((image) => Promise.resolve(session.readAttachment(image.attachmentId)).then((result) => {
+                if (result === null || typeof result !== 'object' || result.ok !== true || result.data === undefined) return null
+                const mediaType = typeof image.mediaType === 'string' && image.mediaType !== '' ? image.mediaType : 'image/png'
+                const name = typeof image.name === 'string' && image.name !== '' ? image.name : 'image'
+                return new FileCtor([result.data], name, { type: mediaType })
+              }, () => null))).then((files) => {
+                const usable = files.filter((file) => file !== null)
+                if (usable.length === 0) return
+                pasteComposerFiles(active, usable, view)
+              }, () => {})
+            },
+            fileLabel: (file) => t('history.file', { name: file?.name ?? '' }),
+          })
+          let detach = null
+          const sync = () => {
+            if (!readComposerHistoryEnabled(config)) {
+              detach?.()
+              detach = null
+              return
+            }
+            if (detach !== null) return
+            const onKeyDown = (event) => { history.handle(event) }
+            document.addEventListener('keydown', onKeyDown, true)
+            detach = () => { document.removeEventListener('keydown', onKeyDown, true) }
+          }
+          sync()
+          const unsubscribe = config.subscribe(sync)
+          return () => {
+            if (typeof unsubscribe === 'function') unsubscribe()
+            detach?.()
+          }
+        }, 'flow: recalled messages')
         // One notice seat for both copy entry points: the row menu and the
         // command copy the same text and report through the same place.
         const notice = createNoticeStore()
@@ -3195,6 +3558,12 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         replayComposerEnter,
         createComposerSendKey,
         readModEnterSend,
+        sentUserMessages,
+        composerHistoryStep,
+        historyDraftText,
+        pasteComposerFiles,
+        createComposerHistory,
+        readComposerHistoryEnabled,
       },
     }
   },
