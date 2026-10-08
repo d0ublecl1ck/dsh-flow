@@ -1300,6 +1300,16 @@ test("a tilde code the shell did wire still goes home, and falls back to the she
   }), "unknown")
 })
 
+test("the plugin injects the Remote carrier and its workspaceFiles namespace", async () => {
+  // Measured: without these two the cordis context has no ctx.remote.workspaceFiles,
+  // every existence probe answers "unknown", and each press silently falls back to
+  // the shell — which is exactly the "path open failed" report this feature exists
+  // to replace. The inject list is therefore part of the feature, not boilerplate.
+  const module = await load()
+  assert.ok(module.inject.includes("remote"), "ctx.remote carries the host facts and $host")
+  assert.ok(module.inject.includes("remote.workspaceFiles"), "ctx.remote.workspaceFiles carries stat")
+})
+
 test("the inline-code menu is handed a home opener beside its store", async () => {
   const module = await load()
   const registrations = []

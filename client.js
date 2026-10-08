@@ -1847,7 +1847,10 @@ window.__ModuleLoader__.load({
     // #endregion
 
     return {
-      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces', 'shortcuts'],
+      // `remote` carries the host facts and `remote.workspaceFiles` the existence
+      // probe; without both, `ctx.remote.workspaceFiles` is undefined and every probe
+      // silently answers "unknown", which hands every path back to the shell.
+      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces', 'shortcuts', 'remote', 'remote.workspaceFiles'],
       apply(ctx) {
         ctx.effect(() => {
           const style = injectStyles()
