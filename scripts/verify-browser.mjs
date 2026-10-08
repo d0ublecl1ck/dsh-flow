@@ -1894,13 +1894,13 @@ async function main() {
       pass('a changed-files card is on screen (' + changed.rows + ' file rows)')
       const pressed = await pressElement(cdp, sessionId, CHANGED_FILE_FINDER, { contextMenu: true })
       const menus = await settleMenus(cdp, sessionId, 1)
-      // The editor rows arrive with the association query, which the Host answers
-      // with rendered icons; give it a bounded moment and read what settled. A
-      // file with no registered editor legitimately stays on the shipped pair.
+      // The IDE rows arrive with the Host's installed-application catalog, which
+      // it answers with rendered icons; give it a bounded moment and read what
+      // settled. A machine with no IDE legitimately stays on the shipped pair.
       await sleep(1500)
       const probe = await evaluate(cdp, sessionId, CHANGED_FILES_PROBE)
       const shipped = ['用默认应用打开', '在文件管理器中显示']
-      const editorLabels = /^(VS Code( Insiders)?|Cursor|Windsurf|Zed|Sublime Text|Xcode|Android Studio|IntelliJ IDEA|PyCharm|WebStorm|PhpStorm|GoLand|Rider|RustRover)(（默认）)?$/
+      const editorLabels = /^(VS Code( Insiders)?|Cursor|Windsurf|Zed|Sublime Text|Xcode|Android Studio|IntelliJ IDEA|PyCharm|WebStorm|PhpStorm|GoLand|Rider|RustRover)$/
       const editors = probe.items.filter((label) => editorLabels.test(label))
       const unknown = probe.items.filter((label) => !shipped.includes(label) && !editorLabels.test(label))
       const rawBundle = probe.items.filter((label) => label.includes('.app'))
@@ -1909,13 +1909,13 @@ async function main() {
       } else if (menus !== 1 || probe.items.length < 2) {
         fail('no changed-file menu after a right-click: ' + JSON.stringify({ items: probe.items, menus: probe.menus }))
       } else if (unknown.length > 0 || rawBundle.length > 0) {
-        fail('the changed-file menu listed something that is neither the shipped pair nor an editor: ' + JSON.stringify({ unknown, rawBundle, items: probe.items }))
+        fail('the changed-file menu listed something that is neither the shipped pair nor an installed IDE: ' + JSON.stringify({ unknown, rawBundle, items: probe.items }))
       } else if (probe.items[probe.items.length - 1] !== '在文件管理器中显示') {
         fail('显示文件位置 is not the last row of the changed-file menu: ' + JSON.stringify(probe.items))
-      } else if (editors.length > 0 && probe.items[0] !== '用默认应用打开' && !editorLabels.test(probe.items[0])) {
-        fail('the changed-file menu does not lead with a default action: ' + JSON.stringify(probe.items))
+      } else if (probe.items[0] !== '用默认应用打开') {
+        fail('the changed-file menu does not lead with the default action: ' + JSON.stringify(probe.items))
       } else {
-        pass('right-clicking a changed file offers the shipped pair' + (editors.length === 0 ? ' (no editor is registered for this file)' : ' plus ' + editors.join('、')))
+        pass('right-clicking a changed file opens the default action' + (editors.length === 0 ? ' (no IDE is installed)' : ' plus ' + editors.join('、')) + ' then 在文件管理器中显示')
       }
       // The path the live card handed over is the contract unit tests cannot
       // reach: it comes from the shipped `aria-describedby` element, and a

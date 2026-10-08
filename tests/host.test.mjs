@@ -12,13 +12,22 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import z from '@deepseek-ai/schemastery'
 import {
+  APPS_PATH,
   Config,
   OPEN_PATH,
+  OPEN_WITH_PATH,
   acceptedUrl,
+  applicationRoots,
   apply,
+  appsRequestHandler,
+  installedApps,
+  launchPath,
+  mayOpen,
   name,
   openRequestHandler,
+  openWithRequestHandler,
   openerCommand,
+  resolveCandidate,
 } from '../index.js'
 
 test('the host row is named after its bundle id', () => {
@@ -274,11 +283,18 @@ test('apply mounts the open route on the web transport it injects', () => {
     },
   }
   apply(ctx)
-  assert.equal(routes.length, 1)
-  assert.equal(routes[0].kind, 'exact')
-  assert.equal(routes[0].path, OPEN_PATH)
-  assert.equal(typeof routes[0].handler, 'function')
-  assert.equal(descriptions[0], 'flow: POST ' + OPEN_PATH)
+  // Three exact routes: the link hand-off, the installed-application list, and
+  // the opener that takes a path plus one of those applications.
+  assert.deepEqual(routes.map((route) => route.path), [OPEN_PATH, APPS_PATH, OPEN_WITH_PATH])
+  for (const route of routes) {
+    assert.equal(route.kind, 'exact')
+    assert.equal(typeof route.handler, 'function')
+  }
+  assert.deepEqual(descriptions, [
+    'flow: POST ' + OPEN_PATH,
+    'flow: GET ' + APPS_PATH,
+    'flow: POST ' + OPEN_WITH_PATH,
+  ])
 })
 
 test('apply survives a deployment without the settings service', () => {
@@ -300,3 +316,144 @@ test('apply injects the web transport separately, so a shell without it still lo
   apply({ fiber: {}, inject: (names, _callback) => { injected.push(names) } })
   assert.deepEqual(injected, [['settings'], ['webServer', 'connection']])
 })
+// --- the plugin's own app catalog and opener -------------------------------
+
+test('the catalog only offers applications the host really has', () => {
+  const have = new Set(['/Applications/Visual Studio Code.app', '/Users/x/Applications/Zed.app'])
+  const apps = installedApps({
+    platform: 'darwin',
+    roots: ['/Applications', '/Users/x/Applications'],
+    env: { HOME: '/Users/x' },
+    exists: (path) => have.has(path),
+  })
+  assert.deepEqual(apps.map(({ id, kind, path }) => [id, kind, path]), [
+    ['vscode', 'ide', '/Applications/Visual Studio Code.app'],
+    ['zed', 'ide', '/Users/x/Applications/Zed.app'],
+  ])
+})
+
+test('a candidate resolves under the application roots, or on PATH elsewhere', () => {
+  const darwin = { roots: ['/Applications'], exists: (path) => path === '/Applications/Zed.app', env: {} }
+  assert.equal(resolveCandidate('Zed.app', 'darwin', darwin), '/Applications/Zed.app')
+  assert.equal(resolveCandidate('Ghostty.app', 'darwin', darwin), null)
+  assert.equal(resolveCandidate('/System/Applications/Utilities/Terminal.app', 'darwin', { roots: [], exists: () => false, env: {} }), null)
+  const linux = { roots: [], exists: (path) => path === '/usr/bin/code', env: { PATH: '/usr/bin:/bin' } }
+  assert.equal(resolveCandidate('code', 'linux', linux), '/usr/bin/code')
+  assert.equal(resolveCandidate('code', 'linux', { ...linux, env: { PATH: '/bin' } }), null)
+})
+
+test('only an IDE may be handed a file; a directory takes any kind', () => {
+  assert.equal(mayOpen({ kind: 'ide' }, false), true)
+  assert.equal(mayOpen({ kind: 'ide' }, true), true)
+  assert.equal(mayOpen({ kind: 'terminal' }, true), true)
+  assert.equal(mayOpen({ kind: 'terminal' }, false), false)
+  assert.equal(mayOpen({ kind: 'files' }, false), false)
+  assert.equal(mayOpen(undefined, true), false)
+})
+
+test('the app list route answers GET, and never hands out host paths', async () => {
+  const handler = appsRequestHandler({
+    apps: () => [
+      { id: 'vscode', name: 'VS Code', kind: 'ide', path: '/Applications/Visual Studio Code.app' },
+      { id: 'terminal', name: '终端', kind: 'terminal', path: '/System/Applications/Utilities/Terminal.app' },
+    ],
+  })
+  const res = response()
+  await handler(request({ method: 'GET' }), res)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(JSON.parse(res.body), {
+    apps: [
+      { id: 'vscode', name: 'VS Code', kind: 'ide' },
+      { id: 'terminal', name: '终端', kind: 'terminal' },
+    ],
+  })
+
+  const refused = response()
+  await handler(request({ method: 'POST', body: '{}' }), refused)
+  assert.equal(refused.statusCode, 405)
+  assert.equal(refused.headers.allow, 'GET')
+})
+
+test('the opener refuses anything but a checked path and a catalog application', async () => {
+  const apps = () => [{ id: 'vscode', name: 'VS Code', kind: 'ide', path: '/Applications/Visual Studio Code.app' }]
+  const directory = { isDirectory: () => true }
+  const file = { isDirectory: () => false }
+  const handler = openWithRequestHandler({
+    apps,
+    stat: (path) => {
+      if (path === '/work/file.ts') return file
+      if (path === '/work/src') return directory
+      throw new Error('ENOENT')
+    },
+    launch: () => true,
+  })
+
+  const get = response()
+  await handler(request({ method: 'GET' }), get)
+  assert.equal(get.statusCode, 405)
+
+  const unknown = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'rm', path: '/work/file.ts' }) }), unknown)
+  assert.equal(unknown.statusCode, 400)
+
+  const relative = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'vscode', path: 'file.ts' }) }), relative)
+  assert.equal(relative.statusCode, 400)
+
+  const missing = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'vscode', path: '/work/gone.ts' }) }), missing)
+  assert.equal(missing.statusCode, 404)
+
+  const unreadable = response()
+  await handler(request({ method: 'POST', body: 'not json' }), unreadable)
+  assert.equal(unreadable.statusCode, 400)
+})
+
+test('a file reaches only the IDEs; a directory reaches every catalog entry', async () => {
+  const launched = []
+  const apps = () => [
+    { id: 'vscode', name: 'VS Code', kind: 'ide', path: '/Applications/Visual Studio Code.app' },
+    { id: 'terminal', name: '终端', kind: 'terminal', path: '/System/Applications/Utilities/Terminal.app' },
+  ]
+  const handler = openWithRequestHandler({
+    apps,
+    stat: (path) => ({ isDirectory: () => path === '/work/src' }),
+    launch: (entry, path, action) => { launched.push([entry && entry.id, path, action]); return true },
+  })
+
+  const ide = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'vscode', path: '/work/file.ts' }) }), ide)
+  assert.equal(ide.statusCode, 200)
+  assert.deepEqual(launched, [['vscode', '/work/file.ts', 'open']])
+
+  const terminal = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'terminal', path: '/work/file.ts' }) }), terminal)
+  assert.equal(terminal.statusCode, 403)
+  assert.equal(launched.length, 1, 'a terminal must never receive a file')
+
+  const folder = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'terminal', path: '/work/src' }) }), folder)
+  assert.equal(folder.statusCode, 200)
+  assert.deepEqual(launched[1], ['terminal', '/work/src', 'open'])
+
+  const dflt = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'default', path: '/work/file.ts' }) }), dflt)
+  assert.equal(dflt.statusCode, 200)
+  assert.deepEqual(launched[2], [null, '/work/file.ts', 'open'])
+
+  const reveal = response()
+  await handler(request({ method: 'POST', body: JSON.stringify({ app: 'reveal', path: '/work/file.ts' }) }), reveal)
+  assert.equal(reveal.statusCode, 200)
+  assert.deepEqual(launched[3], [null, '/work/file.ts', 'reveal'])
+
+  const failed = openWithRequestHandler({
+    apps,
+    stat: () => ({ isDirectory: () => false }),
+    launch: () => false,
+  })
+  const res = response()
+  await failed(request({ method: 'POST', body: JSON.stringify({ app: 'vscode', path: '/work/file.ts' }) }), res)
+  assert.equal(res.statusCode, 502)
+  assert.equal(JSON.parse(res.body).code, 'open-failed')
+})
+
