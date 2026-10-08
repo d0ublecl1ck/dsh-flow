@@ -10,6 +10,9 @@
 - 回填走官方输入面 `ctx.conversation.input.for(scope).setDraft()`，读草稿读同一个 face 的 state；为此把 `@deepseek-ai/dsh-client-ui-conversation` 加进 `dsh.client.inject` 与可选 peer。
 - 单测 107 → 117（过滤口径、seq 游标、草稿保存/恢复、六条放行、翻页、会话切换重置、图片与文件回填）。
 - `scripts/verify-browser.mjs` 新增 I 段（空草稿 ↑ 回填、↑ 再走一条、↓ 回空、非空草稿不接管），并修掉两个真机门槛：启动面板「上次中断的任务」的遮罩会让所有按压恒失败，`aim()` 现在会点它的「稍后处理」清掉；`aim()` 失败时会打印命中元素与遮罩诊断。
+- 应用菜单改为读本插件自己的宿主 catalog：`GET /flow/apps`（只列本机真实安装的 `{id,name,kind}`，kind ∈ `ide`/`terminal`/`files`）与 `POST /flow/open-with`（`app` 是 catalog id、`'default'` 或 `'reveal'`；文件只接受 `kind === 'ide'`，目录接受任意 kind）。原先的 `ctx.remote.session.workspacePathApplications` / `openWorkspacePath`，以及一整段 256KB payload 预热（`FILE_EDITORS`、`MutationObserver`、`pointerover`、`WARM_LIMIT`/`WARM_DEBOUNCE_MS`/`HOVER_WARM_MS`）全部删掉；catalog 一页只问一次，失败不缓存。
+- 「已编辑 N 个文件」卡片菜单固定为「用默认应用打开」+ 本机装了的 IDE + 「在文件管理器中显示」，不再给默认编辑器标「（默认）」；行内代码菜单对文件只列 IDE、对目录列全部应用。`ctx.remote.session` 随之从 inject 移除。
+- 单测保持 123 条全绿：删掉默认标记与旧 `workspacePathApplications` 的断言，换成 kinds 过滤、catalog 一次性缓存、`/flow/open-with` 请求载荷三组断言。
 
 ## 0.7.0
 

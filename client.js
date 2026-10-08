@@ -99,15 +99,6 @@ window.__ModuleLoader__.load({
     /** How long the flash on a revealed row lasts. */
     const FLASH_MS = 900
 
-    /** How long a pointer has to rest on a changed-file row before its handlers are looked up. */
-    const HOVER_WARM_MS = 120
-
-    /** How many changed-file rows (paths) one page warms in advance. */
-    const WARM_LIMIT = 24
-
-    /** How long the DOM is allowed to settle before a warm-up sweep runs. */
-    const WARM_DEBOUNCE_MS = 250
-
     /** Retry pacing while the shell re-renders an expansion: 40ms, then +40ms each pass. */
     const RETRY_BASE_MS = 40
     const RETRY_ATTEMPTS = 8
@@ -115,14 +106,11 @@ window.__ModuleLoader__.load({
     /** Exact Host route that hands one URL to the platform opener. */
     const OPEN_ROUTE = '/flow/open-external'
 
-    /** Host route that opens one existing absolute directory in a chosen application. */
-    const OPEN_IN_APP_ROUTE = '/open-in-app/open'
+    /** Host route that lists the applications this Host has actually installed. */
+    const APPS_ROUTE = '/flow/apps'
 
-    /** Host route that lists the applications this Host can actually launch. */
-    const OPEN_IN_APP_APPS_ROUTE = '/open-in-app/apps'
-
-    /** Catalog ids that mean "the platform file manager", best first. */
-    const FILE_MANAGER_APPS = ['finder', 'explorer', 'filemanager']
+    /** Host route that opens one existing absolute path in a chosen application. */
+    const OPEN_WITH_ROUTE = '/flow/open-with'
 
     /** GET prefix serving one PNG bundle icon per catalog id. */
     const OPEN_IN_APP_ICON_ROUTE = '/open-in-app/icon'
@@ -140,36 +128,6 @@ window.__ModuleLoader__.load({
       'ghostty', 'warp', 'iterm', 'kitty', 'windowsterminal', 'gitbash', 'gnometerminal', 'konsole',
       'finder', 'explorer', 'filemanager', 'terminal',
     ])
-
-    /**
-     * Editors and IDEs a changed file may be handed to.
-     *
-     * The OS answers file associations as application paths
-     * (`/Applications/Zed.app`), so the wire name carries the bundle filename;
-     * matching and relabelling here is what turns that into `Zed`. Insiders is
-     * tested first because its path contains the stable product name, and every
-     * label is the official catalog's own product name.
-     */
-    const FILE_EDITORS = [
-      { key: 'vscodeinsiders', label: 'VS Code Insiders', pattern: /visual studio code - insiders/i },
-      { key: 'vscode', label: 'VS Code', pattern: /visual studio code/i },
-      { key: 'cursor', label: 'Cursor', pattern: /\bcursor\b/i },
-      { key: 'windsurf', label: 'Windsurf', pattern: /windsurf/i },
-      { key: 'zed', label: 'Zed', pattern: /\bzed\b/i },
-      { key: 'sublimetext', label: 'Sublime Text', pattern: /sublime text/i },
-      { key: 'xcode', label: 'Xcode', pattern: /\bxcode\b/i },
-      { key: 'androidstudio', label: 'Android Studio', pattern: /android studio/i },
-      { key: 'intellij', label: 'IntelliJ IDEA', pattern: /intellij idea/i },
-      { key: 'pycharm', label: 'PyCharm', pattern: /pycharm/i },
-      { key: 'webstorm', label: 'WebStorm', pattern: /webstorm/i },
-      { key: 'phpstorm', label: 'PhpStorm', pattern: /phpstorm/i },
-      { key: 'goland', label: 'GoLand', pattern: /\bgoland\b/i },
-      { key: 'rider', label: 'Rider', pattern: /\brider\b/i },
-      { key: 'rustrover', label: 'RustRover', pattern: /rustrover/i },
-    ]
-
-    /** A base64 `data:` icon the Host vouched for; the only `img src` this plugin renders. */
-    const APP_ICON = /^data:image\/(?:png|svg\+xml);base64,[A-Za-z0-9+/=]+$/
 
     /** The schemes the OS opener is allowed to receive. */
     const OPENABLE = new Set(['http:', 'https:', 'mailto:', 'tel:'])
@@ -847,43 +805,100 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The catalog id of this Host's file manager, from the ids it offers.
+     * The catalog id of this Host's file manager, from the applications it lists.
      *
-     * @param apps - the `apps` array `/open-in-app/apps` answered, when it did.
-     * @returns the best matching id, or null when the Host offers none.
+     * The Host's own catalog is the source: its `kind` already says which entry
+     * is the platform file manager, so this client does not carry a second,
+     * drifting list of names.
+     *
+     * @param apps - the `apps` array `GET /flow/apps` answered, when it did.
+     * @returns the id, or null when the Host lists no file manager.
      */
     function fileManagerAppOf(apps) {
       if (!Array.isArray(apps)) return null
-      return FILE_MANAGER_APPS.find((id) => apps.includes(id)) ?? null
+      const row = apps.find((app) => app !== null && typeof app === 'object' && app.kind === 'files' && typeof app.id === 'string' && app.id !== '')
+      return row === undefined ? null : row.id
     }
 
     /**
-     * One catalog id's label, in the shipped Open In dictionary's own words.
+     * The rows one application catalog shows, in the Host's own order.
      *
-     * @param id - the catalog id.
-     * @param t - the plugin's localized copy.
-     * @returns the label, or the raw id for a catalog entry this plugin predates.
-     */
-    function appLabel(id, t) {
-      return APP_LABEL_IDS.has(id) ? t('app.' + id) : id
-    }
-
-    /**
-     * The catalog rows a directory offers: every application the Host says it can
-     * launch, in the Host's own order, wearing the Host's icon route.
+     * A catalog the Host answered with `{id, name, kind}` becomes the rows the two
+     * application menus share. The label is this plugin's own localized name for
+     * an id it carries — so the English page does not show the Host's Chinese
+     * name — and the Host's own name otherwise. The icon rides the shipped route,
+     * whose unknown-id 404 the `img`'s own `onerror` absorbs.
      *
-     * @param ids - the `apps` array `/open-in-app/apps` answered, when it did.
+     * @param apps - the `apps` array `GET /flow/apps` answered, when it did.
      * @param t - the plugin's localized copy.
-     * @returns `[{key, id, label, default, icon}]`.
+     * @returns `[{key, id, label, kind, icon}]`.
      */
-    function catalogApplications(ids, t) {
-      if (!Array.isArray(ids)) return []
+    function catalogApplications(apps, t) {
+      if (!Array.isArray(apps)) return []
       const rows = []
-      for (const id of ids) {
-        if (typeof id !== 'string' || id === '') continue
-        rows.push({ key: id, id, label: appLabel(id, t), default: false, icon: OPEN_IN_APP_ICON_ROUTE + '/' + id })
+      for (const app of apps) {
+        if (app === null || typeof app !== 'object') continue
+        const id = String(app.id ?? '')
+        if (id === '') continue
+        const label = APP_LABEL_IDS.has(id)
+          ? t('app.' + id)
+          : (typeof app.name === 'string' && app.name !== '' ? app.name : id)
+        rows.push({ key: id, id, label, kind: String(app.kind ?? ''), icon: OPEN_IN_APP_ICON_ROUTE + '/' + id })
       }
       return rows
+    }
+
+    /**
+     * The application rows that may open one target, by the target's own kind.
+     *
+     * A file is only ever handed to an IDE — the Host's open route enforces the
+     * same rule; this is the half that keeps the menu honest — while a directory
+     * may go to anything the Host has installed, terminals and the file manager
+     * included.
+     *
+     * @param apps - the catalog rows.
+     * @param kind - `file` or `directory`.
+     * @returns the rows the menu may offer.
+     */
+    function applicationsForKind(apps, kind) {
+      if (!Array.isArray(apps)) return []
+      if (kind === 'directory') return apps
+      return apps.filter((app) => app !== null && typeof app === 'object' && app.kind === 'ide')
+    }
+
+    /**
+     * One page's installed-application catalog, remembered after the first
+     * successful answer.
+     *
+     * A page asks the Host once and keeps the answer: the list changes only when
+     * the user installs an application, and every menu would otherwise repeat the
+     * round trip. A failed answer is **not** remembered — the Host may be
+     * restarting, and a shared cache of an empty list would leave every menu
+     * short for the rest of the page's life.
+     *
+     * @param input.fetch - the page's fetch.
+     * @param input.route - the route answering `{apps}`.
+     * @returns `() => Promise<app[]>`.
+     */
+    function createAppsLookup({ fetch, route = APPS_ROUTE }) {
+      let cache = null
+      let pending = null
+      return () => {
+        if (cache !== null) return Promise.resolve(cache)
+        if (pending === null) {
+          pending = Promise.resolve()
+            .then(() => fetch(route, { credentials: 'same-origin' }))
+            .then((response) => (response.ok ? response.json() : null), () => null)
+            .then((payload) => (Array.isArray(payload?.apps) ? payload.apps : null), () => null)
+            .then((apps) => {
+              pending = null
+              if (apps === null) return []
+              cache = apps
+              return apps
+            })
+        }
+        return pending
+      }
     }
 
     /**
@@ -914,29 +929,6 @@ window.__ModuleLoader__.load({
       if (trimmed.startsWith('/')) return { probe: trimmed, absolute: trimmed }
       if (typeof root !== 'string' || root === '') return null
       return { probe: trimmed, absolute: root.replace(/\/+$/u, '') + '/' + trimmed }
-    }
-
-    /**
-     * The menu patch one probe answer earns, if any.
-     *
-     * Only a path the probe calls present or a directory becomes a target: a path
-     * that is not there, or an answer that proves nothing, leaves the shipped pair.
-     *
-     * @param target - `{probe, absolute}` from :func:`pathTarget`, or null.
-     * @param result - whatever the probe answered.
-     * @param apps - the rows this target offers, when the caller already has them.
-     * @returns `{path, kind, apps}`, or null to leave the menu alone.
-     */
-    function menuPatchForProbe(target, result, apps) {
-      if (target === null || typeof target !== 'object') return null
-      if (typeof target.absolute !== 'string' || target.absolute === '') return null
-      const verdict = statVerdict(result)
-      if (verdict !== 'present' && verdict !== 'directory') return null
-      return {
-        path: target.absolute,
-        kind: verdict === 'directory' ? 'directory' : 'file',
-        apps: Array.isArray(apps) ? apps : [],
-      }
     }
 
     /**
@@ -1614,8 +1606,7 @@ window.__ModuleLoader__.load({
      *
      * The card keeps the path in the hidden element its `aria-describedby`
      * points at, already resolved against the Session workspace, so this plugin
-     * never guesses one. The same read serves the press and the warm-up that
-     * runs before it.
+     * never guesses one.
      *
      * @param element - a `button[aria-describedby]` inside a changed-files card.
      * @returns the path, or null.
@@ -1655,40 +1646,57 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Hand one changed file to the Host, or ask it to show the file's location.
+     * Hand one absolute path to the Host's open-with route.
      *
-     * The Session Remote the Sidebar's own file controls use is the one route
-     * here: it re-validates the path against the current filesystem and refuses
-     * a Host without a desktop, and it answers a Result envelope rather than
-     * throwing. A refusal envelope, a rejection and an absent remote all read as
-     * the same spoken refusal, so a press never looks like it worked when it
-     * did not.
+     * `app` is a catalog id, `default` for the operating system's own default
+     * gesture, or `reveal` for the platform file manager. The Host re-validates
+     * both fields, so an id the catalog no longer lists, a relative path and a
+     * file handed to a non-IDE are all refused there rather than acted on here.
+     * A malformed request never leaves the page at all.
+     *
+     * @param input.app - the catalog id, or `default` / `reveal`.
+     * @param input.path - the absolute Host path.
+     * @param input.fetch - the page's fetch, injected so tests own the transport.
+     * @returns whether the Host acknowledged the hand-off.
+     */
+    function openWithPath(input) {
+      const app = typeof input?.app === 'string' && input.app !== '' ? input.app : null
+      const path = typeof input?.path === 'string' && input.path !== '' ? input.path : null
+      if (app === null || path === null || typeof input.fetch !== 'function') return Promise.resolve(false)
+      return Promise.resolve()
+        .then(() => input.fetch(OPEN_WITH_ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ app, path }),
+        }))
+        .then((response) => response.ok === true, () => false)
+    }
+
+    /**
+     * Open one changed file, or ask the Host to show its location.
+     *
+     * The request rides this plugin's own `POST /flow/open-with` route rather
+     * than the Session Remote: the route re-validates the path against the live
+     * filesystem, refuses an application that may not open a file, and answers a
+     * status rather than throwing. A refusal, a transport that rejects and a page
+     * that never had one all read as the same spoken refusal, so a press never
+     * looks like it worked when it did not.
      *
      * @param input.path - the absolute Host path the card recorded.
-     * @param input.action - `open` for the default application, `reveal` for the file manager.
-     * @param input.application - a handler id from the file association query, when one was chosen.
-     * @param input.remote - the plugin's `ctx.remote`, when the connection exposes one.
+     * @param input.app - a catalog id, or `default` / `reveal`.
+     * @param input.fetch - the page's fetch.
      * @param input.notify - raise a notice.
      * @param input.t - the plugin's localized copy.
      * @returns whether the Host acknowledged the hand-off.
      */
     function openChangedFile(input) {
-      const action = input.action === 'reveal' ? 'reveal' : 'open'
-      const failureKey = input.failureKey ?? (action === 'open' ? 'changesFile.failed' : 'changesFile.revealFailed')
-      const failed = () => {
+      const failureKey = input.app === 'reveal' ? 'changesFile.revealFailed' : 'changesFile.failed'
+      return openWithPath(input).then((opened) => {
+        if (opened === true) return true
         input.notify(input.t(failureKey), 'warning')
         return false
-      }
-      const session = input.remote?.session
-      const open = session?.openWorkspacePath
-      if (typeof open !== 'function') return Promise.resolve(failed())
-      const chosen = typeof input.application === 'string' && input.application !== ''
-      const request = action !== 'open'
-        ? { path: input.path, action }
-        : (chosen ? { path: input.path, application: input.application } : { path: input.path })
-      return Promise.resolve()
-        .then(() => open.call(session, request))
-        .then((result) => (result?.ok === true ? true : failed()), () => failed())
+      })
     }
 
     /**
@@ -1732,7 +1740,7 @@ window.__ModuleLoader__.load({
           return seq
         },
         /**
-         * Patch the menu one association query was measured for.
+         * Patch the menu one catalog answer was measured for.
          *
          * The press that opens a menu and the round trip that fills it are
          * separated by many frames: another menu can open, and this one can
@@ -1779,68 +1787,13 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The editors and IDEs among one file's OS handlers, in the OS's own order.
-     *
-     * The query answers every registered handler — browsers, file-sync clients,
-     * archive tools — and this is the filter that leaves the ones a person would
-     * actually edit code in. One row per product: a second copy of an app that is
-     * already listed does not repeat. A label is the official catalog name, not
-     * the OS bundle filename.
-     *
-     * @param apps - the `workspacePathApplications` answer, when it arrived.
-     * @returns `[{key, label, id, default, icon}]`, in the OS's order.
-     */
-    function editorApplications(apps) {
-      if (!Array.isArray(apps)) return []
-      const rows = []
-      const seen = new Set()
-      for (const app of apps) {
-        if (app === null || typeof app !== 'object') continue
-        const id = String(app.id ?? '')
-        if (id === '') continue
-        const text = id + ' ' + String(app.name ?? '')
-        const editor = FILE_EDITORS.find((entry) => entry.pattern.test(text))
-        if (editor === undefined || seen.has(editor.key)) continue
-        seen.add(editor.key)
-        rows.push({
-          key: editor.key,
-          label: editor.label,
-          id,
-          default: app.default === true,
-          icon: typeof app.icon === 'string' && APP_ICON.test(app.icon) ? app.icon : null,
-        })
-      }
-      return rows
-    }
-
-    /**
-     * The text one changed-file menu row wears.
-     *
-     * An application row names the application — the OS default carries the
-     * dictionary's default marker, whose placeholder is `{app}`, not `{name}`:
-     * passing the wrong one leaves the literal `{app}（默认）` on screen, which
-     * is exactly what shipped once. A helper so the substitution is pinned by a
-     * test instead of only by looking at the menu.
-     *
-     * @param row - one row from :func:`changesFileRows`.
-     * @param t - the plugin's localized copy.
-     * @returns the label.
-     */
-    function changesFileRowLabel(row, t) {
-      if (row.kind !== 'app') return t(row.labelKey)
-      if (row.app.default !== true) return row.app.label
-      return t('changesFile.appDefault', { app: row.app.label })
-    }
-
-    /**
      * The rows one changed-file menu shows.
      *
      * The default action and the file-manager reveal are always there, so the
-     * menu that opens before the association query answers is never empty. An
-     * editor the OS itself marks default replaces the generic row — it names the
-     * application the file would open in, which is strictly more informative —
-     * while a default that is not an editor (a browser owning `.html`, say)
-     * keeps the generic row so that action stays reachable.
+     * menu that opens before the catalog lands is never empty. The application
+     * rows are the IDEs the Host has installed — the caller filters the catalog
+     * by kind before filling the seat — and they sit between the two anchors, so
+     * the first row never moves under the pointer as they arrive.
      *
      * @param menu - the changed-file store's snapshot, or null.
      * @returns `[{key, kind, labelKey?, app?}]`.
@@ -1848,10 +1801,7 @@ window.__ModuleLoader__.load({
     function changesFileRows(menu) {
       if (menu === null || typeof menu !== 'object') return []
       const apps = Array.isArray(menu.apps) ? menu.apps : []
-      const rows = []
-      if (!apps.some((app) => app.default === true)) {
-        rows.push({ key: 'open', kind: 'open', labelKey: 'changesFile.open' })
-      }
+      const rows = [{ key: 'open', kind: 'open', labelKey: 'changesFile.open' }]
       for (const app of apps) rows.push({ key: 'app:' + app.id, kind: 'app', app })
       rows.push({ key: 'reveal', kind: 'reveal', labelKey: 'changesFile.reveal' })
       return rows
@@ -2132,7 +2082,6 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'codeMenu.open': '打开',
       'codeMenu.copy': '复制',
       'codeMenu.openFailed': '打开失败',
-      'codeMenu.appDefault': '{name}（默认）',
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
       'app.cursor': 'Cursor',
@@ -2170,7 +2119,6 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'app.filemanager': '文件管理器',
       'app.terminal': '终端',
       'changesFile.open': '用默认应用打开',
-      'changesFile.appDefault': '{app}（默认）',
       'changesFile.reveal': '在文件管理器中显示',
       'changesFile.failed': '无法用默认应用打开这个文件',
       'changesFile.revealFailed': '无法在文件管理器中显示这个文件',
@@ -2185,7 +2133,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'section.codeMenu.title': '行内代码右键菜单',
       'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：复制把代码原文写进剪贴板；打开对 ~/… 家目录路径会先展开、再由插件在侧栏打开（壳自己解析不了），其余仍走壳自己的链路。单击一条指向不存在路径的行内代码会换成一条非阻塞提示；关闭后右键与这条接管都不注册。',
       'section.changesFile.title': '改动文件右键菜单',
-      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开 / 在文件管理器中显示」；系统为该文件注册的编辑器与 IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等）会作为额外行出现，带图标，当前默认那个标「（默认）」。都交给宿主自己的会话 Remote 执行，关闭后不注册这个右键菜单。',
+      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开」；下面是你装的 IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标），最后是「在文件管理器中显示」。都交给本插件的宿主路由 POST /flow/open-with 执行，关闭后不注册这个右键菜单。',
       'section.sendKey.title': '⌘+Enter 发送',
       'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
       'history.file': '[附件：{name}]',
@@ -2209,7 +2157,6 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'codeMenu.open': 'Open',
       'codeMenu.copy': 'Copy',
       'codeMenu.openFailed': 'Could not open',
-      'codeMenu.appDefault': '{name} (default)',
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
       'app.cursor': 'Cursor',
@@ -2247,7 +2194,6 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'app.filemanager': 'Files',
       'app.terminal': 'Terminal',
       'changesFile.open': 'Open in Default App',
-      'changesFile.appDefault': '{app} (default)',
       'changesFile.reveal': 'Show in File Manager',
       'changesFile.failed': 'Could not open this file in the default application',
       'changesFile.revealFailed': 'Could not show this file in the file manager',
@@ -2262,7 +2208,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       'section.codeMenu.title': 'Inline code right-click menu',
       'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Copy puts the code’s text on the clipboard, and Open expands a ~/… home path and opens it in the Sidebar itself — the shell cannot resolve that one; everything else keeps the shell’s own path. Left-clicking code whose path does not exist becomes a non-blocking notice instead; switching this off registers neither.',
       'section.changesFile.title': 'Changed-file right-click menu',
-      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App / Show in File Manager”, and the editors and IDEs the OS registered for that file (VS Code, Zed, Xcode, IntelliJ IDEA…) appear as extra rows with their icons, the current default marked “(default)”. All of them run through the Host’s own Session Remote; switching this off registers no such menu.',
+      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App”, then the IDEs you have installed (VS Code, Zed, Xcode, IntelliJ IDEA…, with their icons), and finally “Show in File Manager”. All of them run through this plugin’s own POST /flow/open-with host route; switching this off registers no such menu.',
       'section.sendKey.title': '⌘+Enter to send',
       'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
       'history.file': '[attachment: {name}]',
@@ -2524,6 +2470,28 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
     }
 
     /**
+     * The icon element one application row wears.
+     *
+     * The icon route 404s for an id it does not know, so the image hides itself
+     * rather than leaving a broken-image glyph in the menu.
+     *
+     * @param app - one catalog row.
+     * @returns the `img` element, or undefined for a row that carries no icon.
+     */
+    function appIcon(app) {
+      if (typeof app?.icon !== 'string' || app.icon === '') return undefined
+      return h('img', {
+        className: 'flow-app-icon',
+        src: app.icon,
+        alt: '',
+        onError: (event) => {
+          const node = event?.currentTarget
+          if (node?.style) node.style.display = 'none'
+        },
+      })
+    }
+
+    /**
      * The inline-code menu itself: 「打开」 and 「复制」, floating at the press.
      *
      * It is the shell's own `Menu` rather than a surface built here, so the
@@ -2558,7 +2526,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       const select = (row) => {
         // Closing first keeps the menu's own dismissal out of the way of
         // whatever this is about to open.
-        const { element, text, kind, path } = menu
+        const { element, text, path } = menu
         store.close()
         if (row.kind === 'copy') {
           copyInlineCode({ text, write: props.write, notify: props.notify, t })
@@ -2569,7 +2537,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           return
         }
         const refuse = () => { props.notify(t('codeMenu.openFailed'), 'warning') }
-        Promise.resolve(props.openCodeApp({ kind, path, application: row.app.id })).then((opened) => {
+        Promise.resolve(props.openCodeApp({ app: row.app.id, path })).then((opened) => {
           if (opened !== true) refuse()
         }, refuse)
       }
@@ -2588,16 +2556,11 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           MenuItemButton,
           {
             key: row.key,
-            // An application row wears the icon its own source handed over: the
-            // OS's for a file, the Host's icon route for a catalog directory.
-            icon: row.kind === 'app' && row.app.icon !== null
-              ? h('img', { className: 'flow-app-icon', src: row.app.icon, alt: '' })
-              : undefined,
+            // An application row wears the Host's icon route for its catalog id.
+            icon: row.kind === 'app' ? appIcon(row.app) : undefined,
             onSelect: () => { select(row) },
           },
-          row.kind === 'app'
-            ? (row.app.default === true ? t('codeMenu.appDefault', { name: row.app.label }) : row.app.label)
-            : t(row.labelKey),
+          row.kind === 'app' ? row.app.label : t(row.labelKey),
         )),
       )
     }
@@ -2640,15 +2603,15 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       if (!enabled || menu === null) return null
 
       const choose = (row) => {
-        const { path, element } = menu
+        const { path } = menu
         // Closing first keeps the menu's own dismissal out of the way of
         // whatever this is about to open.
         store.close()
         if (row.kind === 'app') {
-          props.openFile({ path, element, action: 'open', application: row.app.id })
+          props.openFile({ path, app: row.app.id })
           return
         }
-        props.openFile({ path, element, action: row.kind === 'reveal' ? 'reveal' : 'open' })
+        props.openFile({ path, app: row.kind === 'reveal' ? 'reveal' : 'default' })
       }
 
       return h(
@@ -2665,14 +2628,12 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           MenuItemButton,
           {
             key: row.key,
-            // An application row wears the icon the OS handed over for it; the
-            // generic rows have none, which is what the shipped menu items do.
-            icon: row.kind === 'app' && row.app.icon !== null
-              ? h('img', { className: 'flow-app-icon', src: row.app.icon, alt: '' })
-              : undefined,
+            // An application row wears the Host's icon route; the generic rows
+            // have none, which is what the shipped menu items do.
+            icon: row.kind === 'app' ? appIcon(row.app) : undefined,
             onSelect: () => { choose(row) },
           },
-          changesFileRowLabel(row, t),
+          row.kind === 'app' ? row.app.label : t(row.labelKey),
         )),
       )
     }
@@ -2819,9 +2780,10 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
       // Every `ctx.<service>` this file touches has to be declared here: cordis does
       // not hang a namespace on the context for a plugin that never asked. Omitting
       // them is silent — `ctx.remote.workspaceFiles` answers `undefined` (every probe
-      // says "unknown" and hands the press back to the shell), `ctx.sidebarRight` is
-      // missing (the press is claimed but nothing opens), and `ctx.remote.session` is
-      // missing (every changed-file hand-off answers "could not open").
+      // says "unknown" and hands the press back to the shell) and `ctx.sidebarRight`
+      // is missing (the press is claimed but nothing opens). Opening a path does not
+      // need `ctx.remote.session`: that went through the Session Remote before, and
+      // now rides this plugin's own `POST /flow/open-with` route instead.
       inject: [
         'slots',
         'locale',
@@ -2832,7 +2794,6 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         'shortcuts',
         'remote',
         'remote.workspaceFiles',
-        'remote.session',
         'sidebarRight',
       ],
       apply(ctx) {
@@ -2892,16 +2853,6 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
             return null
           }
         }
-        // The Remote service the page's connection exposes, read lazily: a
-        // deployment without one is a refusal the caller speaks, never a load
-        // error.
-        const remoteOf = () => {
-          try {
-            return ctx.remote
-          } catch {
-            return undefined
-          }
-        }
         // The plugin's own open for a path the shell cannot resolve: one
         // `dsh-resource://file/…` address handed to the Sidebar controller. Every
         // step may be missing — no Session, no controller, a controller that
@@ -2926,104 +2877,33 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           return true
         }
         // A `~/…` directory cannot use the Sidebar preview, which shows files
-        // only. The Host already serves one route that opens an existing absolute
-        // directory in a resolved application, so the platform file manager and
-        // the editors are reused instead of spawning an opener here. The
-        // application list is asked once and remembered; any failure answers
-        // "nothing was opened".
-        let appsCache
-        let appsLookup = null
-        const resolveApps = () => {
-          if (appsCache !== undefined) return Promise.resolve(appsCache)
-          if (appsLookup === null) {
-            appsLookup = Promise.resolve()
-              .then(() => fetch(OPEN_IN_APP_APPS_ROUTE))
-              .then((response) => (response.ok ? response.json() : null), () => null)
-              .then((payload) => (Array.isArray(payload?.apps) ? payload.apps : []), () => [])
-          }
-          return appsLookup.then((apps) => { appsCache = apps; return apps })
-        }
-        const openInApp = (app, absolute) => {
-          if (typeof app !== 'string' || app === '') return Promise.resolve(false)
-          if (typeof absolute !== 'string' || absolute === '') return Promise.resolve(false)
-          return Promise.resolve()
-            .then(() => fetch(OPEN_IN_APP_ROUTE, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ app, path: absolute }),
-            }))
-            .then((response) => response.ok === true, () => false)
-        }
+        // only, so the platform file manager opens it through the same open-with
+        // route the menus use. The Host's installed-application catalog is asked
+        // once per page and remembered; any failure answers "nothing was opened".
+        const resolveApps = createAppsLookup({ fetch: (route, init) => fetch(route, init) })
         const openInFileManager = (absolute) => resolveApps()
-          .then((apps) => openInApp(fileManagerAppOf(apps), absolute), () => false)
-        // One application row's hand-off: a directory goes through the catalog
-        // route, a file through the Session Remote that owns that file's
-        // registered handlers. Either answer is a Result, never a throw.
+          .then((apps) => {
+            const app = fileManagerAppOf(apps)
+            return app === null ? false : openWithPath({ app, path: absolute, fetch: (route, init) => fetch(route, init) })
+          }, () => false)
+        // One application row's hand-off: every app, file or directory, rides the
+        // plugin's own open-with route, which re-validates the pair. The answer is
+        // a boolean, never a throw.
         const openCodeApp = (request) => {
           if (request === null || typeof request !== 'object') return Promise.resolve(false)
-          if (request.kind === 'directory') return openInApp(request.application, request.path)
-          return openChangedFile({
-            remote: ctx.remote,
-            path: request.path,
-            application: request.application,
-            failureKey: 'codeMenu.openFailed',
-            notify,
-            t,
-          })
+          return openWithPath({ app: request.app, path: request.path, fetch: (route, init) => fetch(route, init) })
         }
-        // The file's own registered handlers, one query per path. The answer
-        // carries icons, so it is not re-asked on every right-click; a failed
-        // answer is not cached, because a Host that is briefly away would
-        // otherwise leave the menu short for the rest of the page's life.
-        const fileAppsCache = new Map()
-        const readChangedFileEditors = (path) => {
-          const cached = fileAppsCache.get(path)
-          if (cached !== undefined) return cached
-          const query = ctx.remote?.session?.workspacePathApplications
-          if (typeof query !== 'function') return Promise.resolve(null)
-          const answer = Promise.resolve()
-            .then(() => query.call(ctx.remote.session, { path }))
-            .then(
-              // Only the filtered rows are kept: the raw answer carries an icon
-              // for every registered handler (256 KB for one measured file), and
-              // holding that per path would grow the page without bound.
-              (result) => (result?.ok === true && Array.isArray(result.value) ? editorApplications(result.value) : null),
-              () => null,
-            )
-            .then((rows) => {
-              if (rows === null) fileAppsCache.delete(path)
-              return rows
-            })
-          fileAppsCache.set(path, answer)
-          return answer
-        }
-        // The payload is per file and expensive, so it is fetched while the card
-        // is being read rather than after the press. Every rendered row of every
-        // changed-files card on screen is warmed, bounded to WARM_LIMIT paths per
-        // page: a card can list hundreds of files, while the collapsed card
-        // renders four, and the rest warm when they are expanded into the DOM.
-        const warmRenderedChangedFiles = (root) => {
-          if (root === null || root === undefined || typeof root.querySelectorAll !== 'function') return
-          for (const card of root.querySelectorAll(CHANGES_CARD)) {
-            for (const row of card.querySelectorAll('button[aria-describedby]')) {
-              if (fileAppsCache.size >= WARM_LIMIT) return
-              const path = describedFilePath(row)
-              if (path !== null && !fileAppsCache.has(path)) readChangedFileEditors(path)
-            }
-          }
-        }
-        // The menu opens on the press and fills in when the answer lands; the
+        // The menu opens on the press and fills in when the catalog lands; the
         // sequence number keeps a late answer off a menu it does not belong to.
-        const classifyChangedFileMenu = (target, path) => {
-          readChangedFileEditors(path).then((rows) => {
-            if (rows === null) return
+        const classifyChangedFileMenu = (target) => {
+          resolveApps().then((apps) => {
+            const rows = applicationsForKind(catalogApplications(apps, t), 'file')
             changesMenu.mark(target, { apps: rows })
           }, () => {})
         }
         // The context menu labels itself from a probe. Every path-looking code
-        // gets the copy-first menu: a directory lists the Host's catalog (the same
-        // list the shipped Open In button shows), a file lists the editors the OS
-        // registered for that exact file, and a path that is not there stays
+        // gets the copy-first menu: a directory lists every application the Host
+        // has installed, a file lists the IDEs, and a path that is not there stays
         // copy-only. The sequence number keeps a late answer off a menu it does
         // not belong to.
         const classifyCodeMenu = (target, hit) => {
@@ -3042,18 +2922,11 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           const probe = plan.kind === 'home' ? plan.probe : hit.text
           readInlineCodeStat(probe).then((result) => {
             const verdict = statVerdict(result)
-            if (verdict === 'present') {
-              return readFileApplications(resolved.absolute).then((apps) => {
-                if (apps === null) return
-                codeMenu.mark(target, { path: resolved.absolute, kind: 'file', apps: editorApplications(apps) })
-              })
-            }
-            if (verdict === 'directory') {
-              return resolveApps().then((ids) => {
-                codeMenu.mark(target, { path: resolved.absolute, kind: 'directory', apps: catalogApplications(ids, t) })
-              })
-            }
-            return undefined
+            if (verdict !== 'present' && verdict !== 'directory') return undefined
+            const kind = verdict === 'directory' ? 'directory' : 'file'
+            return resolveApps().then((apps) => {
+              codeMenu.mark(target, { path: resolved.absolute, apps: applicationsForKind(catalogApplications(apps, t), kind) })
+            })
           }, () => {})
         }
         const readInlineCodeStat = (path) => {
@@ -3133,42 +3006,17 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           }
         }, 'flow: inline code menu')
         // The changed-file menu: the same shape as the inline-code menu — one
-        // capture-phase listener, present only while the preference is on.
+        // capture-phase listener, present only while the preference is on. The
+        // catalog it lists is a single shared round trip, so the menu opens on
+        // the press and fills its application rows when the answer lands.
         const changesMenu = createChangesMenuStore()
         ctx.effect(() => {
           if (typeof document === 'undefined') return undefined
           let detach = null
-          let hoverTimer = null
-          let hoverPath = null
-          let warmTimer = null
-          let observer = null
-          const stopHover = () => {
-            if (hoverTimer !== null) clearTimeout(hoverTimer)
-            hoverTimer = null
-            hoverPath = null
-          }
-          const stopWarm = () => {
-            if (warmTimer !== null) clearTimeout(warmTimer)
-            warmTimer = null
-          }
-          const stopObserver = () => {
-            observer?.disconnect()
-            observer = null
-          }
-          const scheduleWarm = () => {
-            if (warmTimer !== null) return
-            warmTimer = setTimeout(() => {
-              warmTimer = null
-              warmRenderedChangedFiles(document)
-            }, WARM_DEBOUNCE_MS)
-          }
           const sync = () => {
             if (!readChangesFileOpen(config)) {
               // Turning the feature off also retires a menu it left open.
               changesMenu.close()
-              stopHover()
-              stopWarm()
-              stopObserver()
               detach?.()
               detach = null
               return
@@ -3176,49 +3024,18 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
             if (detach !== null) return
             const onContextMenu = (event) => {
               handleChangesContextMenu(event, {
-                open: (hit) => { classifyChangedFileMenu(changesMenu.open(hit), hit.path) },
+                open: (hit) => { classifyChangedFileMenu(changesMenu.open(hit)) },
               })
             }
-            // The association query ships every registered handler together with
-            // a rendered icon — 256 KB for one measured file — so a press that
-            // starts it waits for the Host. A pointer that rests on a row warms
-            // exactly that query, and the per-path cache makes the press itself
-            // instant. Sweeping the mouse across a card never fires a burst:
-            // only the row the pointer comes to rest on is warmed.
-            const onPointerOver = (event) => {
-              const hit = changedFileTarget(event)
-              stopHover()
-              if (hit === null) return
-              hoverPath = hit.path
-              hoverTimer = setTimeout(() => {
-                hoverTimer = null
-                if (hoverPath !== null) readChangedFileEditors(hoverPath)
-              }, HOVER_WARM_MS)
-            }
             document.addEventListener('contextmenu', onContextMenu, true)
-            document.addEventListener('pointerover', onPointerOver, true)
-            // Warm what is already on screen, then follow the DOM: a card appears
-            // when its turn is reached, and its remaining rows appear when it is
-            // expanded. The observer only schedules a sweep, and the sweep runs
-            // once the page has settled.
-            warmRenderedChangedFiles(document)
-            if (typeof MutationObserver === 'function') {
-              observer = new MutationObserver(scheduleWarm)
-              observer.observe(document.body, { childList: true, subtree: true })
-            }
             detach = () => {
               document.removeEventListener('contextmenu', onContextMenu, true)
-              document.removeEventListener('pointerover', onPointerOver, true)
-              stopObserver()
             }
           }
           sync()
           const unsubscribe = config.subscribe(sync)
           return () => {
             if (typeof unsubscribe === 'function') unsubscribe()
-            stopHover()
-            stopWarm()
-            stopObserver()
             detach?.()
           }
         }, 'flow: changed files menu')
@@ -3463,9 +3280,8 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
             openFile: (hit) => {
               openChangedFile({
                 path: hit.path,
-                action: hit.action,
-                application: hit.application,
-                remote: remoteOf(),
+                app: hit.app,
+                fetch: (route, init) => fetch(route, init),
                 notify,
                 t,
               })
@@ -3492,6 +3308,8 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         SECTION_ORDER,
         MENU_ORDER,
         OPEN_ROUTE,
+        APPS_ROUTE,
+        OPEN_WITH_ROUTE,
         LOCATE_COMMAND,
         LOCATE_DEFAULTS,
         COPY_COMMAND,
@@ -3530,10 +3348,10 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         handleChangesContextMenu,
         createChangesMenuStore,
         readChangesFileOpen,
-        editorApplications,
+        applicationsForKind,
         changesFileRows,
-        changesFileRowLabel,
         openChangedFile,
+        openWithPath,
         isPlainLeftPress,
         codeOpenTarget,
         shellWiredControl,
@@ -3544,12 +3362,11 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         openInlineCodeHit,
         statVerdict,
         fileManagerAppOf,
-        appLabel,
         catalogApplications,
+        createAppsLookup,
         pathTarget,
         sessionCwd,
         codeMenuRows,
-        menuPatchForProbe,
         handleInlineCodeClick,
         COMPOSER_INPUT,
         TRIGGER_MENU_PICK,
