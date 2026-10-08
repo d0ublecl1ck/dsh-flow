@@ -10,6 +10,10 @@
 - 修一个只在真机暴露的接线错误：插件没有 inject `remote` / `remote.workspaceFiles` / `sidebarRight`。少前两个时 `ctx.remote.workspaceFiles.stat` 是 `undefined`、探测恒 unknown、每次按压静默 fail-open 退回壳（壳用原文打开后报「文件不存在」）；少 `sidebarRight` 时按压被认领却什么都不打开。
 - `~/…` 探测为**目录**时改走宿主既有的 `POST /open-in-app/open`（`{app, path}`，app 按 `finder` / `explorer` / `filemanager` 取本机第一个可用的）在平台文件管理器打开：侧栏预览只显示文件，退回壳对目录只会得到「path open failed」。
 - 测试从 74 条增至 88 条（+14：展开边界、地址语法、无 button 与壳接线两种 `~/…` 命中、missing/unknown/无家目录的 fail open、目录判定与文件管理器打开、菜单接线、inject 契约）。
+- 「已编辑 N 个文件」卡片（官方 deliverables）右键新增「用默认应用打开 / 在文件管理器中显示」，走宿主 `ctx.remote.session.openWorkspacePath`，不自己 spawn；由「心流」页第六个开关（`flow.changesFileOpen`，默认开）控制。该功能由 `360b5e1` 落地，CHANGELOG 当时漏记，本次补上。
+- 单测 88 → 96（改动文件菜单）。
+- `~/…` 目录的行内代码右键菜单改成目录专用项：「在文件管理器中打开 / 用 VS Code 打开 / 用 Zed 打开 / 复制」；后三项只在本机装了对应应用时出现。菜单先按默认两项弹出，探测确认为目录后切换；晚到的探测结果靠 store 的 seq 守卫不会改到别的菜单。
+- 单测 96 → 99（菜单行模型、探测 patch、seq 守卫）。
 
 ## 0.6.0
 

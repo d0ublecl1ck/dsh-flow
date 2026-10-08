@@ -115,6 +115,12 @@ window.__ModuleLoader__.load({
     /** Catalog ids that mean "the platform file manager", best first. */
     const FILE_MANAGER_APPS = ['finder', 'explorer', 'filemanager']
 
+    /** Editors a `~/…` directory offers, in menu order, with their display names. */
+    const EDITOR_APPS = [
+      { id: 'vscode', name: 'VS Code' },
+      { id: 'zed', name: 'Zed' },
+    ]
+
     /** The schemes the OS opener is allowed to receive. */
     const OPENABLE = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
@@ -805,6 +811,51 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The rows one open inline-code menu shows.
+     *
+     * The shipped pair until a probe proves the code names a directory; then the
+     * directory set, in which an application row exists only when the Host really
+     * offers that application — a row that can only fail is worse than no row.
+     *
+     * @param menu - the code-menu store's snapshot, or null.
+     * @returns `[{key, kind, app?, labelKey, name?}]`.
+     */
+    function codeMenuRows(menu) {
+      if (menu === null || typeof menu !== 'object') return []
+      if (menu.directory !== true) return [{ key: 'open', kind: 'open' }, { key: 'copy', kind: 'copy' }]
+      const apps = Array.isArray(menu.apps) ? menu.apps : []
+      const rows = []
+      const fileManager = fileManagerAppOf(apps)
+      if (fileManager !== null) rows.push({ key: 'file-manager', kind: 'app', app: fileManager, labelKey: 'codeMenu.openInFileManager' })
+      for (const editor of EDITOR_APPS) {
+        if (apps.includes(editor.id)) rows.push({ key: editor.id, kind: 'app', app: editor.id, labelKey: 'codeMenu.openInApp', name: editor.name })
+      }
+      rows.push({ key: 'copy', kind: 'copy' })
+      return rows
+    }
+
+    /**
+     * The menu patch one probe answer earns, if any.
+     *
+     * Only a `~/…` code the probe calls a directory switches the menu; a file, a
+     * path that is not there, a home this client does not know, or any other code
+     * leaves the shipped pair in place.
+     *
+     * @param text - the code's exact text.
+     * @param home - the Host home, or a getter for it.
+     * @param result - whatever the probe answered for the expanded path.
+     * @param apps - the Host's launchable application ids, when known.
+     * @returns `{directory, absolute, apps}`, or null to leave the menu alone.
+     */
+    function menuPatchForProbe(text, home, result, apps) {
+      if (!isTildePath(text)) return null
+      const absolute = expandHomePath(text, typeof home === 'function' ? home() : home)
+      if (absolute === null) return null
+      if (statVerdict(result) !== 'directory') return null
+      return { directory: true, absolute, apps: Array.isArray(apps) ? apps : [] }
+    }
+
+    /**
      * What one openable inline `code` would do, decided without a round trip.
      *
      * A `~/…` code is this plugin's own case **even when the shell wired a
@@ -1068,6 +1119,25 @@ window.__ModuleLoader__.load({
           seq += 1
           snapshot = { seq, x: input.x, y: input.y, text: input.text, element: input.element }
           emit()
+          return seq
+        },
+        /**
+         * Patch the menu one probe was measured for.
+         *
+         * The press that opened a menu and the round trip that classifies it are
+         * separated by many frames: another menu can open, and this one can close,
+         * before the answer lands. The sequence number is what keeps a late answer
+         * from re-labelling a menu it does not belong to.
+         *
+         * @param target - the value `open` returned for that menu.
+         * @param patch - fields to merge into the snapshot.
+         * @returns whether the patch landed.
+         */
+        mark: (target, patch) => {
+          if (snapshot === null || snapshot.seq !== target) return false
+          snapshot = { ...snapshot, ...patch }
+          emit()
+          return true
         },
         /** Retire the menu on screen; an empty seat is not a change. */
         close: () => {
@@ -1550,6 +1620,9 @@ window.__ModuleLoader__.load({
       'copy.noSession': '当前没有打开的会话',
       'codeMenu.open': '打开',
       'codeMenu.copy': '复制',
+      'codeMenu.openInFileManager': '在文件管理器中打开',
+      'codeMenu.openInApp': '用 {name} 打开',
+      'codeMenu.openFailed': '打开失败',
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
       'changesFile.open': '用默认应用打开',
@@ -1587,6 +1660,9 @@ window.__ModuleLoader__.load({
       'copy.noSession': 'No Session is open',
       'codeMenu.open': 'Open',
       'codeMenu.copy': 'Copy',
+      'codeMenu.openInFileManager': 'Open in file manager',
+      'codeMenu.openInApp': 'Open in {name}',
+      'codeMenu.openFailed': 'Could not open',
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
       'changesFile.open': 'Open in Default App',
@@ -1894,6 +1970,25 @@ window.__ModuleLoader__.load({
 
       if (!enabled || menu === null) return null
 
+      const select = (row) => {
+        // Closing first keeps the menu's own dismissal out of the way of
+        // whatever this is about to open.
+        const { element, text, absolute } = menu
+        store.close()
+        if (row.kind === 'copy') {
+          copyInlineCode({ text, write: props.write, notify: props.notify, t })
+          return
+        }
+        if (row.kind === 'open') {
+          props.openCode({ element, text })
+          return
+        }
+        const refuse = () => { props.notify(t('codeMenu.openFailed'), 'warning') }
+        Promise.resolve(props.openApp(row.app, absolute)).then((opened) => {
+          if (opened !== true) refuse()
+        }, refuse)
+      }
+
       return h(
         Menu,
         {
@@ -1904,32 +1999,11 @@ window.__ModuleLoader__.load({
           getAnchorRect: anchorRect,
           onClose: () => { store.close() },
         },
-        h(
+        codeMenuRows(menu).map((row) => h(
           MenuItemButton,
-          {
-            key: 'open',
-            onSelect: () => {
-              // Closing first keeps the menu's own dismissal out of the way of
-              // whatever this is about to open.
-              const { element, text } = menu
-              store.close()
-              props.openCode({ element, text })
-            },
-          },
-          t('codeMenu.open'),
-        ),
-        h(
-          MenuItemButton,
-          {
-            key: 'copy',
-            onSelect: () => {
-              const { text } = menu
-              store.close()
-              copyInlineCode({ text, write: props.write, notify: props.notify, t })
-            },
-          },
-          t('codeMenu.copy'),
-        ),
+          { key: row.key, onSelect: () => { select(row) } },
+          row.name === undefined ? t(row.labelKey) : t(row.labelKey, { name: row.name }),
+        )),
       )
     }
 
@@ -2241,23 +2315,25 @@ window.__ModuleLoader__.load({
         }
         // A `~/…` directory cannot use the Sidebar preview, which shows files
         // only. The Host already serves one route that opens an existing absolute
-        // directory in a resolved application, so the platform file manager is
-        // reused instead of spawning a second opener here. The application list is
-        // asked once and remembered; any failure answers "nothing was opened".
-        let fileManagerApp
-        let fileManagerLookup = null
-        const resolveFileManager = () => {
-          if (fileManagerApp !== undefined) return Promise.resolve(fileManagerApp)
-          if (fileManagerLookup === null) {
-            fileManagerLookup = Promise.resolve()
+        // directory in a resolved application, so the platform file manager and
+        // the editors are reused instead of spawning an opener here. The
+        // application list is asked once and remembered; any failure answers
+        // "nothing was opened".
+        let appsCache
+        let appsLookup = null
+        const resolveApps = () => {
+          if (appsCache !== undefined) return Promise.resolve(appsCache)
+          if (appsLookup === null) {
+            appsLookup = Promise.resolve()
               .then(() => fetch(OPEN_IN_APP_APPS_ROUTE))
               .then((response) => (response.ok ? response.json() : null), () => null)
-              .then((payload) => fileManagerAppOf(payload?.apps), () => null)
+              .then((payload) => (Array.isArray(payload?.apps) ? payload.apps : []), () => [])
           }
-          return fileManagerLookup.then((id) => { fileManagerApp = id; return id })
+          return appsLookup.then((apps) => { appsCache = apps; return apps })
         }
-        const openInFileManager = (absolute) => resolveFileManager().then((app) => {
-          if (typeof app !== 'string') return false
+        const openInApp = (app, absolute) => {
+          if (typeof app !== 'string' || app === '') return Promise.resolve(false)
+          if (typeof absolute !== 'string' || absolute === '') return Promise.resolve(false)
           return Promise.resolve()
             .then(() => fetch(OPEN_IN_APP_ROUTE, {
               method: 'POST',
@@ -2265,7 +2341,21 @@ window.__ModuleLoader__.load({
               body: JSON.stringify({ app, path: absolute }),
             }))
             .then((response) => response.ok === true, () => false)
-        }, () => false)
+        }
+        const openInFileManager = (absolute) => resolveApps()
+          .then((apps) => openInApp(fileManagerAppOf(apps), absolute), () => false)
+        // The context menu labels itself from a probe: a `~/…` directory swaps the
+        // shipped pair for the directory set. The sequence number keeps a late
+        // answer from re-labelling a menu that has already been replaced.
+        const classifyDirectoryMenu = (target, text) => {
+          if (!isTildePath(text)) return
+          const absolute = expandHomePath(text, hostHome())
+          if (absolute === null) return
+          Promise.all([readInlineCodeStat(absolute), resolveApps()]).then(([result, apps]) => {
+            const patch = menuPatchForProbe(text, hostHome(), result, apps)
+            if (patch !== null) codeMenu.mark(target, patch)
+          }, () => {})
+        }
         const readInlineCodeStat = (path) => {
           const sessionId = currentSessionId(sessions.getSnapshot())
           const stat = ctx.remote?.workspaceFiles?.stat
@@ -2301,7 +2391,9 @@ window.__ModuleLoader__.load({
             }
             if (detach !== null) return
             const onContextMenu = (event) => {
-              handleCodeContextMenu(event, { open: (hit) => { codeMenu.open(hit) } })
+              handleCodeContextMenu(event, {
+                open: (hit) => { classifyDirectoryMenu(codeMenu.open(hit), hit.text) },
+              })
             }
             // A left press on a file mention is claimed here, probed, and handed
             // back to the shell when the path exists — see
@@ -2461,6 +2553,9 @@ window.__ModuleLoader__.load({
             write: writeClipboard,
             notify,
             useLocaleRevision,
+            // The directory rows open one resolved application at one absolute
+            // path; the route answers "opened" or "refused".
+            openApp: (app, absolute) => openInApp(app, absolute),
             // A control the shell wired keeps its own activation untouched. Only
             // a `~/…` code has no owner, and that one goes through the same probe
             // and home open the left press uses.
@@ -2565,6 +2660,8 @@ window.__ModuleLoader__.load({
         openInlineCodeHit,
         statVerdict,
         fileManagerAppOf,
+        codeMenuRows,
+        menuPatchForProbe,
         handleInlineCodeClick,
         COMPOSER_INPUT,
         TRIGGER_MENU_PICK,

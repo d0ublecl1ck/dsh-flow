@@ -431,6 +431,58 @@ test('the code-menu seat mints one fresh snapshot per open', async () => {
   assert.equal(wakes, 2, 'closing an empty seat is not a second wake-up')
 })
 
+test("the menu rows turn into the directory set only once a probe says so", async () => {
+  const { codeMenuRows } = (await load()).internals
+  assert.deepEqual(codeMenuRows(null), [])
+  assert.deepEqual(codeMenuRows({ text: "client.js" }), [
+    { key: "open", kind: "open" },
+    { key: "copy", kind: "copy" },
+  ])
+  // A directory with both editors: file manager, VS Code, Zed, then copy.
+  assert.deepEqual(codeMenuRows({ directory: true, apps: ["finder", "vscode", "zed"] }), [
+    { key: "file-manager", kind: "app", app: "finder", labelKey: "codeMenu.openInFileManager" },
+    { key: "vscode", kind: "app", app: "vscode", labelKey: "codeMenu.openInApp", name: "VS Code" },
+    { key: "zed", kind: "app", app: "zed", labelKey: "codeMenu.openInApp", name: "Zed" },
+    { key: "copy", kind: "copy" },
+  ])
+  // An application this Host does not offer is not a row — editors and file manager alike.
+  assert.deepEqual(codeMenuRows({ directory: true, apps: ["vscode"] }).map((row) => row.key), ["vscode", "copy"])
+  assert.deepEqual(codeMenuRows({ directory: true, apps: ["zed"] }).map((row) => row.key), ["zed", "copy"])
+  assert.deepEqual(codeMenuRows({ directory: true, apps: [] }).map((row) => row.key), ["copy"])
+})
+
+test("a directory verdict is the only patch the probe may put on a tilde menu", async () => {
+  const { menuPatchForProbe } = (await load()).internals
+  const directory = { ok: false, error: { code: "workspace-file/not-regular-file", message: "x is a directory", details: { kind: "directory" } } }
+  const file = { ok: true, value: { absolutePath: "/Users/a/x" } }
+  assert.deepEqual(menuPatchForProbe("~/x", "/Users/a", directory, ["finder", "vscode", "zed"]), {
+    directory: true,
+    absolute: "/Users/a/x",
+    apps: ["finder", "vscode", "zed"],
+  })
+  assert.equal(menuPatchForProbe("~/x", "/Users/a", file, ["finder"]), null)
+  assert.equal(menuPatchForProbe("client.js", "/Users/a", directory, ["finder"]), null)
+  assert.equal(menuPatchForProbe("~/x", null, directory, ["finder"]), null)
+  // A Host that answered nothing usable degrades to an empty list, not a broken menu.
+  assert.deepEqual(menuPatchForProbe("~/x", "/Users/a", directory, null), { directory: true, absolute: "/Users/a/x", apps: [] })
+})
+
+test("a menu patch only lands on the menu the probe was measured for", async () => {
+  const { createCodeMenuStore } = (await load()).internals
+  const store = createCodeMenuStore()
+  const first = store.open({ x: 1, y: 2, text: "~/x", element: {} })
+  const second = store.open({ x: 3, y: 4, text: "~/y", element: {} })
+  store.mark(first, { directory: true })
+  assert.equal(store.getSnapshot().directory, undefined, "the first menu is already gone")
+  assert.equal(store.getSnapshot().text, "~/y")
+  store.mark(second, { directory: true, absolute: "/Users/a/y" })
+  assert.equal(store.getSnapshot().directory, true)
+  assert.equal(store.getSnapshot().absolute, "/Users/a/y")
+  store.close()
+  store.mark(second, { directory: false })
+  assert.equal(store.getSnapshot(), null, "a closed menu takes no patch")
+})
+
 /** The `<code>` of a markdown body, plus the event that right-clicked it. */
 function inlineCode({ text = 'npm test', pre = false, editable = false, anchor = false, markdown = true, node = true } = {}) {
   const element = { nodeType: 1, textContent: text }
