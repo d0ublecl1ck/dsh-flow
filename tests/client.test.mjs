@@ -1246,12 +1246,58 @@ test("the menu opens a tilde code the shell never wired, and only that one", asy
   const home = homeCode()
   const homeHit = { element: home.element, text: "~/notes/todo.md" }
   const plan = inlineCodePlan(homeHit, () => "/Users/x")
-  assert.deepEqual(plan, { kind: "home", probe: "/Users/x/notes/todo.md" })
+  assert.deepEqual(plan, { kind: "home", probe: "/Users/x/notes/todo.md", shell: false })
   assert.equal(await openInlineCodeHit(homeHit, plan, input), "open")
   // Anything else keeps today's no-op activation.
   const inert = inlineCode({ text: "npm test" })
   inert.element.querySelector = () => null
   assert.equal(inlineCodePlan(inert, () => "/Users/x"), null)
+})
+
+test("a tilde code the shell did wire still goes home, and falls back to the shell unproven", async () => {
+  const { codeOpenTarget, inlineCodePlan, openInlineCodeHit } = (await load()).internals
+  // The live renderer wires a control into a path-looking code, `~/…` included
+  // (measured: title = the code's own text, aria-label 在侧边栏打开 / 在文件管理器中打开).
+  const wired = clickableCode({ text: "~/.codex/AGENTS.md" })
+  const hit = { element: wired.element, text: "~/.codex/AGENTS.md" }
+  assert.deepEqual(codeOpenTarget(leftPress(wired)), { element: wired.element, text: "~/.codex/AGENTS.md" })
+  const plan = inlineCodePlan(hit, () => "/Users/x")
+  assert.deepEqual(plan, { kind: "home", probe: "/Users/x/.codex/AGENTS.md", shell: true })
+
+  // A proven non-empty file opens at home even though the shell wired a control.
+  const healthy = {
+    stat: () => Promise.resolve({ ok: true, value: { absolutePath: "/Users/x/.codex/AGENTS.md" } }),
+    open: () => { throw new Error("a proven path is never re-dispatched") },
+    openHome: () => true,
+    notify: () => { throw new Error("a present path is never noticed") },
+    t: (key) => key,
+  }
+  assert.equal(await openInlineCodeHit(hit, plan, healthy), "open")
+
+  // An answer the probe cannot prove (a directory, a Host that is away) keeps the
+  // shell's own control, so its directory handling is untouched.
+  const opened = []
+  const unproven = {
+    stat: () => Promise.resolve({ ok: false, error: { code: "workspace-file/not-regular-file", message: "not a regular file" } }),
+    open: (element) => { opened.push(element) },
+    openHome: () => { throw new Error("an unproven path is never opened") },
+    notify: () => { throw new Error("an unknown verdict is never a notice") },
+    t: (key) => key,
+  }
+  assert.equal(await openInlineCodeHit(hit, plan, unproven), "open")
+  assert.deepEqual(opened, [hit.element])
+
+  // Without a shell control the same unproven answer opens nothing at all.
+  const bare = homeCode()
+  const bareHit = { element: bare.element, text: "~/notes/todo.md" }
+  const barePlan = inlineCodePlan(bareHit, () => "/Users/x")
+  assert.equal(await openInlineCodeHit(bareHit, barePlan, {
+    stat: unproven.stat,
+    open: () => { throw new Error("there is no shell control to fall back to") },
+    openHome: unproven.openHome,
+    notify: unproven.notify,
+    t: (key) => key,
+  }), "unknown")
 })
 
 test("the inline-code menu is handed a home opener beside its store", async () => {

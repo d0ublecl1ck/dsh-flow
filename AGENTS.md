@@ -51,7 +51,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 **点击目标不是 `<code>` 本身。** 壳的渲染器把解析成文件引用的行内代码渲染成 `code > button._fileMention_*`，`onClick: mention.open` 挂在这个 button 上，`<code>` 自己没有任何处理器（实拉运行中的实例：某会话 89 个 `code`，带 button 的那一批才有打开动作）。所以 `clickTargetOf()` 先取 `element.querySelector('button')`（`shellWiredControl()`），取不到才退回 `<code>` —— 往 `<code>` 上派发 `click` 不会触发 button 的 `onClick`（React 的合成事件按原生传播路径派发，button 不在路径里），症状是「菜单在，点打开没反应」。另外 `dispatchEvent` 的返回值是「事件没被取消」，壳的处理器通常会 `preventDefault`，别把它当成功信号。
 
-**`~/…` 是壳解析不了的那一类。** 壳的 mention 词表只装「本回合 write/edit 产出或 present 交付」的路径（deliverables 的 `chatFileMentions`），而 `ctx.fs.resolve` 从不展开 `~`，所以正文里裸写的 `~/.codex/AGENTS.md` 既拿不到 `code > button`，壳的 `fileAddressFor(sessionId, cwd, path)` 也会把它当工作区相对路径。本插件因此自己接手这一条：`isTildePath()` 只认裸 `~/…` / `~\…`（`~alice/…` 与单独一个 `~` 都不动），`expandHomePath()` 用连接握手那份 host facts 里的家目录（`ctx.remote.$host.home`，即 `os.homedir()`）拼出绝对路径，探测后交给 `ctx.sidebarRight.openResource()`。家目录、当前会话、侧栏控制器任一拿不到就整条放弃。左键与右键「打开」共用 `inlineCodePlan()` + `openInlineCodeHit()`，所以两条手势行为一致。
+**`~/…` 是壳解析不了的那一类。** 壳会给**看起来像路径的行内代码**（不限于本回合产出/交付的文件）渲染 `code > button._fileMention_*`，`~/.codex/AGENTS.md` 拿到的就是这种 button（`title` 是代码原文，`aria-label` 是「在侧边栏打开 / 在文件管理器中打开」，2026-10-08 实拉）。但壳的 `fileAddressFor(sessionId, cwd, path)` 把非绝对路径一律按工作区根解析，`ctx.fs.resolve` 也从不展开 `~`，所以那一下永远落不到家目录。本插件因此把 `~/…` 收进自己的 `inlineCodePlan()` 且**优先于**那个 button：`isTildePath()` 只认裸 `~/…` / `~\…`（`~alice/…` 与单独一个 `~` 都不动），`expandHomePath()` 用连接握手那份 host facts 里的家目录（`ctx.remote.$host.home`，即 `os.homedir()`）拼出绝对路径，探测为**存在的普通文件**才交给 `ctx.sidebarRight.openResource()`；探测说「不存在」就给「找不到这个路径」提示，探测给不出确定答案（目录、宿主不在）则退回壳那个 button。家目录、当前会话、侧栏控制器任一拿不到就整条放弃。左键与右键「打开」共用 `inlineCodePlan()` + `openInlineCodeHit()`，所以两条手势行为一致。
 
 **菜单用壳的 `Menu`，不是 `MenuSurface`。** 键盘漫游（↑↓/Home/End）、`Esc`、点外面的 `pointerdown` 关闭全在 `Menu` 里；`MenuSurface` 只是它画的那张卡（`ComponentPropsWithoutRef<"div">` + `compact`，位置靠 `style`），直接用 surface 等于自己重写键盘处理。位置方面：`portal` 的列表挂在 `document.body` 下、由 `getAnchorRect` 给的矩形定位，所以右键点被表达成那个点的零尺寸矩形（`cursorRect`），列表浮在光标右下并自动夹在视口内。`autoFocus` 是必需的 —— 右键打开时焦点不在任何触发器上，没有它方向键走不起来。
 
@@ -105,7 +105,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 83 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 84 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser --client ./client.js   # 用本 checkout 的浏览器半边验收
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

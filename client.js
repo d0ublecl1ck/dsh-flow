@@ -738,9 +738,9 @@ window.__ModuleLoader__.load({
      *
      * The same scope as the menu (`codeMenuTarget`), narrowed to the two shapes
      * this plugin can open: a `code` the shipped renderer wired a control into,
-     * and a `~/…` code, which the shell's mention vocabulary never holds because
-     * it only names paths a tool produced or delivered. An inert `code` — plain
-     * prose — keeps today's behaviour and costs no round trip at all.
+     * and a `~/…` code, which the shell's path mention resolves against the
+     * Workspace root and therefore can never reach the home it names. An inert
+     * `code` — plain prose — keeps today's behaviour and costs no round trip.
      *
      * @param event - the document `click` event.
      * @returns `{element, text}`, or null when this press is not ours to consider.
@@ -783,23 +783,25 @@ window.__ModuleLoader__.load({
     /**
      * What one openable inline `code` would do, decided without a round trip.
      *
-     * A code with a shell control goes back to the shell: whatever the renderer
-     * resolved there (a produced file, a delivery) is what the user means, and
-     * the shell already resolves it. A `~/…` code has no such owner, so this
-     * plugin expands it against the Host home and opens the result itself. A home
-     * that is not known answers null, which is how the press stays the shell's
-     * instead of being claimed.
+     * A `~/…` code is this plugin's own case **even when the shell wired a
+     * control into it**: the shipped path mention resolves a relative path against
+     * the Workspace root, so `~/x` never reaches the account home it names. The
+     * control is still remembered on the plan — a verdict the probe cannot prove
+     * falls back to it rather than guessing. Every other control-bearing code
+     * belongs to the shell; a code with neither owner is not ours to open.
      *
      * @param hit - `{element, text}` from `codeMenuTarget`.
      * @param home - the Host home, or a getter for it.
-     * @returns `{kind, probe}`, or null when there is nothing to open.
+     * @returns `{kind, probe[, shell]}`, or null when there is nothing to open.
      */
     function inlineCodePlan(hit, home) {
-      if (shellWiredControl(hit.element) !== null) return { kind: 'shell', probe: hit.text }
-      if (!isTildePath(hit.text)) return null
-      const absolute = expandHomePath(hit.text, typeof home === 'function' ? home() : home)
-      if (absolute === null) return null
-      return { kind: 'home', probe: absolute }
+      const control = shellWiredControl(hit.element)
+      if (isTildePath(hit.text)) {
+        const absolute = expandHomePath(hit.text, typeof home === 'function' ? home() : home)
+        if (absolute !== null) return { kind: 'home', probe: absolute, shell: control !== null }
+      }
+      if (control !== null) return { kind: 'shell', probe: hit.text }
+      return null
     }
 
     /**
@@ -833,7 +835,17 @@ window.__ModuleLoader__.load({
             input.open(hit.element)
             return "open"
           }
-          if (verdict !== "present") return "unknown"
+          if (verdict !== "present") {
+            // The probe could not prove this path — a directory, or a Host that
+            // is away. A code the shell wired a control into goes back to the
+            // shell (its own directory handling stays intact); one without a
+            // control opens nothing at all.
+            if (plan.shell === true) {
+              input.open(hit.element)
+              return "open"
+            }
+            return "unknown"
+          }
           return input.openHome(plan.probe) ? "open" : "unknown"
         })
     }
@@ -2093,6 +2105,7 @@ window.__ModuleLoader__.load({
               }
               openInlineCodeHit(hit, plan, {
                 stat: (path) => readInlineCodeStat(path),
+                open: (element) => activateInlineCode(element, window),
                 openHome: openAtHome,
                 notify,
                 t,
