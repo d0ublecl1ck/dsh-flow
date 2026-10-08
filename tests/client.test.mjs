@@ -1650,6 +1650,20 @@ test('changedFileTarget claims one changed-file row, and nothing else', async ()
   assert.equal(changedFileTarget(changedFileRow({ path: '   ' }).event), null)
 })
 
+test('describedFilePath reads the path the card hid, and nothing else', async () => {
+  // The same read serves the press and the warm-up that runs before it, so it is
+  // pinned on its own.
+  const { describedFilePath } = (await load()).internals
+  const hit = changedFileRow()
+  assert.equal(describedFilePath(hit.row), '/Users/me/project/src/app.ts')
+  assert.equal(describedFilePath(null), null)
+  assert.equal(describedFilePath({ nodeType: 1, getAttribute: () => null }), null)
+  assert.equal(describedFilePath({ nodeType: 1, getAttribute: () => '   ' }), null)
+  const missing = changedFileRow()
+  missing.row.ownerDocument = undefined
+  assert.equal(describedFilePath(missing.row), null)
+})
+
 test('a context-menu press on a changed-file row is claimed, and any other press is left alone', async () => {
   const { handleChangesContextMenu } = (await load()).internals
   const hit = changedFileRow()

@@ -73,7 +73,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **执行走官方 Session Remote，不加宿主路由**：`openChangedFile()` 调 `ctx.remote.session.openWorkspacePath({ path })`（显示位置时多一个 `action: 'reveal'`，选了某个应用时多一个 `application`）。这条 API 由 `@deepseek-ai/dsh-api-session-controller` 提供，宿主会重新校验路径、也能拒绝没有桌面的部署；返回 Result 信封 `{ok:true}` / `{ok:false}`，不是抛错。拒绝、抛错、`ctx.remote` 不存在三种情形给同一条提示，绝不当成功。
 - **编辑器行是查出来再长出来的，不是写死的**：右键时照着 `~/…` 菜单的同一范式异步查 `ctx.remote.session.workspacePathApplications({ path })`（返回 `{id,name,default,icon}[]`，`icon` 是 `data:` URL），`editorApplications()` 过滤出 `FILE_EDITORS` 里那批编辑器/IDE 并把 OS 的 bundle 名换成官方 catalog 名，`changesMenu.mark(seq, patch)` 只打在同一个 seq 上，所以晚到的答案不会改到另一个菜单。`application` 只能传查询回来的 `id`：宿主 `openNativeFileApplication()` 会拿它去比对当前注册的 handler 列表，不在列表里直接拒绝（源码原文 `Application is not registered for this file`），所以写死 `"vscode"` 这类别名一定失败。查询结果按 path 缓存，失败不缓存。
 - **菜单行的邀请制**：默认动作永远是第一行——OS 标的默认若是其中一个编辑器，那一行自己就带 `（默认）` 并顶掉通用的 `用默认应用打开`；默认若不是编辑器（例如浏览器占了 `.html`）就保留通用行。`在文件管理器中显示` 恒为最后一行。
-- **它慢在哪，以及怎么捂掉**：查询返回的**每一个** handler 都带 Host 渲染好的图标，实拉一个文件是 **256 KB**（同一文件不带图标只有 3.7 KB；osascript 本身只要 0.05–0.15s，慢的是这条 payload 加往返），所以「点下去才开始查」会明显卡一下。菜单本身按下即出（基础两项先渲染），编辑器行随后 `mark` 补上；另有 `pointerover` 捕获监听：指针在某一行**停住 `HOVER_WARM_MS`（120ms）**才预热同一条查询（扫过去不会连发），预热过的路径按下时直接命中缓存。缓存按 path 记，失败不记；关掉偏好时连挂起计时一起清。
+- **它慢在哪，以及怎么提前算掉**：查询返回的**每一个** handler 都带 Host 渲染好的图标，实拉一个文件是 **256 KB**（同一文件不带图标只有 3.7 KB；osascript 本身只要 0.05–0.15s，慢的是这条 payload 加往返），所以「点下去才开始查」会明显卡一下。三层把它挪到按之前：① 菜单按下即出（基础两项先渲染），编辑器行随后 `mark` 补上；② **卡片一渲染就扫**——`warmRenderedChangedFiles()` 在启用时扫一遍已有卡片，之后由 `MutationObserver`（`childList` + `subtree`）在 DOM 静止 `WARM_DEBOUNCE_MS`（250ms）后扫一次，凡已渲染的行都预热，展开列表后新渲染的行也会被扫到；每页上限 `WARM_LIMIT`（24）条 path，超出部分退回悬停/按下时再查；③ `pointerover` 捕获监听：指针在某行停住 `HOVER_WARM_MS`（120ms）才预热（扫过去不连发），兜住上限之外的行。缓存**只存过滤后的编辑器行**（原始答案含每个 handler 的图标，按 path 存会无界涨内存），按 path 记、失败不记；关掉偏好时把 observer、挂起计时、菜单一起清。实测过的第一次右键仍需等一次 payload 的情形：卡片刚渲染、预热还没回来时抢先按下。
 - **监听只在偏好打开时存在**（与行内代码菜单同一范式）：`readChangesFileOpen` 翻到 false 就 detach，并顺手关掉可能还开着的菜单。`tests/client.test.mjs` 钉住「关闭时不注册 `contextmenu` 监听」「开启时只加这一条」。
 - **`shell.overlay` 上是本插件的第三个 cell**：id 用 `flow.changes-menu`，与 `flow`（复制提示）、`flow.code-menu` 各自独立；复用 id 会顶掉那个 cell 的内容。
 - **验收不按菜单项**：每一行都会在真人桌面上真的拉起应用，`scripts/verify-browser.mjs` 的 H 段只断言「右键浮出菜单、行文案只可能是基础两项或 `FILE_EDITORS` 里的编辑器（不含 `.app` 原名）、`在文件管理器中显示` 在最后、菜单锚点上带的路径等于卡片描述的路径、Esc 能关」，不点任何一行；请求载荷由单测钉住。
@@ -123,7 +123,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 101 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 102 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

@@ -102,6 +102,12 @@ window.__ModuleLoader__.load({
     /** How long a pointer has to rest on a changed-file row before its handlers are looked up. */
     const HOVER_WARM_MS = 120
 
+    /** How many changed-file rows (paths) one page warms in advance. */
+    const WARM_LIMIT = 24
+
+    /** How long the DOM is allowed to settle before a warm-up sweep runs. */
+    const WARM_DEBOUNCE_MS = 250
+
     /** Retry pacing while the shell re-renders an expansion: 40ms, then +40ms each pass. */
     const RETRY_BASE_MS = 40
     const RETRY_ATTEMPTS = 8
@@ -1259,6 +1265,24 @@ window.__ModuleLoader__.load({
       const element = target.closest('button[aria-describedby]')
       if (!isElement(element) || typeof element.closest !== 'function') return null
       if (element.closest(CHANGES_CARD) === null) return null
+      const path = describedFilePath(element)
+      if (path === null) return null
+      return { element, path }
+    }
+
+    /**
+     * The Host path one changed-file row names, or null when it names none.
+     *
+     * The card keeps the path in the hidden element its `aria-describedby`
+     * points at, already resolved against the Session workspace, so this plugin
+     * never guesses one. The same read serves the press and the warm-up that
+     * runs before it.
+     *
+     * @param element - a `button[aria-describedby]` inside a changed-files card.
+     * @returns the path, or null.
+     */
+    function describedFilePath(element) {
+      if (!isElement(element)) return null
       const describedBy = element.getAttribute('aria-describedby')
       if (typeof describedBy !== 'string') return null
       const id = describedBy.trim().split(/\s+/)[0]
@@ -1268,8 +1292,7 @@ window.__ModuleLoader__.load({
       const description = doc.getElementById(id)
       if (!isElement(description)) return null
       const path = String(description.textContent ?? '').trim()
-      if (path === '') return null
-      return { element, path }
+      return path === '' ? null : path
     }
 
     /**
@@ -2477,7 +2500,7 @@ window.__ModuleLoader__.load({
         // answer is not cached, because a Host that is briefly away would
         // otherwise leave the menu short for the rest of the page's life.
         const fileAppsCache = new Map()
-        const readFileApplications = (path) => {
+        const readChangedFileEditors = (path) => {
           const cached = fileAppsCache.get(path)
           if (cached !== undefined) return cached
           const query = ctx.remote?.session?.workspacePathApplications
@@ -2485,22 +2508,40 @@ window.__ModuleLoader__.load({
           const answer = Promise.resolve()
             .then(() => query.call(ctx.remote.session, { path }))
             .then(
-              (result) => (result?.ok === true && Array.isArray(result.value) ? result.value : null),
+              // Only the filtered rows are kept: the raw answer carries an icon
+              // for every registered handler (256 KB for one measured file), and
+              // holding that per path would grow the page without bound.
+              (result) => (result?.ok === true && Array.isArray(result.value) ? editorApplications(result.value) : null),
               () => null,
             )
-            .then((apps) => {
-              if (apps === null) fileAppsCache.delete(path)
-              return apps
+            .then((rows) => {
+              if (rows === null) fileAppsCache.delete(path)
+              return rows
             })
           fileAppsCache.set(path, answer)
           return answer
         }
+        // The payload is per file and expensive, so it is fetched while the card
+        // is being read rather than after the press. Every rendered row of every
+        // changed-files card on screen is warmed, bounded to WARM_LIMIT paths per
+        // page: a card can list hundreds of files, while the collapsed card
+        // renders four, and the rest warm when they are expanded into the DOM.
+        const warmRenderedChangedFiles = (root) => {
+          if (root === null || root === undefined || typeof root.querySelectorAll !== 'function') return
+          for (const card of root.querySelectorAll(CHANGES_CARD)) {
+            for (const row of card.querySelectorAll('button[aria-describedby]')) {
+              if (fileAppsCache.size >= WARM_LIMIT) return
+              const path = describedFilePath(row)
+              if (path !== null && !fileAppsCache.has(path)) readChangedFileEditors(path)
+            }
+          }
+        }
         // The menu opens on the press and fills in when the answer lands; the
         // sequence number keeps a late answer off a menu it does not belong to.
         const classifyChangedFileMenu = (target, path) => {
-          readFileApplications(path).then((apps) => {
-            if (apps === null) return
-            changesMenu.mark(target, { apps: editorApplications(apps) })
+          readChangedFileEditors(path).then((rows) => {
+            if (rows === null) return
+            changesMenu.mark(target, { apps: rows })
           }, () => {})
         }
         // The context menu labels itself from a probe: a `~/…` directory swaps the
@@ -2592,16 +2633,35 @@ window.__ModuleLoader__.load({
           let detach = null
           let hoverTimer = null
           let hoverPath = null
+          let warmTimer = null
+          let observer = null
           const stopHover = () => {
             if (hoverTimer !== null) clearTimeout(hoverTimer)
             hoverTimer = null
             hoverPath = null
+          }
+          const stopWarm = () => {
+            if (warmTimer !== null) clearTimeout(warmTimer)
+            warmTimer = null
+          }
+          const stopObserver = () => {
+            observer?.disconnect()
+            observer = null
+          }
+          const scheduleWarm = () => {
+            if (warmTimer !== null) return
+            warmTimer = setTimeout(() => {
+              warmTimer = null
+              warmRenderedChangedFiles(document)
+            }, WARM_DEBOUNCE_MS)
           }
           const sync = () => {
             if (!readChangesFileOpen(config)) {
               // Turning the feature off also retires a menu it left open.
               changesMenu.close()
               stopHover()
+              stopWarm()
+              stopObserver()
               detach?.()
               detach = null
               return
@@ -2625,14 +2685,24 @@ window.__ModuleLoader__.load({
               hoverPath = hit.path
               hoverTimer = setTimeout(() => {
                 hoverTimer = null
-                if (hoverPath !== null) readFileApplications(hoverPath)
+                if (hoverPath !== null) readChangedFileEditors(hoverPath)
               }, HOVER_WARM_MS)
             }
             document.addEventListener('contextmenu', onContextMenu, true)
             document.addEventListener('pointerover', onPointerOver, true)
+            // Warm what is already on screen, then follow the DOM: a card appears
+            // when its turn is reached, and its remaining rows appear when it is
+            // expanded. The observer only schedules a sweep, and the sweep runs
+            // once the page has settled.
+            warmRenderedChangedFiles(document)
+            if (typeof MutationObserver === 'function') {
+              observer = new MutationObserver(scheduleWarm)
+              observer.observe(document.body, { childList: true, subtree: true })
+            }
             detach = () => {
               document.removeEventListener('contextmenu', onContextMenu, true)
               document.removeEventListener('pointerover', onPointerOver, true)
+              stopObserver()
             }
           }
           sync()
@@ -2640,6 +2710,8 @@ window.__ModuleLoader__.load({
           return () => {
             if (typeof unsubscribe === 'function') unsubscribe()
             stopHover()
+            stopWarm()
+            stopObserver()
             detach?.()
           }
         }, 'flow: changed files menu')
@@ -2843,6 +2915,7 @@ window.__ModuleLoader__.load({
         readCodeMenuEnabled,
         CHANGES_MENU_ID,
         changedFileTarget,
+        describedFilePath,
         handleChangesContextMenu,
         createChangesMenuStore,
         readChangesFileOpen,
