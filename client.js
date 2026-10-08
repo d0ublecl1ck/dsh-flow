@@ -99,6 +99,9 @@ window.__ModuleLoader__.load({
     /** How long the flash on a revealed row lasts. */
     const FLASH_MS = 900
 
+    /** How long a pointer has to rest on a changed-file row before its handlers are looked up. */
+    const HOVER_WARM_MS = 120
+
     /** Retry pacing while the shell re-renders an expansion: 40ms, then +40ms each pass. */
     const RETRY_BASE_MS = 40
     const RETRY_ATTEMPTS = 8
@@ -2587,10 +2590,18 @@ window.__ModuleLoader__.load({
         ctx.effect(() => {
           if (typeof document === 'undefined') return undefined
           let detach = null
+          let hoverTimer = null
+          let hoverPath = null
+          const stopHover = () => {
+            if (hoverTimer !== null) clearTimeout(hoverTimer)
+            hoverTimer = null
+            hoverPath = null
+          }
           const sync = () => {
             if (!readChangesFileOpen(config)) {
               // Turning the feature off also retires a menu it left open.
               changesMenu.close()
+              stopHover()
               detach?.()
               detach = null
               return
@@ -2601,13 +2612,34 @@ window.__ModuleLoader__.load({
                 open: (hit) => { classifyChangedFileMenu(changesMenu.open(hit), hit.path) },
               })
             }
+            // The association query ships every registered handler together with
+            // a rendered icon — 256 KB for one measured file — so a press that
+            // starts it waits for the Host. A pointer that rests on a row warms
+            // exactly that query, and the per-path cache makes the press itself
+            // instant. Sweeping the mouse across a card never fires a burst:
+            // only the row the pointer comes to rest on is warmed.
+            const onPointerOver = (event) => {
+              const hit = changedFileTarget(event)
+              stopHover()
+              if (hit === null) return
+              hoverPath = hit.path
+              hoverTimer = setTimeout(() => {
+                hoverTimer = null
+                if (hoverPath !== null) readFileApplications(hoverPath)
+              }, HOVER_WARM_MS)
+            }
             document.addEventListener('contextmenu', onContextMenu, true)
-            detach = () => { document.removeEventListener('contextmenu', onContextMenu, true) }
+            document.addEventListener('pointerover', onPointerOver, true)
+            detach = () => {
+              document.removeEventListener('contextmenu', onContextMenu, true)
+              document.removeEventListener('pointerover', onPointerOver, true)
+            }
           }
           sync()
           const unsubscribe = config.subscribe(sync)
           return () => {
             if (typeof unsubscribe === 'function') unsubscribe()
+            stopHover()
             detach?.()
           }
         }, 'flow: changed files menu')

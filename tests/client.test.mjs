@@ -937,10 +937,11 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // Four separate capture-phase listeners: the link hand-off, the inline-code
-    // menu press, the inline-code path press, and the changed-file menu press.
-    // None can be reached through another's registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true], ['contextmenu', true]])
+    // Five separate capture-phase listeners: the link hand-off, the inline-code
+    // menu press, the inline-code path press, the changed-file menu press, and
+    // the hover that warms that menu's association query. None can be reached
+    // through another's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['pointerover', true]])
     assert.deepEqual(removed, [])
     // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
@@ -949,6 +950,7 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
       { type: 'contextmenu', listener: listeners[1].listener },
       { type: 'click', listener: listeners[2].listener },
       { type: 'contextmenu', listener: listeners[3].listener },
+      { type: 'pointerover', listener: listeners[4].listener },
     ])
   } finally {
     delete globalThis.document
@@ -1785,22 +1787,29 @@ test('the changed-file listener exists only while the preference is on', async (
   }
   try {
     // The inline-code menu is held off, so the only `contextmenu` listener here
-    // is this feature's own.
+    // is this feature's own, and the hover warm-up belongs to it too.
     const form = fakeForm({ changesFileOpen: false, codeMenu: false })
     module.apply(fakeContext([], [], { form }))
     const menus = () => added.filter((entry) => entry.type === 'contextmenu')
+    const warms = () => added.filter((entry) => entry.type === 'pointerover')
     assert.deepEqual(menus(), [], 'an off feature adds no contextmenu listener')
+    assert.deepEqual(warms(), [], 'an off feature adds no hover warm-up')
 
     form.publish({ changesFileOpen: true, codeMenu: false })
     assert.deepEqual(menus().map((entry) => entry.capture), [true])
+    assert.deepEqual(warms().map((entry) => entry.capture), [true])
 
     form.publish({ changesFileOpen: false, codeMenu: false })
-    assert.deepEqual(removed, [{ type: 'contextmenu', listener: menus()[0].listener, capture: true }])
+    assert.deepEqual(removed, [
+      { type: 'contextmenu', listener: menus()[0].listener, capture: true },
+      { type: 'pointerover', listener: warms()[0].listener, capture: true },
+    ])
     form.publish({ changesFileOpen: false, codeMenu: false })
-    assert.equal(removed.length, 1, 'an already detached listener is not removed twice')
+    assert.equal(removed.length, 2, 'already detached listeners are not removed twice')
 
     form.publish({ changesFileOpen: true, codeMenu: false })
     assert.deepEqual(menus().map((entry) => entry.capture), [true, true])
+    assert.deepEqual(warms().map((entry) => entry.capture), [true, true])
   } finally {
     delete globalThis.document
   }
