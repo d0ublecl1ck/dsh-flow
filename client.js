@@ -1847,10 +1847,22 @@ window.__ModuleLoader__.load({
     // #endregion
 
     return {
-      // `remote` carries the host facts and `remote.workspaceFiles` the existence
-      // probe; without both, `ctx.remote.workspaceFiles` is undefined and every probe
-      // silently answers "unknown", which hands every path back to the shell.
-      inject: ['slots', 'locale', 'configForms', 'sessions', 'workspaces', 'shortcuts', 'remote', 'remote.workspaceFiles'],
+      // Every `ctx.<service>` this file touches has to be declared here: cordis does
+      // not hang a namespace on the context for a plugin that never asked. Omitting
+      // them is silent — `ctx.remote.workspaceFiles` answers `undefined` (every probe
+      // says "unknown" and hands the press back to the shell) and `ctx.sidebarRight`
+      // is missing (the press is claimed but nothing opens).
+      inject: [
+        'slots',
+        'locale',
+        'configForms',
+        'sessions',
+        'workspaces',
+        'shortcuts',
+        'remote',
+        'remote.workspaceFiles',
+        'sidebarRight',
+      ],
       apply(ctx) {
         ctx.effect(() => {
           const style = injectStyles()

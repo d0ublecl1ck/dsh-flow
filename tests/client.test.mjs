@@ -1308,6 +1308,7 @@ test("the plugin injects the Remote carrier and its workspaceFiles namespace", a
   const module = await load()
   assert.ok(module.inject.includes("remote"), "ctx.remote carries the host facts and $host")
   assert.ok(module.inject.includes("remote.workspaceFiles"), "ctx.remote.workspaceFiles carries stat")
+  assert.ok(module.inject.includes("sidebarRight"), "ctx.sidebarRight carries openResource")
 })
 
 test("the inline-code menu is handed a home opener beside its store", async () => {
