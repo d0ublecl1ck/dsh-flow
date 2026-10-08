@@ -628,10 +628,15 @@ test('the inline-code listeners exist only while the preference is on', async ()
   const module = await load()
   const added = []
   const removed = []
+  const cursor = new Set()
   globalThis.document = {
     querySelector: () => null,
     createElement: () => ({ dataset: {}, remove() {} }),
     head: { appendChild() {} },
+    documentElement: {
+      setAttribute: (name, value) => cursor.add(name + '=' + value),
+      removeAttribute: (name) => cursor.delete(name + '=true'),
+    },
     addEventListener: (type, listener, capture) => added.push({ type, listener, capture }),
     removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
   }
@@ -643,6 +648,9 @@ test('the inline-code listeners exist only while the preference is on', async ()
     // `click` first is the off-origin link hand-off, which is a separate
     // feature; the menu press and the path press are the two below it.
     assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true]])
+    // The pointer cursor rides the same switch: code is only clickable while the
+    // menu owns the press.
+    assert.deepEqual([...cursor], ['data-flow-code-cursor=true'])
 
     // A Host echo that turns the feature off detaches both listeners instead of
     // leaving ones behind that decide to do nothing.
@@ -651,6 +659,7 @@ test('the inline-code listeners exist only while the preference is on', async ()
       { type: 'contextmenu', listener: added[1].listener, capture: true },
       { type: 'click', listener: added[2].listener, capture: true },
     ])
+    assert.deepEqual([...cursor], [], 'turning the feature off takes the cursor with it')
     form.publish({ codeMenu: false, changesFileOpen: false })
     assert.equal(removed.length, 2, 'already detached listeners are not removed twice')
 
@@ -660,6 +669,7 @@ test('the inline-code listeners exist only while the preference is on', async ()
     assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'click', 'contextmenu', 'click'])
     assert.equal(added[3].capture, true)
     assert.equal(added[4].capture, true)
+    assert.deepEqual([...cursor], ['data-flow-code-cursor=true'])
   } finally {
     delete globalThis.document
   }

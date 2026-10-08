@@ -1682,6 +1682,16 @@ window.__ModuleLoader__.load({
     const CHANGES_MENU_ID = 'flow.changes-menu'
 
     /**
+     * Document attribute that turns on the pointer cursor for inline code.
+     *
+     * Every in-scope inline code is a press target while the menu preference is
+     * on — it opens or it copies — so the cursor has to say so. The attribute is
+     * set beside the listeners and removed with them, which is what keeps code
+     * looking inert again the moment the preference goes off.
+     */
+    const CODE_CURSOR_ATTR = 'data-flow-code-cursor'
+
+    /**
      * The shipped composer's editable root, which is the only place a swapped
      * Enter belongs.
      *
@@ -1836,6 +1846,8 @@ window.__ModuleLoader__.load({
 .flow-code-menu-anchor{display:none}
 .flow-changes-menu-anchor{display:none}
 .flow-app-icon{display:block;width:14px;height:14px;border-radius:3px}
+html[data-flow-code-cursor="true"] [class*="_markdown_"] code{cursor:pointer}
+html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -2812,13 +2824,18 @@ window.__ModuleLoader__.load({
           let detach = null
           const sync = () => {
             if (!readCodeMenuEnabled(config)) {
-              // Turning the feature off also retires a menu it left open.
+              // Turning the feature off also retires a menu it left open, and
+              // takes the pointer cursor with it.
               codeMenu.close()
+              document.documentElement?.removeAttribute(CODE_CURSOR_ATTR)
               detach?.()
               detach = null
               return
             }
             if (detach !== null) return
+            // A press opens or copies, so the cursor says "clickable" while this
+            // feature owns the press.
+            document.documentElement?.setAttribute(CODE_CURSOR_ATTR, 'true')
             const onContextMenu = (event) => {
               handleCodeContextMenu(event, {
                 open: (hit) => { classifyCodeMenu(codeMenu.open(hit), hit) },
@@ -2852,6 +2869,7 @@ window.__ModuleLoader__.load({
           const unsubscribe = config.subscribe(sync)
           return () => {
             if (typeof unsubscribe === 'function') unsubscribe()
+            document.documentElement?.removeAttribute(CODE_CURSOR_ATTR)
             detach?.()
           }
         }, 'flow: inline code menu')
