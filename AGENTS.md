@@ -99,7 +99,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 运行中的实例怎么认这份代码
 
 - **改了 `index.js`（宿主半边）必须 `remove` 再 `add`**：宿主按 URL 缓存模块，只 `add` 不会重新导入。
-- **客户端产物是「激活时的快照」**：宿主在插件条目激活那一刻读一次 `client.js` 的字节，之后改文件不影响运行中的实例；`dsh plugin add` 与刷新页面都不会让它重读。
+- **客户端产物按请求现读磁盘**（2026-10-08 实拉）：把 boot HTML 里的 `plugins/??dsh-flow/client.js&rev=…` 原样取回，字节 = 磁盘 `client.js` + 一行 `;\n//# sourceMappingURL=…`。所以改完 `client.js` **重载窗口即换新**，不需要 `remove`/`add`，更不需要重启；boot 里的 `rev` 是激活时算的标签、可能滞后于磁盘，但同一个 URL 仍返回当前文件，对账方式就是取该 URL 与磁盘比字节。
 - **危险动作**：不要在插件目录不可达（例如链接指向已被删除的 worktree）时去 `pluginManager/setBundleEnabled` 关掉再打开这个 bundle。宿主会把「这个包不是客户端包 / 解析失败」的判定**缓存到重启为止**，此后该包不再出现在浏览器要加载的客户端清单里，反复重挂和刷新页面都救不回来，只能重启 DSH Desktop。症状：插件在 `pluginManager/listPlugins` 里 `enabled: true, fiberPhase: active`，但 boot HTML 的 `plugins/??...` 清单里没有它。
 
 ## 验证
