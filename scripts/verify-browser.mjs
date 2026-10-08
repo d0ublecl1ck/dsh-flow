@@ -1816,15 +1816,28 @@ async function main() {
       pass('a changed-files card is on screen (' + changed.rows + ' file rows)')
       const pressed = await pressElement(cdp, sessionId, CHANGED_FILE_FINDER, { contextMenu: true })
       const menus = await settleMenus(cdp, sessionId, 1)
+      // The editor rows arrive with the association query, which the Host answers
+      // with rendered icons; give it a bounded moment and read what settled. A
+      // file with no registered editor legitimately stays on the shipped pair.
+      await sleep(1500)
       const probe = await evaluate(cdp, sessionId, CHANGED_FILES_PROBE)
+      const shipped = ['用默认应用打开', '在文件管理器中显示']
+      const editorLabels = /^(VS Code( Insiders)?|Cursor|Windsurf|Zed|Sublime Text|Xcode|Android Studio|IntelliJ IDEA|PyCharm|WebStorm|PhpStorm|GoLand|Rider|RustRover)(（默认）)?$/
+      const editors = probe.items.filter((label) => editorLabels.test(label))
+      const unknown = probe.items.filter((label) => !shipped.includes(label) && !editorLabels.test(label))
+      const rawBundle = probe.items.filter((label) => label.includes('.app'))
       if (pressed === null) {
         fail('nothing pressable on the changed-files card: ' + JSON.stringify(probe))
-      } else if (menus !== 1 || probe.items.length !== 2) {
+      } else if (menus !== 1 || probe.items.length < 2) {
         fail('no changed-file menu after a right-click: ' + JSON.stringify({ items: probe.items, menus: probe.menus }))
-      } else if (probe.items[0] !== '用默认应用打开' || probe.items[1] !== '在文件管理器中显示') {
-        fail('the changed-file menu offered the wrong entries: ' + JSON.stringify(probe.items))
+      } else if (unknown.length > 0 || rawBundle.length > 0) {
+        fail('the changed-file menu listed something that is neither the shipped pair nor an editor: ' + JSON.stringify({ unknown, rawBundle, items: probe.items }))
+      } else if (probe.items[probe.items.length - 1] !== '在文件管理器中显示') {
+        fail('显示文件位置 is not the last row of the changed-file menu: ' + JSON.stringify(probe.items))
+      } else if (editors.length > 0 && probe.items[0] !== '用默认应用打开' && !editorLabels.test(probe.items[0])) {
+        fail('the changed-file menu does not lead with a default action: ' + JSON.stringify(probe.items))
       } else {
-        pass('right-clicking a changed file offers 用默认应用打开 and 在文件管理器中显示')
+        pass('right-clicking a changed file offers the shipped pair' + (editors.length === 0 ? ' (no editor is registered for this file)' : ' plus ' + editors.join('、')))
       }
       // The path the live card handed over is the contract unit tests cannot
       // reach: it comes from the shipped `aria-describedby` element, and a
@@ -1840,8 +1853,8 @@ async function main() {
       const closed = await settleMenus(cdp, sessionId, 0)
       if (closed === 0) pass('Escape closes the changed-file menu')
       else fail('Escape did not close the changed-file menu')
-      // Neither entry is chosen on purpose: both launch a real application on the
-      // human's desktop. The request each one sends is pinned by unit tests.
+      // No row is chosen on purpose: every one launches a real application on the
+      // human's desktop. The request each row sends is pinned by unit tests.
     }
 
     // The lookup above opened another Session — or tried several and found none

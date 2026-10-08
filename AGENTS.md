@@ -66,14 +66,16 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`，它断言「打开」派发的合成 click 落在 `BUTTON` 上。
 ## 「已编辑 N 个文件」卡片的右键菜单（用默认应用打开 / 显示位置）
 
-已完成轮次末尾的改动文件卡片（官方 `dsh-client-ui-deliverables`，0.2.0-rc.2 起标题是「已编辑 N 个文件」）里，每个文件行右键浮出一个两项菜单：`用默认应用打开` 与 `在文件管理器中显示`。这条链路整个交给宿主，本插件不自己 spawn：
+已完成轮次末尾的改动文件卡片（官方 `dsh-client-ui-deliverables`，0.2.0-rc.2 起标题是「已编辑 N 个文件」）里，每个文件行右键浮出一个菜单：基础两项 `用默认应用打开` 与 `在文件管理器中显示`，再加上系统为该文件注册的编辑器/IDE 行（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标，默认那个标 `（默认）`）。这条链路整个交给宿主，本插件不自己 spawn：
 
 - **路径来自卡片自己的无障碍描述，不是本插件解析出来的**：卡片把每个文件渲染成 `button[aria-describedby="<id>"]`（单文件形态的标题按钮同形），那个 id 指向的隐藏元素里是卡片自己算好的 Host 路径。`changedFileTarget()` 取 `button[aria-describedby]` → `ownerDocument.getElementById(id)` 的 `textContent`；取不到 id、取不到元素、或文本为空就整条放弃，绝不猜路径。
 - **正向范围是卡片根**：`element.closest('[data-changed-files]')` 必须非空；同一形状的 button 在别的面板里不动。
-- **执行走官方 Session Remote，不加宿主路由**：`openChangedFile()` 调 `ctx.remote.session.openWorkspacePath({ path })`（显示位置时多一个 `action: 'reveal'`）。这条 API 由 `@deepseek-ai/dsh-api-session-controller` 提供，宿主会重新校验路径、也能拒绝没有桌面的部署；返回 Result 信封 `{ok:true}` / `{ok:false}`，不是抛错。拒绝、抛错、`ctx.remote` 不存在三种情形给同一条提示，绝不当成功。`action: 'open'` 照文件关联打开，包括 HTML 与 SVG。
+- **执行走官方 Session Remote，不加宿主路由**：`openChangedFile()` 调 `ctx.remote.session.openWorkspacePath({ path })`（显示位置时多一个 `action: 'reveal'`，选了某个应用时多一个 `application`）。这条 API 由 `@deepseek-ai/dsh-api-session-controller` 提供，宿主会重新校验路径、也能拒绝没有桌面的部署；返回 Result 信封 `{ok:true}` / `{ok:false}`，不是抛错。拒绝、抛错、`ctx.remote` 不存在三种情形给同一条提示，绝不当成功。
+- **编辑器行是查出来再长出来的，不是写死的**：右键时照着 `~/…` 菜单的同一范式异步查 `ctx.remote.session.workspacePathApplications({ path })`（返回 `{id,name,default,icon}[]`，`icon` 是 `data:` URL），`editorApplications()` 过滤出 `FILE_EDITORS` 里那批编辑器/IDE 并把 OS 的 bundle 名换成官方 catalog 名，`changesMenu.mark(seq, patch)` 只打在同一个 seq 上，所以晚到的答案不会改到另一个菜单。`application` 只能传查询回来的 `id`：宿主 `openNativeFileApplication()` 会拿它去比对当前注册的 handler 列表，不在列表里直接拒绝（源码原文 `Application is not registered for this file`），所以写死 `"vscode"` 这类别名一定失败。查询结果按 path 缓存，失败不缓存。
+- **菜单行的邀请制**：默认动作永远是第一行——OS 标的默认若是其中一个编辑器，那一行自己就带 `（默认）` 并顶掉通用的 `用默认应用打开`；默认若不是编辑器（例如浏览器占了 `.html`）就保留通用行。`在文件管理器中显示` 恒为最后一行。
 - **监听只在偏好打开时存在**（与行内代码菜单同一范式）：`readChangesFileOpen` 翻到 false 就 detach，并顺手关掉可能还开着的菜单。`tests/client.test.mjs` 钉住「关闭时不注册 `contextmenu` 监听」「开启时只加这一条」。
 - **`shell.overlay` 上是本插件的第三个 cell**：id 用 `flow.changes-menu`，与 `flow`（复制提示）、`flow.code-menu` 各自独立；复用 id 会顶掉那个 cell 的内容。
-- **验收不按菜单项**：两个动作都会在真人桌面上真的拉起应用，`scripts/verify-browser.mjs` 的 H 段只断言「右键浮出菜单、两项文案、菜单锚点上带的路径等于卡片描述的路径、Esc 能关」，不点那一项；请求载荷由单测钉住。
+- **验收不按菜单项**：每一行都会在真人桌面上真的拉起应用，`scripts/verify-browser.mjs` 的 H 段只断言「右键浮出菜单、行文案只可能是基础两项或 `FILE_EDITORS` 里的编辑器（不含 `.app` 原名）、`在文件管理器中显示` 在最后、菜单锚点上带的路径等于卡片描述的路径、Esc 能关」，不点任何一行；请求载荷由单测钉住。
 
 ## 发送键对调（为什么是「换手势」而不是「改快捷键」）
 
@@ -98,7 +100,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
 - 快照：会话 `byId[id].retainedBy.mainView > 0` 判当前会话；工作区 `items[].sessionIds` 判归属，无人认领即空 key `workspace:`。
 - 服务（浏览器半边）：`slots` / `locale` / `configForms` / `sessions` / `workspaces` / `shortcuts` / `remote` / `remote.workspaceFiles` / `remote.session` / `sidebarRight`。**本文件里出现的每一个 `ctx.<service>` 都必须在 inject 里列出**：cordis 不会给没声明的插件挂命名空间，而且症状是静默的——少 `remote.workspaceFiles` 时 `ctx.remote.workspaceFiles.stat` 是 `undefined`，探测恒 unknown、每次按压退回壳；少 `sidebarRight` 时按压被认领却什么都不打开；少 `remote.session` 时改动文件菜单每次都报「无法打开」。2026-10-08 前两种都实拉踩到。宿主半边另外用 `webServer` / `connection` / `settings`，三者都走可选子 fiber，缺了任何一个本 bundle 仍要能加载。
-- 服务与数据（改动文件打开）：`ctx.remote.session.openWorkspacePath({ path, action? })`（`@deepseek-ai/dsh-api-session-controller`，返回 Result 信封；`action` 省略即默认应用，`'reveal'` 为文件管理器）。它由 inject 保证存在；运行时仍按可选读（`ctx.remote?.session`），拿不到就把按下的那一下说成失败，绝不抛错。
+- 服务与数据（改动文件打开）：`ctx.remote.session.openWorkspacePath({ path, action?, application? })` 与 `ctx.remote.session.workspacePathApplications({ path })`（`@deepseek-ai/dsh-api-session-controller`，都返回 Result 信封；`action` 省略即默认应用、`'reveal'` 为文件管理器；`application` 必须是后者给的 `id`）。两条都由 inject 保证存在；运行时仍按可选读（`ctx.remote?.session`），拿不到就把按下的那一下说成失败，绝不抛错。
 - 存在性探测：宿主 remote `workspaceFiles.stat(sessionId, path, signal)`（位置参数，第一个是会话 id，descriptor 里叫 `workspaceFileScope`）。**它返回 Result 信封** `{ok:true,value}` / `{ok:false,error}`，不是抛错——「不存在」是值不是异常，所以判定读 `error.code` / `error.message` 是否含 not-found 一类字样；其余失败归为 unknown。调用点原文见官方包 `workspaceFiles.stat(sessionId, path, signal)`。探测带 2s 上限，超时按 unknown 处理。
 - 模块：`@deepseek-ai/dsh-client-ui-primitives` 是动态客户端包的隐式 baseline external，本轮用到 `MenuItemButton` / `Toast` / `writeClipboard`（同一个 `require`）。`writeClipboard` 只出现在导出清单里，官方 README 没写它 —— 它不存在时症状是复制永远报失败，所以改动后要跑真浏览器验收，不能只看单测。
 - 复制行直接用官方包里的 `IconCopyOutlineRegular`，**没有**内联进本仓库，因此 `THIRD-PARTY-NOTICES.md` 不需要新增条目；`LocateIcon` 的内联约定不受影响。
@@ -120,7 +122,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 99 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 101 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

@@ -121,6 +121,36 @@ window.__ModuleLoader__.load({
       { id: 'zed', name: 'Zed' },
     ]
 
+    /**
+     * Editors and IDEs a changed file may be handed to.
+     *
+     * The OS answers file associations as application paths
+     * (`/Applications/Zed.app`), so the wire name carries the bundle filename;
+     * matching and relabelling here is what turns that into `Zed`. Insiders is
+     * tested first because its path contains the stable product name, and every
+     * label is the official catalog's own product name.
+     */
+    const FILE_EDITORS = [
+      { key: 'vscodeinsiders', label: 'VS Code Insiders', pattern: /visual studio code - insiders/i },
+      { key: 'vscode', label: 'VS Code', pattern: /visual studio code/i },
+      { key: 'cursor', label: 'Cursor', pattern: /\bcursor\b/i },
+      { key: 'windsurf', label: 'Windsurf', pattern: /windsurf/i },
+      { key: 'zed', label: 'Zed', pattern: /\bzed\b/i },
+      { key: 'sublimetext', label: 'Sublime Text', pattern: /sublime text/i },
+      { key: 'xcode', label: 'Xcode', pattern: /\bxcode\b/i },
+      { key: 'androidstudio', label: 'Android Studio', pattern: /android studio/i },
+      { key: 'intellij', label: 'IntelliJ IDEA', pattern: /intellij idea/i },
+      { key: 'pycharm', label: 'PyCharm', pattern: /pycharm/i },
+      { key: 'webstorm', label: 'WebStorm', pattern: /webstorm/i },
+      { key: 'phpstorm', label: 'PhpStorm', pattern: /phpstorm/i },
+      { key: 'goland', label: 'GoLand', pattern: /\bgoland\b/i },
+      { key: 'rider', label: 'Rider', pattern: /\brider\b/i },
+      { key: 'rustrover', label: 'RustRover', pattern: /rustrover/i },
+    ]
+
+    /** A base64 `data:` icon the Host vouched for; the only `img src` this plugin renders. */
+    const APP_ICON = /^data:image\/(?:png|svg\+xml);base64,[A-Za-z0-9+/=]+$/
+
     /** The schemes the OS opener is allowed to receive. */
     const OPENABLE = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
@@ -1271,6 +1301,7 @@ window.__ModuleLoader__.load({
      *
      * @param input.path - the absolute Host path the card recorded.
      * @param input.action - `open` for the default application, `reveal` for the file manager.
+     * @param input.application - a handler id from the file association query, when one was chosen.
      * @param input.remote - the plugin's `ctx.remote`, when the connection exposes one.
      * @param input.notify - raise a notice.
      * @param input.t - the plugin's localized copy.
@@ -1285,7 +1316,10 @@ window.__ModuleLoader__.load({
       const session = input.remote?.session
       const open = session?.openWorkspacePath
       if (typeof open !== 'function') return Promise.resolve(failed())
-      const request = action === 'open' ? { path: input.path } : { path: input.path, action }
+      const chosen = typeof input.application === 'string' && input.application !== ''
+      const request = action !== 'open'
+        ? { path: input.path, action }
+        : (chosen ? { path: input.path, application: input.application } : { path: input.path })
       return Promise.resolve()
         .then(() => open.call(session, request))
         .then((result) => (result?.ok === true ? true : failed()), () => failed())
@@ -1327,8 +1361,27 @@ window.__ModuleLoader__.load({
          */
         open: (input) => {
           seq += 1
-          snapshot = { seq, x: input.x, y: input.y, path: input.path, element: input.element }
+          snapshot = { seq, x: input.x, y: input.y, path: input.path, element: input.element, apps: [] }
           emit()
+          return seq
+        },
+        /**
+         * Patch the menu one association query was measured for.
+         *
+         * The press that opens a menu and the round trip that fills it are
+         * separated by many frames: another menu can open, and this one can
+         * close, before the answer lands. The sequence number is what keeps a
+         * late answer from relabelling a menu it does not belong to.
+         *
+         * @param target - the value `open` returned for that menu.
+         * @param patch - fields to merge into the snapshot.
+         * @returns whether the patch landed.
+         */
+        mark: (target, patch) => {
+          if (snapshot === null || snapshot.seq !== target) return false
+          snapshot = { ...snapshot, ...patch }
+          emit()
+          return true
         },
         /** Retire the menu on screen; an empty seat is not a change. */
         close: () => {
@@ -1357,6 +1410,66 @@ window.__ModuleLoader__.load({
       }
       if (value === null || typeof value !== 'object') return true
       return value.changesFileOpen !== false
+    }
+
+    /**
+     * The editors and IDEs among one file's OS handlers, in the OS's own order.
+     *
+     * The query answers every registered handler — browsers, file-sync clients,
+     * archive tools — and this is the filter that leaves the ones a person would
+     * actually edit code in. One row per product: a second copy of an app that is
+     * already listed does not repeat. A label is the official catalog name, not
+     * the OS bundle filename.
+     *
+     * @param apps - the `workspacePathApplications` answer, when it arrived.
+     * @returns `[{key, label, id, default, icon}]`, in the OS's order.
+     */
+    function editorApplications(apps) {
+      if (!Array.isArray(apps)) return []
+      const rows = []
+      const seen = new Set()
+      for (const app of apps) {
+        if (app === null || typeof app !== 'object') continue
+        const id = String(app.id ?? '')
+        if (id === '') continue
+        const text = id + ' ' + String(app.name ?? '')
+        const editor = FILE_EDITORS.find((entry) => entry.pattern.test(text))
+        if (editor === undefined || seen.has(editor.key)) continue
+        seen.add(editor.key)
+        rows.push({
+          key: editor.key,
+          label: editor.label,
+          id,
+          default: app.default === true,
+          icon: typeof app.icon === 'string' && APP_ICON.test(app.icon) ? app.icon : null,
+        })
+      }
+      return rows
+    }
+
+    /**
+     * The rows one changed-file menu shows.
+     *
+     * The default action and the file-manager reveal are always there, so the
+     * menu that opens before the association query answers is never empty. An
+     * editor the OS itself marks default replaces the generic row — it names the
+     * application the file would open in, which is strictly more informative —
+     * while a default that is not an editor (a browser owning `.html`, say)
+     * keeps the generic row so that action stays reachable.
+     *
+     * @param menu - the changed-file store's snapshot, or null.
+     * @returns `[{key, kind, labelKey?, app?}]`.
+     */
+    function changesFileRows(menu) {
+      if (menu === null || typeof menu !== 'object') return []
+      const apps = Array.isArray(menu.apps) ? menu.apps : []
+      const rows = []
+      if (!apps.some((app) => app.default === true)) {
+        rows.push({ key: 'open', kind: 'open', labelKey: 'changesFile.open' })
+      }
+      for (const app of apps) rows.push({ key: 'app:' + app.id, kind: 'app', app })
+      rows.push({ key: 'reveal', kind: 'reveal', labelKey: 'changesFile.reveal' })
+      return rows
     }
 
     /**
@@ -1580,6 +1693,7 @@ window.__ModuleLoader__.load({
 .flow-locate[data-miss="true"]{color:var(--dsw-alias-state-warning-primary,currentColor)}
 .flow-code-menu-anchor{display:none}
 .flow-changes-menu-anchor{display:none}
+.flow-app-icon{display:block;width:14px;height:14px;border-radius:3px}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -1626,6 +1740,7 @@ window.__ModuleLoader__.load({
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
       'changesFile.open': '用默认应用打开',
+      'changesFile.appDefault': '{app}（默认）',
       'changesFile.reveal': '在文件管理器中显示',
       'changesFile.failed': '无法用默认应用打开这个文件',
       'changesFile.revealFailed': '无法在文件管理器中显示这个文件',
@@ -1640,7 +1755,7 @@ window.__ModuleLoader__.load({
       'section.codeMenu.title': '行内代码右键菜单',
       'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：复制把代码原文写进剪贴板；打开对 ~/… 家目录路径会先展开、再由插件在侧栏打开（壳自己解析不了），其余仍走壳自己的链路。单击一条指向不存在路径的行内代码会换成一条非阻塞提示；关闭后右键与这条接管都不注册。',
       'section.changesFile.title': '改动文件右键菜单',
-      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开 / 在文件管理器中显示」菜单，两条都交给宿主自己的会话 Remote 执行。关闭后不注册这个右键菜单。',
+      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开 / 在文件管理器中显示」；系统为该文件注册的编辑器与 IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等）会作为额外行出现，带图标，当前默认那个标「（默认）」。都交给宿主自己的会话 Remote 执行，关闭后不注册这个右键菜单。',
       'section.sendKey.title': '⌘+Enter 发送',
       'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
       'section.saveError': '偏好没有保存成功，请重试',
@@ -1666,6 +1781,7 @@ window.__ModuleLoader__.load({
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
       'changesFile.open': 'Open in Default App',
+      'changesFile.appDefault': '{app} (default)',
       'changesFile.reveal': 'Show in File Manager',
       'changesFile.failed': 'Could not open this file in the default application',
       'changesFile.revealFailed': 'Could not show this file in the file manager',
@@ -1680,7 +1796,7 @@ window.__ModuleLoader__.load({
       'section.codeMenu.title': 'Inline code right-click menu',
       'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Copy puts the code’s text on the clipboard, and Open expands a ~/… home path and opens it in the Sidebar itself — the shell cannot resolve that one; everything else keeps the shell’s own path. Left-clicking code whose path does not exist becomes a non-blocking notice instead; switching this off registers neither.',
       'section.changesFile.title': 'Changed-file right-click menu',
-      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App / Show in File Manager”; both run through the Host’s own Session Remote. Switching this off registers no such menu.',
+      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App / Show in File Manager”, and the editors and IDEs the OS registered for that file (VS Code, Zed, Xcode, IntelliJ IDEA…) appear as extra rows with their icons, the current default marked “(default)”. All of them run through the Host’s own Session Remote; switching this off registers no such menu.',
       'section.sendKey.title': '⌘+Enter to send',
       'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
       'section.saveError': 'The preference was not saved. Try again.',
@@ -2044,12 +2160,16 @@ window.__ModuleLoader__.load({
 
       if (!enabled || menu === null) return null
 
-      const choose = (action) => {
+      const choose = (row) => {
         const { path, element } = menu
         // Closing first keeps the menu's own dismissal out of the way of
         // whatever this is about to open.
         store.close()
-        props.openFile({ path, element, action })
+        if (row.kind === 'app') {
+          props.openFile({ path, element, action: 'open', application: row.app.id })
+          return
+        }
+        props.openFile({ path, element, action: row.kind === 'reveal' ? 'reveal' : 'open' })
       }
 
       return h(
@@ -2062,16 +2182,21 @@ window.__ModuleLoader__.load({
           getAnchorRect: anchorRect,
           onClose: () => { store.close() },
         },
-        h(
+        changesFileRows(menu).map((row) => h(
           MenuItemButton,
-          { key: 'open', onSelect: () => { choose('open') } },
-          t('changesFile.open'),
-        ),
-        h(
-          MenuItemButton,
-          { key: 'reveal', onSelect: () => { choose('reveal') } },
-          t('changesFile.reveal'),
-        ),
+          {
+            key: row.key,
+            // An application row wears the icon the OS handed over for it; the
+            // generic rows have none, which is what the shipped menu items do.
+            icon: row.kind === 'app' && row.app.icon !== null
+              ? h('img', { className: 'flow-app-icon', src: row.app.icon, alt: '' })
+              : undefined,
+            onSelect: () => { choose(row) },
+          },
+          row.kind === 'app'
+            ? (row.app.default === true ? t('changesFile.appDefault', { name: row.app.label }) : row.app.label)
+            : t(row.labelKey),
+        )),
       )
     }
 
@@ -2344,6 +2469,37 @@ window.__ModuleLoader__.load({
         }
         const openInFileManager = (absolute) => resolveApps()
           .then((apps) => openInApp(fileManagerAppOf(apps), absolute), () => false)
+        // The file's own registered handlers, one query per path. The answer
+        // carries icons, so it is not re-asked on every right-click; a failed
+        // answer is not cached, because a Host that is briefly away would
+        // otherwise leave the menu short for the rest of the page's life.
+        const fileAppsCache = new Map()
+        const readFileApplications = (path) => {
+          const cached = fileAppsCache.get(path)
+          if (cached !== undefined) return cached
+          const query = ctx.remote?.session?.workspacePathApplications
+          if (typeof query !== 'function') return Promise.resolve(null)
+          const answer = Promise.resolve()
+            .then(() => query.call(ctx.remote.session, { path }))
+            .then(
+              (result) => (result?.ok === true && Array.isArray(result.value) ? result.value : null),
+              () => null,
+            )
+            .then((apps) => {
+              if (apps === null) fileAppsCache.delete(path)
+              return apps
+            })
+          fileAppsCache.set(path, answer)
+          return answer
+        }
+        // The menu opens on the press and fills in when the answer lands; the
+        // sequence number keeps a late answer off a menu it does not belong to.
+        const classifyChangedFileMenu = (target, path) => {
+          readFileApplications(path).then((apps) => {
+            if (apps === null) return
+            changesMenu.mark(target, { apps: editorApplications(apps) })
+          }, () => {})
+        }
         // The context menu labels itself from a probe: a `~/…` directory swaps the
         // shipped pair for the directory set. The sequence number keeps a late
         // answer from re-labelling a menu that has already been replaced.
@@ -2441,7 +2597,9 @@ window.__ModuleLoader__.load({
             }
             if (detach !== null) return
             const onContextMenu = (event) => {
-              handleChangesContextMenu(event, { open: (hit) => { changesMenu.open(hit) } })
+              handleChangesContextMenu(event, {
+                open: (hit) => { classifyChangedFileMenu(changesMenu.open(hit), hit.path) },
+              })
             }
             document.addEventListener('contextmenu', onContextMenu, true)
             detach = () => { document.removeEventListener('contextmenu', onContextMenu, true) }
@@ -2588,7 +2746,14 @@ window.__ModuleLoader__.load({
             notify,
             useLocaleRevision,
             openFile: (hit) => {
-              openChangedFile({ path: hit.path, action: hit.action, remote: remoteOf(), notify, t })
+              openChangedFile({
+                path: hit.path,
+                action: hit.action,
+                application: hit.application,
+                remote: remoteOf(),
+                notify,
+                t,
+              })
             },
           }),
         }, ChangesFileMenu)), 'flow: changed files menu overlay')
@@ -2649,6 +2814,8 @@ window.__ModuleLoader__.load({
         handleChangesContextMenu,
         createChangesMenuStore,
         readChangesFileOpen,
+        editorApplications,
+        changesFileRows,
         openChangedFile,
         isPlainLeftPress,
         codeOpenTarget,

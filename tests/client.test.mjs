@@ -775,6 +775,7 @@ test('both dictionaries stay complete, copy included', async () => {
     'section.sendKey.description',
     'changesFile.open',
     'changesFile.reveal',
+    'changesFile.appDefault',
     'changesFile.failed',
     'changesFile.revealFailed',
     'section.changesFile.title',
@@ -792,6 +793,7 @@ test('both dictionaries stay complete, copy included', async () => {
   assert.equal(flow.zh['codeMenu.done'], '已复制行内代码')
   assert.equal(flow.zh['changesFile.open'], '用默认应用打开')
   assert.equal(flow.zh['changesFile.reveal'], '在文件管理器中显示')
+  assert.equal(flow.zh['changesFile.appDefault'], '{app}（默认）')
   assert.equal(flow.zh['changesFile.failed'], '无法用默认应用打开这个文件')
   assert.equal(flow.zh['changesFile.revealFailed'], '无法在文件管理器中显示这个文件')
 })
@@ -1678,7 +1680,7 @@ test('a context-menu press on a changed-file row is claimed, and any other press
   assert.equal(passed.stopped, 0)
 })
 
-test('the changed-file seat mints one fresh snapshot per open', async () => {
+test('the changed-file seat mints one fresh snapshot per open, and patches only its own', async () => {
   const { createChangesMenuStore } = (await load()).internals
   const store = createChangesMenuStore()
   assert.equal(store.getSnapshot(), null)
@@ -1686,24 +1688,35 @@ test('the changed-file seat mints one fresh snapshot per open', async () => {
   let wakes = 0
   const off = store.subscribe(() => { wakes += 1 })
   const element = { nodeType: 1 }
-  store.open({ x: 5, y: 6, path: '/a/b.ts', element })
+  const firstSeq = store.open({ x: 5, y: 6, path: '/a/b.ts', element })
   const first = store.getSnapshot()
-  assert.deepEqual(first, { seq: 1, x: 5, y: 6, path: '/a/b.ts', element })
+  assert.deepEqual(first, { seq: firstSeq, x: 5, y: 6, path: '/a/b.ts', element, apps: [] })
   assert.equal(wakes, 1)
 
   // The very same press point again is still a new object: React compares
   // snapshots by identity, so a re-open has to re-render.
-  store.open({ x: 5, y: 6, path: '/a/b.ts', element })
+  const secondSeq = store.open({ x: 5, y: 6, path: '/a/b.ts', element })
   assert.equal(store.getSnapshot() === first, false)
-  assert.equal(store.getSnapshot().seq, 2)
+  assert.equal(store.getSnapshot().seq, secondSeq)
   assert.equal(wakes, 2)
+
+  // The association query is a round trip: its answer may land after another
+  // menu opened or after this one closed, so it only patches the menu it was
+  // measured for.
+  const editors = [{ key: 'vscode', label: 'VS Code', id: '/Applications/Visual Studio Code.app', default: true, icon: null }]
+  assert.equal(store.mark(firstSeq, { apps: editors }), false)
+  assert.deepEqual(store.getSnapshot().apps, [])
+  assert.equal(store.mark(secondSeq, { apps: editors }), true)
+  assert.deepEqual(store.getSnapshot().apps, editors)
+  assert.equal(wakes, 3)
 
   off()
   store.close()
   assert.equal(store.getSnapshot(), null)
-  assert.equal(wakes, 2, 'an unsubscribed listener stays silent')
+  assert.equal(wakes, 3, 'an unsubscribed listener stays silent')
   store.close()
-  assert.equal(wakes, 2, 'closing an empty seat is not a second wake-up')
+  assert.equal(wakes, 3, 'closing an empty seat is not a second wake-up')
+  assert.equal(store.mark(secondSeq, { apps: [] }), false, 'a closed seat swallows a late answer')
 })
 
 test('readChangesFileOpen defaults to on and only an explicit false turns it off', async () => {
@@ -1733,6 +1746,13 @@ test('openChangedFile asks the Host, and reports a refusal in words', async () =
   const revealing = { session: { openWorkspacePath: (request) => { revealed.push(request); return Promise.resolve({ ok: true }) } } }
   assert.equal(await openChangedFile({ path: '/a/b.ts', action: 'reveal', remote: revealing, notify, t }), true)
   assert.deepEqual(revealed, [{ path: '/a/b.ts', action: 'reveal' }])
+
+  // A chosen application rides the same request; the Host re-validates that the
+  // id really is a registered handler for the file.
+  const applied = []
+  const withApp = { session: { openWorkspacePath: (request) => { applied.push(request); return Promise.resolve({ ok: true }) } } }
+  assert.equal(await openChangedFile({ path: '/a/b.ts', application: '/Applications/Zed.app', remote: withApp, notify, t }), true)
+  assert.deepEqual(applied, [{ path: '/a/b.ts', application: '/Applications/Zed.app' }])
 
   // A refusal envelope, a rejection, and a Host that never mounted the remote
   // all read as the same spoken refusal — never as silence, and never as the
@@ -1794,4 +1814,59 @@ test('the changed-file menu is handed an opener beside its store', async () => {
   assert.ok(menu, 'the changed-file menu owns its own overlay cell')
   assert.equal(typeof menu.inject().openFile, 'function')
 })
+
+
+test('editorApplications keeps the editors and relabels them with the catalog names', async () => {
+  const { editorApplications } = (await load()).internals
+  const apps = [
+    { id: '/Applications/Visual Studio Code.app', name: 'Visual Studio Code.app', default: true, icon: 'data:image/png;base64,AAAA' },
+    { id: '/Applications/Google Chrome.app', name: 'Google Chrome.app', default: false, icon: null },
+    { id: '/Applications/夸克网盘.app', name: '夸克网盘.app', default: false, icon: null },
+    { id: '/Applications/Zed.app', name: 'Zed.app', default: false, icon: null },
+    { id: '/Applications/Xcode.app', name: 'Xcode.app', default: false, icon: null },
+    { id: '/Applications/IntelliJ IDEA.app', name: 'IntelliJ IDEA.app', default: false, icon: null },
+    { id: '/Applications/PyCharm.app', name: 'PyCharm.app', default: false, icon: null },
+  ]
+  assert.deepEqual(editorApplications(apps), [
+    { key: 'vscode', label: 'VS Code', id: '/Applications/Visual Studio Code.app', default: true, icon: 'data:image/png;base64,AAAA' },
+    { key: 'zed', label: 'Zed', id: '/Applications/Zed.app', default: false, icon: null },
+    { key: 'xcode', label: 'Xcode', id: '/Applications/Xcode.app', default: false, icon: null },
+    { key: 'intellij', label: 'IntelliJ IDEA', id: '/Applications/IntelliJ IDEA.app', default: false, icon: null },
+    { key: 'pycharm', label: 'PyCharm', id: '/Applications/PyCharm.app', default: false, icon: null },
+  ])
+
+  // Insiders is its own editor, never the stable one; a second copy of an editor
+  // that is already listed does not repeat a row.
+  assert.deepEqual(
+    editorApplications([{ id: '/Applications/Visual Studio Code - Insiders.app', name: 'Visual Studio Code - Insiders.app', default: false, icon: null }]).map((row) => row.key),
+    ['vscodeinsiders'],
+  )
+  assert.deepEqual(
+    editorApplications([
+      { id: '/Applications/Zed.app', name: 'Zed.app', default: false, icon: null },
+      { id: '/Applications/Zed Preview.app', name: 'Zed Preview.app', default: false, icon: null },
+    ]).map((row) => row.key),
+    ['zed'],
+  )
+  // A browser-only list, malformed entries and a missing list all degrade quietly.
+  assert.deepEqual(editorApplications([{ id: '/Applications/Google Chrome.app', name: 'Google Chrome.app', default: true, icon: null }]), [])
+  assert.deepEqual(editorApplications([null, 7, { name: 'no id' }]), [])
+  assert.deepEqual(editorApplications(null), [])
+})
+
+test('changesFileRows lead with the default action, then the editors, and end on reveal', async () => {
+  const { changesFileRows } = (await load()).internals
+  const element = { nodeType: 1 }
+  const editor = { key: 'vscode', label: 'VS Code', id: '/Applications/Visual Studio Code.app', default: true, icon: null }
+
+  // The query has not landed yet: the shipped pair, so the menu is never empty.
+  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [] }).map((row) => row.kind), ['open', 'reveal'])
+  // The OS default is one of the editors, so that row IS the default action and
+  // the generic row would only duplicate it.
+  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [editor] }).map((row) => row.kind), ['app', 'reveal'])
+  // An editor that is not the OS default keeps the generic default action.
+  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [{ ...editor, default: false }] }).map((row) => row.kind), ['open', 'app', 'reveal'])
+  assert.deepEqual(changesFileRows(null).map((row) => row.kind), [])
+})
+
 
