@@ -816,12 +816,9 @@ window.__ModuleLoader__.load({
       // the menu's 「打开」 — is already an explicit instruction. Claiming it
       // again would claim the re-dispatch too, and that loop never ends.
       if (event.isTrusted === false) return null
-      const hit = codeMenuTarget(event)
-      if (hit === null) return null
-      if (isTildePath(hit.text)) return hit
-      if (typeof hit.element.querySelector !== "function") return null
-      if (shellWiredControl(hit.element) === null) return null
-      return hit
+      // Every inline code in scope is this plugin's press now: one that can be
+      // opened is opened, and one that cannot is copied.
+      return codeMenuTarget(event)
     }
 
     /**
@@ -907,6 +904,9 @@ window.__ModuleLoader__.load({
       if (typeof text !== 'string') return null
       const trimmed = text.trim()
       if (trimmed === '') return null
+      // Whitespace means prose, a command line or a sentence, never a path this
+      // plugin may spend a round trip on: prose keeps offering copy alone.
+      if (/\s/.test(trimmed)) return null
       if (isTildePath(trimmed)) {
         const absolute = expandHomePath(trimmed, typeof home === 'function' ? home() : home)
         return absolute === null ? null : { probe: absolute, absolute }
@@ -951,6 +951,11 @@ window.__ModuleLoader__.load({
      */
     function codeMenuRows(menu) {
       if (menu === null || typeof menu !== 'object') return []
+      // Nothing can open this code — no shell control, no path shape — so the
+      // menu offers the one thing it has, without a probe it would never send.
+      if (menu.copyOnly === true) {
+        return [{ key: 'copy', kind: 'copy', labelKey: 'codeMenu.copy' }]
+      }
       if (typeof menu.path !== 'string' || menu.path === '') {
         return [
           { key: 'open', kind: 'open', labelKey: 'codeMenu.open' },
@@ -1069,9 +1074,17 @@ window.__ModuleLoader__.load({
       const hit = codeOpenTarget(event)
       if (hit === null) return Promise.resolve("pass")
       const plan = inlineCodePlan(hit, input.home)
-      if (plan === null) return Promise.resolve("pass")
       event.preventDefault()
       event.stopPropagation()
+      if (plan === null) {
+        // Nothing can open this code: the shell wired no control into it and it
+        // names no home path this plugin can reach. The press does the one thing
+        // left — it copies the code — instead of leaving a dead menu entry.
+        if (typeof input.copy !== 'function') return Promise.resolve("pass")
+        return Promise.resolve()
+          .then(() => input.copy(hit.text))
+          .then(() => "copy", () => "copy")
+      }
       return openInlineCodeHit(hit, plan, input)
     }
 
@@ -2744,9 +2757,14 @@ window.__ModuleLoader__.load({
         // not belong to.
         const classifyCodeMenu = (target, hit) => {
           const plan = inlineCodePlan(hit, hostHome)
-          if (plan === null) return
           const root = sessionCwd(sessions.getSnapshot(), currentSessionId(sessions.getSnapshot()))
           const resolved = pathTarget(hit.text, hostHome(), root)
+          // Nothing to open and nothing path-shaped to probe: copy alone, decided
+          // before any round trip.
+          if (plan === null && resolved === null) {
+            codeMenu.mark(target, { copyOnly: true })
+            return
+          }
           if (resolved === null) return
           // Copy alone until the answer lands, so no row moves under the pointer.
           codeMenu.mark(target, { path: resolved.absolute, apps: [] })
@@ -2818,6 +2836,7 @@ window.__ModuleLoader__.load({
                 },
                 openHome: openAtHome,
                 openDirectory: openInFileManager,
+                copy: (text) => copyInlineCode({ text, write: writeClipboard, notify, t }),
                 notify,
                 t,
               })

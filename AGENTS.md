@@ -43,9 +43,9 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 对话正文里的行内代码（`dsh-client-ui-primitives` 的 markdown 渲染器，`inlineCode` → `<code>`）右键浮出一个两项菜单。三件事必须同时成立，实现也就长成了现在的样子：
 
-- **右键只监听 `contextmenu`；左键只在两种情况下接管**：壳自己接了线、且路径存在时，本插件对左键零介入，单击打开的链路仍是壳自己的（`MarkdownDelegateProvider` 注入的 `openFile`）；判定**路径不存在**、或文本是壳解析不了的 `~/…` 家目录路径时，才 `preventDefault() + stopPropagation()` —— 前者换成一条不会打断操作的提示（替掉壳那个必须点掉的「path open failed」弹窗），后者由本插件展开后在右侧栏打开。两个监听都注册在 `document` 捕获阶段，没命中一行都不动。
+- **右键只监听 `contextmenu`；左键接管一切在范围内的行内代码**：能打开的照旧打开——壳自己接了线的先 `preventDefault() + stopPropagation()` 再重新派发壳的激活（`activateInlineCode()`，`MarkdownDelegateProvider` 注入的 `openFile` 链路不变），`~/…` 家目录路径由本插件展开后在右侧栏/文件管理器打开；**打不开的（壳没接线、也不是能解析的家目录路径）直接复制**，这样单击永远不会落在一个什么都不做的死按钮上。两个监听都注册在 `document` 捕获阶段，`pre`／`contenteditable`／`a[href]`／空白／非 markdown 一律放行。
 - **顺序不能反过来：先接管，再探测。** `preventDefault()` 只在事件还在派发时才有意义，而探测是宿主往返；所以按下先被接管，探测回来发现路径存在时用 `activateInlineCode()` **重新派发**壳的那次激活。试图「先 await 探测、不存在再 preventDefault」是无效实现——等探测回来事件早已派发完毕。唯一能提前决定的是「这一下有没有得打开」：`inlineCodePlan()` 同步算出「交给壳」还是「展开家目录」，算不出目标就压根不接管（返回 `pass`，不 `preventDefault`）。
-- **fail open 是硬要求**：探测接口拿不到、抛错、超时、或返回的失败不是「不存在」那一类时，壳自己接了线的路径一律走「重新派发」；`~/…` 这种没有壳链路可交的路径则**什么都不做**，绝不用一次未证实的探测去打开一个可能不存在的文件。宁可让用户继续看到壳的弹窗，也不允许把存在的路径判成不存在（那会让一个本来能打开的文件彻底点不开）。
+- **fail open 是硬要求**：探测接口拿不到、抛错、超时、或返回的失败不是「不存在」那一类时，壳自己接了线的路径一律走「重新派发」；`~/…` 这种没有壳链路可交的路径则**不替它猜着打开**（左键那条落进复制），绝不用一次未证实的探测去打开一个可能不存在的文件。宁可让用户继续看到壳的弹窗，也不允许把存在的路径判成不存在（那会让一个本来能打开的文件彻底点不开）。
 - **开关关闭时不注册监听**（不是注册了再判断）：`ctx.configForms` 的表单有 `subscribe`，把它当 Host 回声用 —— `readCodeMenuEnabled` 翻到 false 就 detach，翻回 true 再 attach。`tests/client.test.mjs` 有断言钉住这条：关闭后 `document` 上根本不存在 `contextmenu` 监听。
 - **「打开」默认是合成一次普通左键 `click`**，不自己调 RPC：这样「侧栏预览还是系统默认程序」的分叉留在壳里。**`~/…` 是例外** —— 壳的 `fileAddressFor` 把非绝对路径按工作区根解析，`~/x` 永远落不到家目录，所以这一条由本插件展开成绝对路径后自己处理：普通文件拼 `dsh-resource://file/session/<id>/<abs>` 交给 `ctx.sidebarRight.openResource()`（语法见 `dsh-util-workspace-path` 的 `sessionFileAddress`，浏览器半边无法 import，故内联在 `fileAddress()` 里）；目录改用宿主既有的 `POST /open-in-app/open`（`{app, path}`）在平台文件管理器打开，因为侧栏预览只显示文件。
 
@@ -55,7 +55,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 **菜单用壳的 `Menu`，不是 `MenuSurface`。** 键盘漫游（↑↓/Home/End）、`Esc`、点外面的 `pointerdown` 关闭全在 `Menu` 里；`MenuSurface` 只是它画的那张卡（`ComponentPropsWithoutRef<"div">` + `compact`，位置靠 `style`），直接用 surface 等于自己重写键盘处理。位置方面：`portal` 的列表挂在 `document.body` 下、由 `getAnchorRect` 给的矩形定位，所以右键点被表达成那个点的零尺寸矩形（`cursorRect`），列表浮在光标右下并自动夹在视口内。`autoFocus` 是必需的 —— 右键打开时焦点不在任何触发器上，没有它方向键走不起来。
 
-**行内代码菜单的行是探测出来的。** 右键时先弹菜单，随后对一切**像路径**的代码分类：`~/…` 与任何壳接了 button 的路径都由 `pathTarget()` 同步解析成绝对路径（`~/…` 展开家目录、绝对路径原样、其余按会话快照里的 `cwd` 拼），马上 `mark(seq, {path, apps: []})` 先把菜单变成「复制」单行，再用 `workspaceFiles.stat` 判文件还是目录——**目录**取 `GET /open-in-app/apps` 那份 catalog（与壳的 Open In 同一串，图标走 `/open-in-app/icon/<id>`，名称是官方词典里的原文），**文件**取 `ctx.remote.session.workspacePathApplications({path})` 再按 `FILE_EDITORS` 过滤出 IDE（图标是宿主渲染好的 data URL，默认那个标「（默认）」）。`codeMenuRows(menu)` 只把有 `menu.path` 的菜单变成「复制在最上、应用行随后」，非路径代码（`npm test` 这种）保持默认的「打开 / 复制」。store 的 `mark(seq, patch)` 只打在同一个 seq 上：右键与探测结果之间隔着多帧，晚到的答案绝不能改到别的菜单；探测说不存在、或给不出确定答案，就只留「复制」。
+**行内代码菜单的行是探测出来的。** 右键时先弹菜单，随后对一切**像路径**的代码分类：`~/…` 与任何壳接了 button 的路径都由 `pathTarget()` 同步解析成绝对路径（`~/…` 展开家目录、绝对路径原样、其余按会话快照里的 `cwd` 拼），马上 `mark(seq, {path, apps: []})` 先把菜单变成「复制」单行，再用 `workspaceFiles.stat` 判文件还是目录——**目录**取 `GET /open-in-app/apps` 那份 catalog（与壳的 Open In 同一串，图标走 `/open-in-app/icon/<id>`，名称是官方词典里的原文），**文件**取 `ctx.remote.session.workspacePathApplications({path})` 再按 `FILE_EDITORS` 过滤出 IDE（图标是宿主渲染好的 data URL，默认那个标「（默认）」）。`codeMenuRows(menu)` 只把有 `menu.path` 的菜单变成「复制在最上、应用行随后」，`menu.copyOnly` 的菜单只剩「复制」。**含空白（空格/换行）的代码一律判为散文**：`pathTarget()` 同步返回 null，于是 `classifyCodeMenu()` 立刻 `mark(seq, {copyOnly: true})`，连探测都不发——所以「打开」只会出现在真有壳控制的代码上（那一条的打开是真能打开的）。store 的 `mark(seq, patch)` 只打在同一个 seq 上：右键与探测结果之间隔着多帧，晚到的答案绝不能改到别的菜单；探测说不存在、或给不出确定答案，就只留「复制」。
 
 **`shell.overlay` 上是本插件的第二个 cell。** 槽合同里写得很明确：`id` 是 cell 键，新 id 加在已有条目旁边，复用已有 id 则**进入那个 cell 并替换它**。复制提示占着 `flow`，菜单因此用 `flow.code-menu`，两者互不顶替（`tests/client.test.mjs` 断言两条 `shell.overlay` 注册的 id 不同）。
 
@@ -123,7 +123,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 106 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 107 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

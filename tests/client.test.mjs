@@ -440,6 +440,10 @@ test("a path-looking code resolves to its probe path and its absolute path", asy
   assert.equal(pathTarget("~/x", null, "/work"), null)
   assert.equal(pathTarget("src/a.ts", null, null), null)
   assert.equal(pathTarget("", "/Users/a", "/work"), null)
+  // Whitespace means a sentence, a command line or prose — never a path, and
+  // never worth a probe: the menu stays copy-only.
+  assert.equal(pathTarget("PhysMem: 23G used, 120M unused", "/Users/a", "/work"), null)
+  assert.equal(pathTarget("npm test", "/Users/a", "/work"), null)
 })
 
 test("a probe patch names the kind and the path, and nothing else moves the menu", async () => {
@@ -462,6 +466,10 @@ test("the code menu is copy-first once the code names a path", async () => {
   // A code that names no path keeps the shipped pair.
   assert.deepEqual(codeMenuRows({ text: "npm test" }), [
     { key: "open", kind: "open", labelKey: "codeMenu.open" },
+    { key: "copy", kind: "copy", labelKey: "codeMenu.copy" },
+  ])
+  // Nothing can open it: copy alone, no probe, no dead 「打开」.
+  assert.deepEqual(codeMenuRows({ text: "npm test", copyOnly: true }), [
     { key: "copy", kind: "copy", labelKey: "codeMenu.copy" },
   ])
   // A path whose probe is still out: copy alone, so no row shifts under the pointer.
@@ -1103,19 +1111,22 @@ function leftPress(hit, overrides = {}) {
 function pressSpy(stat) {
   const opened = []
   const notices = []
+  const copied = []
   return {
     opened,
     notices,
+    copied,
     input: {
       stat,
       open: (element) => { opened.push(element) },
+      copy: (text) => { copied.push(text); return true },
       notify: (text, tone) => { notices.push({ text, tone }) },
       t: (key) => key,
     },
   }
 }
 
-test("an openable inline code is the only thing a plain left press is probed for", async () => {
+test("every inline code in scope is claimed by a plain left press", async () => {
   const { codeOpenTarget } = (await load()).internals
   const hit = clickableCode({ text: "  src/app.ts\n" })
   assert.deepEqual(codeOpenTarget(leftPress(hit)), { element: hit.element, text: "src/app.ts" })
@@ -1127,11 +1138,12 @@ test("an openable inline code is the only thing a plain left press is probed for
   assert.equal(codeOpenTarget(leftPress(clickableCode({ text: "   " }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ markdown: false }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ node: false }))), null)
-  // A code the shell did not make clickable has nothing to open, so it must not
-  // cost a Host round trip.
+  // A code the shell did not make clickable has nothing to open, but the press
+  // is still ours: it copies instead. Claiming it here is what keeps the menu
+  // and the press from promising an open that cannot happen.
   const inert = inlineCode({ text: "npm test" })
   inert.element.querySelector = () => null
-  assert.equal(codeOpenTarget(leftPress(inert)), null)
+  assert.deepEqual(codeOpenTarget(leftPress(inert)), { element: inert.element, text: "npm test" })
   // Modified presses belong to the browser and to other gestures.
   assert.equal(codeOpenTarget(leftPress(hit, { metaKey: true })), null)
   assert.equal(codeOpenTarget(leftPress(hit, { ctrlKey: true })), null)
@@ -1188,17 +1200,29 @@ test("anything the probe cannot answer opens the shell path (never a false notic
   }
 })
 
-test("a press this plugin does not own costs nothing", async () => {
+test("a press on code with nothing to open copies it instead", async () => {
   const { handleInlineCodeClick } = (await load()).internals
   const inert = inlineCode({ text: "npm test" })
   inert.element.querySelector = () => null
   const press = leftPress(inert)
   const spy = pressSpy(() => { throw new Error("the probe must not run") })
 
+  assert.equal(await handleInlineCodeClick(press, spy.input), "copy")
+  assert.equal(press.prevented, 1, "the press is claimed so the browser does nothing else with it")
+  assert.equal(press.stopped, 1)
+  assert.deepEqual(spy.copied, ["npm test"])
+  assert.deepEqual(spy.opened, [], "nothing may be probed or opened for a code with no owner")
+})
+
+test("a press outside this plugin's scope costs nothing", async () => {
+  const { handleInlineCodeClick } = (await load()).internals
+  const press = leftPress(clickableCode({ anchor: true }))
+  const spy = pressSpy(() => { throw new Error("the probe must not run") })
+
   assert.equal(await handleInlineCodeClick(press, spy.input), "pass")
   assert.equal(press.prevented, 0)
   assert.equal(press.stopped, 0)
-  assert.deepEqual(spy.opened, [])
+  assert.deepEqual(spy.copied, [])
 })
 
 // --- Tilde-path inline code: expand the Host home, then open it here --------
@@ -1243,10 +1267,10 @@ test("a tilde code is openable even though the shell wired no control into it", 
   const { codeOpenTarget } = (await load()).internals
   const hit = homeCode()
   assert.deepEqual(codeOpenTarget(leftPress(hit)), { element: hit.element, text: "~/notes/todo.md" })
-  // Every other control-less code stays inert.
+  // Every other control-less code is claimed too — to be copied, not opened.
   const inert = inlineCode({ text: "npm test" })
   inert.element.querySelector = () => null
-  assert.equal(codeOpenTarget(leftPress(inert)), null)
+  assert.deepEqual(codeOpenTarget(leftPress(inert)), { element: inert.element, text: "npm test" })
 })
 
 test("a tilde press is probed as the Host home path and opened there", async () => {
@@ -1314,21 +1338,23 @@ test("an unanswered tilde probe opens nothing instead of guessing", async () => 
   assert.deepEqual(notices, [], "an unknown verdict must never claim the path is missing")
 })
 
-test("without a Host home a tilde press is left alone, not claimed", async () => {
+test("without a Host home a tilde press copies, because nothing can open it", async () => {
   const { handleInlineCodeClick } = (await load()).internals
   const press = leftPress(homeCode())
+  const copied = []
   const input = {
     home: () => null,
     stat: () => { throw new Error("the probe must not run") },
     open: () => { throw new Error("the shell must not be re-dispatched") },
     openHome: () => { throw new Error("nothing may be opened") },
+    copy: (text) => { copied.push(text); return true },
     notify: () => { throw new Error("nothing may be noticed") },
     t: (key) => key,
   }
 
-  assert.equal(await handleInlineCodeClick(press, input), "pass")
-  assert.equal(press.prevented, 0)
-  assert.equal(press.stopped, 0)
+  assert.equal(await handleInlineCodeClick(press, input), "copy")
+  assert.deepEqual(copied, ["~/notes/todo.md"])
+  assert.equal(press.prevented, 1)
 })
 
 test("the menu opens a tilde code the shell never wired, and only that one", async () => {
