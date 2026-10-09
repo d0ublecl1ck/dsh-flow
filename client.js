@@ -712,33 +712,52 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One Range per URL that lives inside an over-captured anchor.
+     * The Range covering the URL inside one over-captured anchor, or null.
      *
-     * `markTrimmedAnchors` drops the shell's underline for those anchors, so the
-     * URL part is underlined by the same highlight the plain-text URLs use —
-     * the plugin's own link style, and the only line the reader sees.
+     * The shell underlines the whole anchor (see `markTrimmedAnchors`); this is
+     * the slice that is really a link, so the hover line can be painted over just
+     * it.
      *
-     * @param root - the conversation element to scan.
-     * @returns Range objects, one per over-captured URL.
+     * @param anchor - the over-captured `<a href>`.
+     * @returns a Range over the URL token, or null when the anchor is exact.
      */
-    function trimmedUrlRanges(root) {
-      if (!isElement(root) || typeof root.querySelectorAll !== 'function') return []
-      const doc = root.ownerDocument
-      if (typeof doc?.createRange !== 'function') return []
-      const ranges = []
-      for (const anchor of root.querySelectorAll('a[href]')) {
-        if (ranges.length >= TEXT_LINK_RANGE_LIMIT) break
-        if (overcapturedAnchor(anchor) === null) continue
-        const node = [...anchor.childNodes].find((child) => child.nodeType === 3)
-        if (node === undefined || anchor.textContent !== node.data) continue
-        const first = linkTokensIn(node.data)[0]
-        if (first === undefined) continue
-        const range = doc.createRange()
-        range.setStart(node, first.start)
-        range.setEnd(node, first.end)
-        ranges.push(range)
+    function trimmedUrlRangeOf(anchor) {
+      if (overcapturedAnchor(anchor) === null) return null
+      const node = [...anchor.childNodes].find((child) => child.nodeType === 3)
+      if (node === undefined || anchor.textContent !== node.data) return null
+      const first = linkTokensIn(node.data)[0]
+      if (first === undefined) return null
+      const doc = anchor.ownerDocument
+      if (typeof doc?.createRange !== 'function') return null
+      const range = doc.createRange()
+      range.setStart(node, first.start)
+      range.setEnd(node, first.end)
+      return range
+    }
+
+    /**
+     * Paint the hover underline over one over-captured anchor's URL, or clear it.
+     *
+     * The shell's own line is off for these anchors, so the hover affordance is
+     * reproduced here: link-coloured and only ever as wide as the URL itself.
+     *
+     * @param anchor - the anchor the pointer is on, or null to clear.
+     */
+    function paintHoverUnderline(anchor) {
+      try {
+        const api = globalThis.CSS
+        const highlights = api === undefined || api === null ? undefined : api.highlights
+        const HighlightCtor = globalThis.Highlight
+        if (highlights === undefined || highlights === null || typeof HighlightCtor !== 'function') return
+        const range = anchor === null ? null : trimmedUrlRangeOf(anchor)
+        if (range === null) {
+          highlights.delete(TEXT_LINK_HOVER_HIGHLIGHT)
+          return
+        }
+        highlights.set(TEXT_LINK_HOVER_HIGHLIGHT, new HighlightCtor(range))
+      } catch {
+        // The API is optional; a refusal is not this feature's to report.
       }
-      return ranges
     }
 
     /**
@@ -760,7 +779,7 @@ window.__ModuleLoader__.load({
       if (highlights === undefined || highlights === null || typeof HighlightCtor !== 'function') return 0
       try {
         markTrimmedAnchors(root)
-        const ranges = [...textLinkRanges(root), ...trimmedUrlRanges(root)]
+        const ranges = textLinkRanges(root)
         highlights.set(TEXT_LINK_HIGHLIGHT, new HighlightCtor(...ranges))
         const tails = linkTailRanges(root)
         highlights.set(TEXT_LINK_TAIL_HIGHLIGHT, new HighlightCtor(...tails))
@@ -777,6 +796,7 @@ window.__ModuleLoader__.load({
         if (api === undefined || api === null || !api.highlights) return
         api.highlights.delete(TEXT_LINK_HIGHLIGHT)
         api.highlights.delete(TEXT_LINK_TAIL_HIGHLIGHT)
+        api.highlights.delete(TEXT_LINK_HOVER_HIGHLIGHT)
       } catch {
         // The API is optional; a refusal is not this feature's to report.
       }
@@ -825,6 +845,30 @@ window.__ModuleLoader__.load({
       if (node === undefined || anchor.textContent !== node.data) return null
       const caret = caretTextAt(anchor.ownerDocument, event.clientX, event.clientY)
       if (caret === null || caret.node !== node || caret.offset <= tail.tailStart) return null
+      return anchor
+    }
+
+    /**
+     * The over-captured anchor whose head — the URL itself — the pointer is on.
+     *
+     * The mirror of `pointerOverLinkTail`: same anchor, the other side of the URL
+     * token boundary. It is what turns the hover underline on, so the line is
+     * only ever drawn where a press would actually open the link.
+     *
+     * @param event - the document pointer event.
+     * @returns the anchor whose URL owns the pointer, or null.
+     */
+    function pointerOverTrimmedUrl(event) {
+      const target = event?.target
+      if (!isElement(target) || typeof target.closest !== 'function') return null
+      const anchor = target.closest('a[href]')
+      if (anchor === null || anchor === undefined) return null
+      const tail = overcapturedAnchor(anchor)
+      if (tail === null) return null
+      const node = [...anchor.childNodes].find((child) => child.nodeType === 3)
+      if (node === undefined || anchor.textContent !== node.data) return null
+      const caret = caretTextAt(anchor.ownerDocument, event.clientX, event.clientY)
+      if (caret !== null && caret.node === node && caret.offset > tail.tailStart) return null
       return anchor
     }
 
@@ -2349,6 +2393,9 @@ window.__ModuleLoader__.load({
     /** The attribute that takes the shell's underline off an over-captured anchor. */
     const LINK_TRIM_ATTR = 'data-flow-link-trimmed'
 
+    /** The CSS Custom Highlight name of the hover underline over an over-captured URL. */
+    const TEXT_LINK_HOVER_HIGHLIGHT = 'flow-link-hover'
+
     /** Upper bound on painted URL ranges, so a huge transcript cannot stall a frame. */
     const TEXT_LINK_RANGE_LIMIT = 600
 
@@ -2516,6 +2563,7 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
 ::highlight(flow-text-link){color:var(--dsw-alias-link,currentColor);text-decoration:underline dotted var(--dsw-alias-link,currentColor);text-underline-offset:3px}
 ::highlight(flow-link-tail){color:var(--dsw-alias-label-primary,currentColor);text-decoration:none}
 a[data-flow-link-trimmed]{text-decoration:none!important}
+::highlight(flow-link-hover){text-decoration:underline solid var(--dsw-alias-link,currentColor);text-underline-offset:3px}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -3324,6 +3372,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           // The anchor whose inline cursor is currently forced to text, so it can
           // be restored when the pointer leaves its over-captured tail.
           let tailCursorAnchor = null
+          // The over-captured anchor whose URL currently carries the hover line.
+          let hoverUrlAnchor = null
           const clearTailCursor = () => {
             if (tailCursorAnchor === null) return
             tailCursorAnchor.style?.removeProperty?.('cursor')
@@ -3337,6 +3387,14 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
             timer = setTimeout(() => { timer = null; paintTextLinks(paintRoot()) }, 160)
           }
           const onPointerMove = (event) => {
+            // The hover underline tracks the pointer exactly — a throttled miss
+            // leaves it stuck on. The check is cheap unless the pointer is on an
+            // over-captured anchor, which is rare.
+            const hoveredUrl = pointerOverTrimmedUrl(event)
+            if (hoveredUrl !== hoverUrlAnchor) {
+              hoverUrlAnchor = hoveredUrl
+              paintHoverUnderline(hoveredUrl)
+            }
             const now = Date.now()
             if (now - lastMove < 60) return
             lastMove = now
@@ -3357,6 +3415,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           const sync = () => {
             if (!readExternalLinkEnabled(config)) {
               clearTextLinks()
+              hoverUrlAnchor = null
+              paintHoverUnderline(null)
               document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
               detach?.()
               detach = null
@@ -3379,6 +3439,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
               observer = null
               document.removeEventListener('pointermove', onPointerMove, true)
               clearTailCursor()
+              hoverUrlAnchor = null
+              paintHoverUnderline(null)
               clearTextLinks()
               document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
             }
@@ -3894,12 +3956,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         textLinkRanges,
         linkTailRanges,
         markTrimmedAnchors,
-        trimmedUrlRanges,
+        trimmedUrlRangeOf,
+        paintHoverUnderline,
+        pointerOverTrimmedUrl,
         paintTextLinks,
         clearTextLinks,
         pointerOverTextLink,
         TEXT_LINK_HIGHLIGHT,
         TEXT_LINK_TAIL_HIGHLIGHT,
+        TEXT_LINK_HOVER_HIGHLIGHT,
         LINK_TRIM_ATTR,
         openExternal,
         handleAnchorClick,

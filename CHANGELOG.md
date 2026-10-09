@@ -23,7 +23,8 @@
 - 修「壳把 URL 后面的中文一起吞进链接」：GFM autolink literal 一路吃到空白，`http://localhost:6006/，来自 worktree）` 被渲染成一个 href 为 `http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA` 的锚点，蓝色铺到 `，来自`，点开还是错 URL。`overcapturedAnchor()` 把这种锚点收回到 `linkTokensIn()` 认出的 URL token——只在「锚点文本 = 自己的 href（解百分号后相等）+ token 是文本前缀」时生效，真实 markdown 链接不动；点击走收回的 URL，视觉用 `::highlight(flow-link-tail)` 把尾巴画回正文颜色。
 - 尾巴也不在可点区：锚点仍是壳做的那一个（CSS 管不到子串），所以 `pointerOverLinkTail()` 按点击处的 caret 判定尾巴，`handleAnchorClick()` 只吃下这一下、什么都不打开（`preventDefault + stopPropagation`，壳自己的锚点处理器拿不到；mousedown 不拦，拖选不受影响），`pointermove` 把该锚点的光标临时改成 text。看得见的链接边界 = 可点的边界。
 - 下划线也只到 URL：下划线是锚点整条装饰盒画的线，`::highlight` 只能加不能减，所以 `markTrimmedAnchors()` 给这种锚点打 `data-flow-link-trimmed`，样式表用 `text-decoration:none!important` 关掉壳那条，再由 `trimmedUrlRanges()` 把 URL 那段并进 `flow-text-link`，用本插件自己的虚线下划线补回来。颜色、下划线、光标、命中区都以 URL 为界。
-- 单测 131 条全绿（新增 `markTrimmedAnchors()` 打标/幂等与 `trimmedUrlRanges()` 只圈 URL 的断言）。
+- 悬停线回到「只有指到 URL 才出现」：`a[data-flow-link-trimmed]` 上壳那条已经关掉，指针落在 URL 上时（`pointerOverTrimmedUrl()`，与 `pointerOverLinkTail()` 互为镜像）由 `paintHoverUnderline()` 把 `::highlight(flow-link-hover)` 只画到 URL 一段；指到尾巴什么都不亮。
+- 单测 131 条全绿（新增 `markTrimmedAnchors()` 打标/幂等、`trimmedUrlRangeOf()` 只圈 URL、`pointerOverTrimmedUrl()` 命中/放行的断言）。
 
 ## 0.7.0
 
