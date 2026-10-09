@@ -744,6 +744,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The over-captured anchor whose *tail* the pointer sits on, or null.
+     *
+     * The shell made the URL and the sentence tail one anchor, so CSS alone
+     * cannot keep the tail out of the link: the tail is inside the hit area and
+     * the cursor over it would read as a link. Both the press handler and the
+     * cursor check this one function, so what looks clickable and what is
+     * clickable agree.
+     *
+     * @param event - the document pointer/click event.
+     * @returns the anchor whose tail owns the pointer, or null.
+     */
+    function pointerOverLinkTail(event) {
+      const target = event?.target
+      if (!isElement(target) || typeof target.closest !== 'function') return null
+      const anchor = target.closest('a[href]')
+      if (anchor === null || anchor === undefined) return null
+      const tail = overcapturedAnchor(anchor)
+      if (tail === null) return null
+      const node = [...anchor.childNodes].find((child) => child.nodeType === 3)
+      if (node === undefined || anchor.textContent !== node.data) return null
+      const caret = caretTextAt(anchor.ownerDocument, event.clientX, event.clientY)
+      if (caret === null || caret.node !== node || caret.offset <= tail.tailStart) return null
+      return anchor
+    }
+
+    /**
      * Ask the host to hand one URL to the platform opener.
      *
      * @param url - the URL to open.
@@ -779,6 +805,14 @@ window.__ModuleLoader__.load({
      */
     function handleAnchorClick(event, input) {
       if (!input.enabled()) return false
+      // The tail the shell swallowed into an anchor is not part of the link:
+      // claim the press so the shell's own anchor handler cannot open it, and
+      // open nothing. The browser's own mousedown selection is untouched.
+      if (pointerOverLinkTail(event) !== null) {
+        event.preventDefault()
+        event.stopPropagation()
+        return true
+      }
       const url = linkOf(event, input.base, input.origin)
       if (url === null) return false
       event.preventDefault()
@@ -3224,6 +3258,14 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
           let observer = null
           let timer = null
           let lastMove = 0
+          // The anchor whose inline cursor is currently forced to text, so it can
+          // be restored when the pointer leaves its over-captured tail.
+          let tailCursorAnchor = null
+          const clearTailCursor = () => {
+            if (tailCursorAnchor === null) return
+            tailCursorAnchor.style?.removeProperty?.('cursor')
+            tailCursorAnchor = null
+          }
           const paintRoot = () => document.querySelector('[data-slot="conversation.session"]')
             ?? document.querySelector('[data-slot="main.conversation"]')
             ?? document.body
@@ -3237,6 +3279,16 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
             lastMove = now
             if (pointerOverTextLink(event)) document.documentElement?.setAttribute(TEXT_LINK_CURSOR_ATTR, 'true')
             else document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
+            // An over-captured tail keeps the anchor's own pointer cursor; a text
+            // cursor on just that anchor says the tail is ordinary prose.
+            const tail = pointerOverLinkTail(event)
+            if (tail !== tailCursorAnchor) {
+              clearTailCursor()
+              if (tail !== null && tail.style !== undefined && tail.style !== null) {
+                tail.style.setProperty('cursor', 'text')
+                tailCursorAnchor = tail
+              }
+            }
           }
           let detach = null
           const sync = () => {
@@ -3263,6 +3315,7 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
               observer?.disconnect()
               observer = null
               document.removeEventListener('pointermove', onPointerMove, true)
+              clearTailCursor()
               clearTextLinks()
               document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
             }
@@ -3771,6 +3824,7 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
         anchorLinkOf,
         textLinkOf,
         overcapturedAnchor,
+        pointerOverLinkTail,
         linkTokenAt,
         linkTokensIn,
         caretTextAt,

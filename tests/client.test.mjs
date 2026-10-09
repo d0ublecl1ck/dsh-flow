@@ -1017,6 +1017,65 @@ test('an anchor the shell over-captured is trimmed back to its URL token', async
   assert.equal(overcapturedAnchor(null), null)
 })
 
+test('a press on the over-captured tail is claimed but opens nothing', async () => {
+  const { pointerOverLinkTail, handleAnchorClick } = (await load()).internals
+  const href = 'http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA'
+  const text = 'http://localhost:6006/，来自'
+  const textNode = { nodeType: 3, data: text }
+  const ownerDocument = { caretRangeFromPoint: (x, y) => ({ startContainer: textNode, startOffset: y }) }
+  const anchor = {
+    nodeType: 1,
+    textContent: text,
+    childNodes: [textNode],
+    ownerDocument,
+    getAttribute: (name) => (name === 'href' ? href : null),
+    href,
+  }
+  const target = { nodeType: 1, ownerDocument, closest: (selector) => (selector === 'a[href]' ? anchor : null) }
+  const press = (offset) => {
+    const event = {
+      target,
+      clientX: 10,
+      clientY: offset,
+      button: 0,
+      metaKey: false,
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      detail: 1,
+      prevented: 0,
+      stopped: 0,
+      preventDefault() { event.prevented += 1 },
+      stopPropagation() { event.stopped += 1 },
+    }
+    return event
+  }
+  const input = (calls) => ({
+    enabled: () => true,
+    base: BASE,
+    origin: ORIGIN,
+    fetch: (route, init) => { calls.push(init); return Promise.resolve({ ok: true }) },
+    fallback: () => {},
+  })
+
+  // Offset 24 is inside 「，来自」; the URL token ends at 22.
+  const onTail = press(24)
+  assert.equal(pointerOverLinkTail(onTail), anchor)
+  const tailCalls = []
+  assert.equal(handleAnchorClick(onTail, input(tailCalls)), true, 'the shell must not get the tail press')
+  assert.equal(onTail.prevented, 1)
+  assert.equal(onTail.stopped, 1)
+  assert.deepEqual(tailCalls, [], 'a tail press opens nothing')
+
+  // Offset 10 is inside the URL; that press opens the trimmed URL.
+  const onUrl = press(10)
+  assert.equal(pointerOverLinkTail(onUrl), null)
+  const urlCalls = []
+  assert.equal(handleAnchorClick(onUrl, input(urlCalls)), true)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(urlCalls.map((init) => JSON.parse(init.body)), [{ url: 'http://localhost:6006/' }])
+})
+
 test('linkTokensIn returns every URL in a plain-text run, with offsets', async () => {
   const { linkTokensIn } = (await load()).internals
   assert.deepEqual(linkTokensIn('a http://x/ b'), [{ token: 'http://x/', start: 2, end: 11 }])

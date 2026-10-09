@@ -21,7 +21,8 @@
 - 修一个只有实拉才暴露的遮蔽：本模块自己的 `const CSS`（样式表字符串）会盖住浏览器的 `CSS` 命名空间，裸写 `CSS.highlights` 恒为空；高亮改走 `globalThis.CSS` / `globalThis.Highlight`。
 - 单测 128 条全绿（新增 `linkTokensIn()` 多 token/边界断言与「没有高亮 API 时 paintTextLinks 静默返回 0」断言）。
 - 修「壳把 URL 后面的中文一起吞进链接」：GFM autolink literal 一路吃到空白，`http://localhost:6006/，来自 worktree）` 被渲染成一个 href 为 `http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA` 的锚点，蓝色铺到 `，来自`，点开还是错 URL。`overcapturedAnchor()` 把这种锚点收回到 `linkTokensIn()` 认出的 URL token——只在「锚点文本 = 自己的 href（解百分号后相等）+ token 是文本前缀」时生效，真实 markdown 链接不动；点击走收回的 URL，视觉用 `::highlight(flow-link-tail)` 把尾巴画回正文颜色。
-- 单测 129 条全绿（新增 `overcapturedAnchor()` 的命中/放行与 `anchorLinkOf()` 取回 URL 的断言）。
+- 尾巴也不在可点区：锚点仍是壳做的那一个（CSS 管不到子串），所以 `pointerOverLinkTail()` 按点击处的 caret 判定尾巴，`handleAnchorClick()` 只吃下这一下、什么都不打开（`preventDefault + stopPropagation`，壳自己的锚点处理器拿不到；mousedown 不拦，拖选不受影响），`pointermove` 把该锚点的光标临时改成 text。看得见的链接边界 = 可点的边界。
+- 单测 130 条全绿（新增 `pointerOverLinkTail()` 与「尾巴按下只吃下、不打开」的断言）。
 
 ## 0.7.0
 
