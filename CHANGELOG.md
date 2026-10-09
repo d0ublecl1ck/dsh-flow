@@ -13,6 +13,10 @@
 - 应用菜单改为读本插件自己的宿主 catalog：`GET /flow/apps`（只列本机真实安装的 `{id,name,kind}`，kind ∈ `ide`/`terminal`/`files`）与 `POST /flow/open-with`（`app` 是 catalog id、`'default'` 或 `'reveal'`；文件只接受 `kind === 'ide'`，目录接受任意 kind）。原先的 `ctx.remote.session.workspacePathApplications` / `openWorkspacePath`，以及一整段 256KB payload 预热（`FILE_EDITORS`、`MutationObserver`、`pointerover`、`WARM_LIMIT`/`WARM_DEBOUNCE_MS`/`HOVER_WARM_MS`）全部删掉；catalog 一页只问一次，失败不缓存。
 - 「已编辑 N 个文件」卡片菜单固定为「用默认应用打开」+ 本机装了的 IDE + 「在文件管理器中显示」，不再给默认编辑器标「（默认）」；行内代码菜单对文件只列 IDE、对目录列全部应用。`ctx.remote.session` 随之从 inject 移除。
 - 单测保持 123 条全绿：删掉默认标记与旧 `workspacePathApplications` 的断言，换成 kinds 过滤、catalog 一次性缓存、`/flow/open-with` 请求载荷三组断言。
+- 修一个静默漏判：壳会把行内代码里的 URL 解析成链接，渲染成 `code > a`（URL 前的地球图标）。原来的「链接放行」只查了 `code` 在 `<a href>` 内的情况，漏了锚点在 `code` 内部的形状——症状是**点一下既在外链那侧打开、又被当成路径复制并弹出「已复制行内代码」**。现在链接判定收进一处 `inlineCodeLink()`（祖先/后代两个方向都查），`code > a` 一律让给外链接管；以后壳再换渲染形状也只改这一个函数。
+- 单测 124 条全绿（新增 `inlineCodeLink()` 双向判定、`code > a` 不被菜单/左键接管两组断言）。
+- 外链识别认第二种形状：**没被渲染成锚点的纯文本 URL**。壳只对 markdown 做链接化，用户自己发的消息里 URL 是纯文本（`_plainRun_`），原来只认 `a[href]`，点上去没反应。现在 `linkOf()` 先看锚点、再看纯文本：`textLinkOf()` 用 `caretRangeFromPoint` / `caretPositionFromPoint` 取点击处的文本节点与偏移，`linkTokenAt()` 找包含该偏移的 `https?://` token——token 只吃 ASCII URL 字符，所以 `http://localhost:6006/，来自` 这种全角逗号/中文不会粘进 URL。刻意收窄：普通左键、无选中文本、不在 `contenteditable`/`pre`/`code` 内、单击；拖选、双选、输入框、代码块一律放行。
+- 单测 126 条全绿（新增 `linkTokenAt()` 的 token 边界与 `textLinkOf()` 的命中/放行两组断言）。
 
 ## 0.7.0
 

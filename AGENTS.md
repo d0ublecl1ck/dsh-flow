@@ -34,7 +34,7 @@ rail（侧栏折叠）形态下标题行**根本没有 `searchSlot`**，此时�
 
 DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自家页面，锚点点击会落进一个内置窗口，`window.open` 也到不了系统浏览器。所以浏览器半边在**捕获阶段**拦下点击，POST 给宿主，由宿主 spawn 平台打开器（macOS `open`、Windows `cmd /c start ""`、Linux `xdg-open`）——这是唯一同时覆盖 localhost 的路径。
 
-- 浏览器半边：`document` 上的一个捕获监听（`capture: true`），每次都现读偏好，因此开关不需要重新绑定监听。它只认「锚点内 + `http`/`https`/`mailto`/`tel` + 非同源」这一个组合；同源链接、其它协议、非锚点点击一律放行。
+- 浏览器半边：`document` 上的一个捕获监听（`capture: true`），每次都现读偏好，因此开关不需要重新绑定监听。**「这一下算不算链接」只有一个判定点 `linkOf()`**，它认两种形状，以后壳再换渲染形状也补在这里：① 壳渲染出来的锚点 `a[href]`（markdown 链接、以及被解析成链接的行内代码）——只认 `http`/`https`/`mailto`/`tel` + 非同源；② **没被渲染成锚点的纯文本 URL**（用户自己发的消息是 `_plainRun_` 纯文本，壳只对 markdown 做链接化）——由 `textLinkOf()` 用 `caretRangeFromPoint` / `caretPositionFromPoint` 取点击处的文本节点与偏移，再用 `linkTokenAt()` 找包含该偏移的 `https?://` token（token 只吃 ASCII URL 字符，所以紧跟 URL 的全角逗号/中文不会粘进 URL）。② 是刻意收窄的：只认「普通左键 + 无选中文本 + 不在 `contenteditable`/`pre`/`code` 内 + 单击（`detail <= 1`）」；拖选、双选、输入框、围栏代码块都放行，同源与其它协议也一律放行。
 - 宿主半边：`ctx.inject(['webServer', 'connection'])` 的子 fiber 上注册 `{ kind: 'exact', path: '/flow/open-external' }`。先过 `connection.requestRejection`（未认证 401），再要求 `POST`（405）、限制 16KB 请求体（413）、只放行四种协议且长度 ≤ 8192（400），最后才 spawn。**只把 `new URL()` 解析后的 `href` 交给打开器**，原始字符串永不出现在命令行参数里。
 - **宿主答非 2xx 时浏览器半边回退到 `window.open`**：`fetch` 对 404/500 是 resolve 不是 reject，只看 reject 会把点击吞掉——客户端先更新、宿主还是旧版的那段窗口里，链接会变成「点了没反应」。这条回退是给那个窗口兜底的，别删。
 - **和 `dsh-external-link` 不能同时装**：那个插件在同一个节点上也挂了捕获监听，`stopPropagation()` 拦不住同节点的另一个监听，两边都会 POST、链接会被打开两次。合并进本插件之后应当把 `dsh-external-link` 从 profile 的 bundles 里去掉。
@@ -43,7 +43,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 对话正文里的行内代码（`dsh-client-ui-primitives` 的 markdown 渲染器，`inlineCode` → `<code>`）右键浮出一个两项菜单。三件事必须同时成立，实现也就长成了现在的样子：
 
-- **右键只监听 `contextmenu`；左键接管一切在范围内的行内代码**：能打开的照旧打开——壳自己接了线的先 `preventDefault() + stopPropagation()` 再重新派发壳的激活（`activateInlineCode()`，`MarkdownDelegateProvider` 注入的 `openFile` 链路不变），`~/…` 家目录路径由本插件展开后在右侧栏/文件管理器打开；**打不开的（壳没接线、也不是能解析的家目录路径）直接复制**，这样单击永远不会落在一个什么都不做的死按钮上。两个监听都注册在 `document` 捕获阶段，`pre`／`contenteditable`／`a[href]`／空白／非 markdown 一律放行。
+- **右键只监听 `contextmenu`；左键接管一切在范围内的行内代码**：能打开的照旧打开——壳自己接了线的先 `preventDefault() + stopPropagation()` 再重新派发壳的激活（`activateInlineCode()`，`MarkdownDelegateProvider` 注入的 `openFile` 链路不变），`~/…` 家目录路径由本插件展开后在右侧栏/文件管理器打开；**打不开的（壳没接线、也不是能解析的家目录路径）直接复制**，这样单击永远不会落在一个什么都不做的死按钮上。两个监听都注册在 `document` 捕获阶段，`pre`／`contenteditable`／链接（`inlineCodeLink()`，含 `code > a`）／空白／非 markdown 一律放行。
 - **顺序不能反过来：先接管，再探测。** `preventDefault()` 只在事件还在派发时才有意义，而探测是宿主往返；所以按下先被接管，探测回来发现路径存在时用 `activateInlineCode()` **重新派发**壳的那次激活。试图「先 await 探测、不存在再 preventDefault」是无效实现——等探测回来事件早已派发完毕。唯一能提前决定的是「这一下有没有得打开」：`inlineCodePlan()` 同步算出「交给壳」还是「展开家目录」，算不出目标就压根不接管（返回 `pass`，不 `preventDefault`）。
 - **fail open 是硬要求**：探测接口拿不到、抛错、超时、或返回的失败不是「不存在」那一类时，壳自己接了线的路径一律走「重新派发」；`~/…` 这种没有壳链路可交的路径则**不替它猜着打开**（左键那条落进复制），绝不用一次未证实的探测去打开一个可能不存在的文件。宁可让用户继续看到壳的弹窗，也不允许把存在的路径判成不存在（那会让一个本来能打开的文件彻底点不开）。
 - **开关关闭时不注册监听**（不是注册了再判断）：`ctx.configForms` 的表单有 `subscribe`，把它当 Host 回声用 —— `readCodeMenuEnabled` 翻到 false 就 detach，翻回 true 再 attach。`tests/client.test.mjs` 有断言钉住这条：关闭后 `document` 上根本不存在 `contextmenu` 监听。
@@ -62,7 +62,8 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 **范围判定 = 排除 + markdown 正向收窄**，不是「最近的会话容器」：
 
-- 排除：`pre` 内（多行代码块）、`[contenteditable]` 内（输入框与快捷键编辑器）、`<a href>` 内（链接已归外链接管）、文本 trim 后为空、目标不在 `code` 内。
+- 排除：`pre` 内（多行代码块）、`[contenteditable]` 内（输入框与快捷键编辑器）、**链接**（`inlineCodeLink()`，见下）、文本 trim 后为空、目标不在 `code` 内。
+- **「这段 code 其实是链接」只有一个判定点：`inlineCodeLink()`。** 壳从两个方向把链接送进行内代码：① markdown 链接的文字是行内代码（`<a href><code>…</code></a>`，锚点是 `code` 的祖先）；② 壳把行内代码里的 URL 解析成了链接（`<code><a href>…</a></code>`，锚点是 `code` 的后代，URL 前面那颗地球图标就是它，来源是壳渲染器 `inlineCode` 分支里的 `Ab(s)`）。只写 `closest('a[href]')` 会漏掉②，症状是**点一下既在外链那侧打开、又被当成路径复制并弹出「已复制行内代码」**（2026-10-08 实拉复现）。以后壳再换渲染形状（`role="link"`、新的包裹层……）就在 `inlineCodeLink()` 里补，不要散到 `codeMenuTarget()` / `codeOpenTarget()` 的调用点。
 - 收窄：必须落在 `[class*="_markdown_"]` 祖先里。实拉运行中的实例，正文里的行内代码是 `code < li < ol < div._markdown_1ypvv_5 < div.hWmORq_body < …`；`_markdown_` 是 CSS module 的 local name（哈希会变），与本仓库既有的 `[class*="listArea"]` / `[class*="sectionHeader"]` 是同一类依赖，也让工具卡、设置页、别的插件面板里的 `code` 不被误接管。**不要**改去写 `hWmORq_root` 之类的会话容器选择器 —— 那是构建哈希。
 - 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`，它断言「打开」派发的合成 click 落在 `BUTTON` 上。
 ## 「已编辑 N 个文件」卡片的右键菜单（用默认应用打开 / 显示位置）
@@ -105,7 +106,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 - 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占三个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单，`flow.changes-menu` 放改动文件菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
-- DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`。
+- DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`、以及**链接形态** `code > a`（URL 的行内代码，锚点是 `code` 的后代，判定在 `inlineCodeLink()`；漏了它就会「点了链接又被复制」）。
 - DOM（改动文件菜单）：改动文件卡片根 `[data-changed-files]`，以及卡内带 `aria-describedby` 的按钮——那个 id 指向的隐藏元素里是 Host 路径。两者都是**静默失效型**依赖：官方改渲染形状后症状只是「右键没菜单」，不报错，所以改完必须跑真浏览器验收。
 - 服务与数据（打开方式）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）仍是 `~/…` **普通文件**的打开路径。**目录与应用行**统一走本插件的宿主路由：`GET /flow/apps` 列本机真实安装的应用（`{id,name,kind}`，kind ∈ `ide`/`terminal`/`files`）；`POST /flow/open-with` 收 `{app, path}`，`app` 是 catalog id，或 `'default'`（系统默认应用）、`'reveal'`（文件管理器中显示）；`path` 必须绝对且存在（否则 400/404），**文件只接受 `kind === 'ide'`、目录接受任意 kind**（否则 403），未认证 401。两条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开；catalog 一页只取一次并记住，失败不缓存。图标沿用 `GET /open-in-app/icon/<id>`（未知 id 404，`<img>` 自己 `onError` 隐藏）。本机实拉 kind：`ide` = vscode/zed/xcode/androidstudio/intellij/pycharm，`terminal` = iterm/terminal，`files` = finder。
 - DOM（发送键）：对话输入框根 `[data-composer-input]`（实拉时它的类名是 `uV2eYG_input` —— 构建哈希，不要依赖；属性 `data-composer-input` 才是契约，带 contenteditable 与 Lexical 的 `__lexicalEditor`）、触发菜单容器 `[data-trigger-menu]` 与其中的 `[role="listbox"][aria-activedescendant]`。这两处都是**静默失效型**依赖：属性改名后症状只是「开关开了但 Enter 还是发送」，所以改完必须跑真浏览器验收。
@@ -136,7 +137,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 117 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 126 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

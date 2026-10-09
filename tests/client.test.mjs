@@ -550,7 +550,7 @@ test("a menu patch only lands on the menu the probe was measured for", async () 
 })
 
 /** The `<code>` of a markdown body, plus the event that right-clicked it. */
-function inlineCode({ text = 'npm test', pre = false, editable = false, anchor = false, markdown = true, node = true } = {}) {
+function inlineCode({ text = 'npm test', pre = false, editable = false, anchor = false, linkInside = false, markdown = true, node = true } = {}) {
   const element = { nodeType: 1, textContent: text }
   element.closest = (selector) => {
     if (selector === 'code') return element
@@ -560,6 +560,10 @@ function inlineCode({ text = 'npm test', pre = false, editable = false, anchor =
     if (selector === '[class*="_markdown_"]') return markdown ? { nodeType: 1 } : null
     return null
   }
+  // The other direction a link reaches inline code: a URL the renderer resolved
+  // *inside* the code renders as `code > a[href]`. A helper that needs a
+  // different `querySelector` (the file mention's button) overrides it.
+  if (linkInside) element.querySelector = (selector) => (selector === 'a[href]' ? { nodeType: 1 } : null)
   const target = node ? { nodeType: 1, closest: (selector) => (selector === 'code' ? element : null) } : {}
   return { element, event: { target } }
 }
@@ -576,6 +580,9 @@ test('codeMenuTarget claims one inline code in a markdown body, and nothing else
   assert.equal(codeMenuTarget(inlineCode({ editable: true }).event), null)
   // An anchor already belongs to the off-origin link hand-off.
   assert.equal(codeMenuTarget(inlineCode({ anchor: true }).event), null)
+  // The other direction: a URL the renderer resolved *inside* inline code is a
+  // `code > a` link, not a snippet — the code menu must leave it alone too.
+  assert.equal(codeMenuTarget(inlineCode({ linkInside: true }).event), null)
   // Whitespace is not a snippet.
   assert.equal(codeMenuTarget(inlineCode({ text: '   \n ' }).event), null)
   // Outside markdown — a tool card, a settings page, another plugin's panel.
@@ -586,6 +593,22 @@ test('codeMenuTarget claims one inline code in a markdown body, and nothing else
   assert.equal(codeMenuTarget({ target: null }), null)
   assert.equal(codeMenuTarget({}), null)
   assert.equal(codeMenuTarget(undefined), null)
+})
+
+test('inlineCodeLink recognises a link on either side of inline code', async () => {
+  const { inlineCodeLink } = (await load()).internals
+
+  // A markdown link whose text is inline code: the anchor is an ancestor.
+  assert.deepEqual(inlineCodeLink(inlineCode({ anchor: true }).element), { nodeType: 1 })
+  // The shape the shipped renderer produces for a URL in inline code (the globe
+  // icon in front of the URL): the anchor is a descendant of the `code`.
+  assert.deepEqual(inlineCodeLink(inlineCode({ linkInside: true }).element), { nodeType: 1 })
+  // Plain inline code is not a link in either direction.
+  assert.equal(inlineCodeLink(inlineCode().element), null)
+  // A value that is not an element, or has neither accessor, cannot be one.
+  assert.equal(inlineCodeLink(null), null)
+  assert.equal(inlineCodeLink(undefined), null)
+  assert.equal(inlineCodeLink({ nodeType: 1 }), null)
 })
 
 test('opening inline code activates the control the shell made clickable', async () => {
@@ -919,6 +942,93 @@ test('linkOf claims an off-origin anchor on an opener scheme, and nothing else',
   assert.equal(linkOf({}, BASE, ORIGIN), null)
 })
 
+/** An event whose click landed on plain text, with a fake caret inside it. */
+function textClick(text, offset, overrides = {}) {
+  const ownerDocument = {
+    caretRangeFromPoint: () => ({ startContainer: { nodeType: 3, data: text }, startOffset: offset }),
+    caretPositionFromPoint: undefined,
+    getSelection: () => ({ isCollapsed: true }),
+  }
+  const target = { nodeType: 1, ownerDocument, closest: () => null }
+  const event = {
+    target,
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    clientX: 40,
+    clientY: 80,
+    detail: 1,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { event.prevented += 1 },
+    stopPropagation() { event.stopped += 1 },
+    ...overrides,
+  }
+  return event
+}
+
+test('linkTokenAt finds the URL a plain-text run carries, and only inside it', async () => {
+  const { linkTokenAt } = (await load()).internals
+  const sentence = '请你在 Storybook 确认（跑在 http://localhost:6006/，来自 worktree）'
+  const at = sentence.indexOf('http://localhost:6006/')
+  const end = at + 'http://localhost:6006/'.length
+  assert.equal(linkTokenAt(sentence, at), 'http://localhost:6006/')
+  assert.equal(linkTokenAt(sentence, at + 5), 'http://localhost:6006/')
+  assert.equal(linkTokenAt(sentence, end), 'http://localhost:6006/')
+  // The full-width comma right after the URL is the sentence's, not the URL's.
+  assert.equal(linkTokenAt(sentence, end + 1), null)
+  assert.equal(linkTokenAt(sentence, 0), null)
+  // A trailing ASCII dot is trimmed for the same reason.
+  assert.equal(linkTokenAt('see https://example.com/a.', 6), 'https://example.com/a')
+  assert.equal(linkTokenAt('npm test', 2), null)
+  assert.equal(linkTokenAt('', 0), null)
+  assert.equal(linkTokenAt(null, 0), null)
+  assert.equal(linkTokenAt('http://x', undefined), null)
+})
+
+test('linkOf claims a bare URL in plain text, and leaves everything else alone', async () => {
+  const { linkOf, textLinkOf } = (await load()).internals
+  const sentence = '请你在 Storybook 确认（跑在 http://localhost:6006/，来自 worktree）'
+  const at = sentence.indexOf('http://localhost:6006/') + 3
+  // The user's own message never gets an anchor; the text branch is what opens it.
+  assert.equal(linkOf(textClick(sentence, at), BASE, ORIGIN), 'http://localhost:6006/')
+  assert.equal(textLinkOf(textClick('see https://example.com/x', 8), BASE, ORIGIN), 'https://example.com/x')
+  // The standard caret API answers the same way when the non-standard one is absent.
+  const standard = textClick(sentence, at)
+  standard.target.ownerDocument.caretRangeFromPoint = undefined
+  standard.target.ownerDocument.caretPositionFromPoint = () => ({ offsetNode: { nodeType: 3, data: sentence }, offset: at })
+  assert.equal(textLinkOf(standard, BASE, ORIGIN), 'http://localhost:6006/')
+
+  // A click on the sentence around the URL is not the URL's.
+  assert.equal(textLinkOf(textClick(sentence, 0), BASE, ORIGIN), null)
+  // Same origin, a scheme the opener must not get, and modifiers stay out.
+  assert.equal(textLinkOf(textClick('go http://127.0.0.1:43129/x', 6), BASE, ORIGIN), null)
+  assert.equal(textLinkOf(textClick('go file:///etc/passwd', 4), BASE, ORIGIN), null)
+  assert.equal(textLinkOf(textClick(sentence, at, { metaKey: true }), BASE, ORIGIN), null)
+  // A double-click selects a word; the selection belongs to the reader.
+  assert.equal(textLinkOf(textClick(sentence, at, { detail: 2 }), BASE, ORIGIN), null)
+  // A click inside an anchor is the anchor branch's, never re-read as text.
+  const inAnchor = textClick(sentence, at)
+  inAnchor.target.closest = (selector) => (selector === 'a[href]' ? { nodeType: 1 } : null)
+  assert.equal(textLinkOf(inAnchor, BASE, ORIGIN), null)
+  // Editable surfaces, fenced blocks and code keep the press.
+  const editable = textClick(sentence, at)
+  editable.target.closest = (selector) => (selector === '[contenteditable]' ? { nodeType: 1 } : null)
+  assert.equal(textLinkOf(editable, BASE, ORIGIN), null)
+  const fenced = textClick(sentence, at)
+  fenced.target.closest = (selector) => (selector === 'pre' ? { nodeType: 1 } : null)
+  assert.equal(textLinkOf(fenced, BASE, ORIGIN), null)
+  const inCode = textClick(sentence, at)
+  inCode.target.closest = (selector) => (selector === 'code' ? { nodeType: 1 } : null)
+  assert.equal(textLinkOf(inCode, BASE, ORIGIN), null)
+  // A drag that selected text is not a link press.
+  const selected = textClick(sentence, at)
+  selected.target.ownerDocument.getSelection = () => ({ isCollapsed: false })
+  assert.equal(textLinkOf(selected, BASE, ORIGIN), null)
+})
+
 /** The fetch stub the click tests record through. */
 function recordingFetch(calls, answer = () => Promise.resolve({ ok: true })) {
   return (route, init) => { calls.push({ route, init }); return answer() }
@@ -1173,6 +1283,9 @@ test("every inline code in scope is claimed by a plain left press", async () => 
   assert.equal(codeOpenTarget(leftPress(clickableCode({ pre: true }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ editable: true }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ anchor: true }))), null)
+  // A link rendered *inside* inline code (`code > a`) belongs to the external
+  // link hand-off, not to this feature: the press must not also copy it.
+  assert.equal(codeOpenTarget(leftPress(inlineCode({ linkInside: true }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ text: "   " }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ markdown: false }))), null)
   assert.equal(codeOpenTarget(leftPress(clickableCode({ node: false }))), null)

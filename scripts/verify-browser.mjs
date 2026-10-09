@@ -856,6 +856,11 @@ const NOTICE_VISIBLE = `[...document.querySelectorAll('[role="alert"]')].some((n
  * A file mention — the inline code a left click opens — is `code > button`;
  * everything else is plain text. Anchors, fenced blocks and codes outside a
  * markdown body are never claimed, so no finder below returns one.
+ *
+ * A URL the shell rendered as a link *inside* inline code is `code > a`: the
+ * anchor is a child of the `code`, so `plain`'s `querySelector('a') === null`
+ * already drops it, and it must stay dropped — the client's `inlineCodeLink()`
+ * makes the same call and hands the press to the off-origin link hand-off.
  */
 const CODE_CLAIM = {
   mention: 'c.querySelector("button") !== null',

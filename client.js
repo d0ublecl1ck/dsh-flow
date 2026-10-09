@@ -397,9 +397,19 @@ window.__ModuleLoader__.load({
     /**
      * The off-origin, openable URL behind a click, or null.
      *
-     * Everything else — a click that is not inside a link, a scheme the opener
-     * must not receive, and the application's own navigation — is not this
-     * plugin's to take.
+     * This is the one recognition point for "this click is a link". The shell
+     * reaches it through two shapes today, and a future shape is patched here
+     * rather than at each caller:
+     *
+     *   - an anchor the shell rendered (`a[href]`) — markdown links and the
+     *     inline code it resolved as a URL;
+     *   - a URL that stayed **plain text** — the user's own message and other
+     *     plain runs never get an anchor, so a press on the URL itself is the
+     *     only way to open it (`textLinkOf`).
+     *
+     * Everything else — a click that is not on a link, a scheme the opener must
+     * not receive, and the application's own navigation — is not this plugin's
+     * to take.
      *
      * @param event - the document click event.
      * @param base - `location.href`, what a relative `href` resolves against.
@@ -407,6 +417,18 @@ window.__ModuleLoader__.load({
      * @returns the absolute href to open, or null when this click is not one.
      */
     function linkOf(event, base, origin) {
+      return anchorLinkOf(event, base, origin) ?? textLinkOf(event, base, origin)
+    }
+
+    /**
+     * The off-origin URL behind a click on a rendered anchor, or null.
+     *
+     * @param event - the document click event.
+     * @param base - `location.href`.
+     * @param origin - `location.origin`.
+     * @returns the absolute href to open, or null.
+     */
+    function anchorLinkOf(event, base, origin) {
       const target = event?.target
       const anchor = target !== null && target !== undefined && typeof target.closest === 'function'
         ? target.closest('a[href]')
@@ -415,6 +437,114 @@ window.__ModuleLoader__.load({
       let url
       try {
         url = new URL(anchor.href, base)
+      } catch {
+        return null
+      }
+      if (!OPENABLE.has(url.protocol)) return null
+      if (url.origin === origin) return null
+      return url.href
+    }
+
+    /**
+     * The URL token a plain-text run carries at one caret offset, or null.
+     *
+     * A plain `https?://\S+` search cannot be used here: the user's sentence
+     * puts a full-width comma right after the URL, and `\S+` would swallow it
+     * along with every following CJK character. Only ASCII URL characters are
+     * accepted after the scheme, so the token ends exactly where the shell's own
+     * linkifier would end it, and trailing ASCII sentence punctuation is
+     * trimmed. A click has to fall **inside** the token — a press on the words
+     * around it is not this link's to take.
+     *
+     * @param text - the text node's data.
+     * @param offset - the caret offset the click landed on.
+     * @returns the URL text, or null.
+     */
+    function linkTokenAt(text, offset) {
+      if (typeof text !== 'string' || text === '') return null
+      if (typeof offset !== 'number' || !Number.isFinite(offset)) return null
+      const pattern = /https?:\/\/[A-Za-z0-9\-._~:/?#@!$&()*+,;=%]+/g
+      let match
+      while ((match = pattern.exec(text)) !== null) {
+        const token = match[0].replace(/[.,;:!?)\]}>'"]+$/u, '')
+        if (token === '') continue
+        const end = match.index + token.length
+        if (offset >= match.index && offset <= end) return token
+      }
+      return null
+    }
+
+    /**
+     * The text node and offset under one viewport point, or null.
+     *
+     * Chromium and WebKit answer `caretRangeFromPoint`; the standard spelling is
+     * `caretPositionFromPoint`. Both are read through the target's own document,
+     * and a missing or throwing implementation just means this shape is not
+     * recognised — never an exception out of a click handler.
+     *
+     * @param doc - the target's owner document.
+     * @param x - the viewport x of the click.
+     * @param y - the viewport y of the click.
+     * @returns `{node, offset}`, or null when no text caret is there.
+     */
+    function caretTextAt(doc, x, y) {
+      if (doc === null || doc === undefined) return null
+      if (typeof x !== 'number' || typeof y !== 'number') return null
+      try {
+        if (typeof doc.caretRangeFromPoint === 'function') {
+          const range = doc.caretRangeFromPoint(x, y)
+          if (range !== null && range !== undefined && range.startContainer?.nodeType === 3) {
+            return { node: range.startContainer, offset: range.startOffset }
+          }
+        }
+        if (typeof doc.caretPositionFromPoint === 'function') {
+          const position = doc.caretPositionFromPoint(x, y)
+          if (position !== null && position !== undefined && position.offsetNode?.nodeType === 3) {
+            return { node: position.offsetNode, offset: position.offset }
+          }
+        }
+      } catch {
+        return null
+      }
+      return null
+    }
+
+    /**
+     * The off-origin URL one plain-text click landed on, or null.
+     *
+     * Deliberately narrow, because unlike an anchor this shape is only text: a
+     * plain left press with nothing selected, no `contenteditable` and no
+     * `pre`/`code` above it. A selection drag, the composer, a fenced block and
+     * a double-click are all the reader's, not this plugin's. The markdown
+     * branch never needs this because the renderer already made those anchors.
+     *
+     * @param event - the document click event.
+     * @param base - `location.href`.
+     * @param origin - `location.origin`.
+     * @returns the absolute href to open, or null when this click is not one.
+     */
+    function textLinkOf(event, base, origin) {
+      if (!isPlainLeftPress(event)) return null
+      if (event?.detail !== undefined && event.detail > 1) return null
+      const target = event?.target
+      if (!isElement(target) || typeof target.closest !== 'function') return null
+      // An anchor already went through `anchorLinkOf`; whatever it answered for
+      // this press stands, so a click inside one is never re-read as text.
+      if (target.closest('a[href]') !== null) return null
+      if (target.closest('[contenteditable]') !== null) return null
+      if (target.closest('pre') !== null) return null
+      if (target.closest('code') !== null) return null
+      const doc = target.ownerDocument
+      if (doc === null || doc === undefined) return null
+      const selection = typeof doc.getSelection === 'function' ? doc.getSelection() : null
+      if (selection !== null && selection !== undefined && selection.isCollapsed === false) return null
+      const caret = caretTextAt(doc, event.clientX, event.clientY)
+      if (caret === null) return null
+      const token = linkTokenAt(caret.node.data, caret.offset)
+      if (token === null) return null
+      let url
+      try {
+        url = new URL(token, base)
       } catch {
         return null
       }
@@ -439,14 +569,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Capture-phase anchor handler.
+     * Capture-phase link handler.
      *
-     * Off-origin links leave through the host; everything else — a click that is
-     * not a link, a scheme the opener must not receive, the application's own
-     * navigation, or a preference that is off — keeps the shell's behaviour
-     * untouched. A host that refuses or cannot be reached falls back to the
-     * page's own `window.open`, because a swallowed click is the one outcome a
-     * link must not have.
+     * Off-origin links — a rendered anchor or a URL that stayed plain text —
+     * leave through the host; everything else — a click that is not a link, a
+     * scheme the opener must not receive, the application's own navigation, or
+     * a preference that is off — keeps the shell's behaviour untouched. A host
+     * that refuses or cannot be reached falls back to the page's own
+     * `window.open`, because a swallowed click is the one outcome a link must
+     * not have.
      *
      * @param event - the document click event.
      * @param input.enabled - whether the preference still wants the feature.
@@ -544,13 +675,53 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The link one inline `code` belongs to, in either direction, or null.
+     *
+     * The shipped renderer reaches a link through inline code in two shapes,
+     * and both already have an owner — the capture-phase click listener that
+     * hands off-origin URLs to the Host — so the code menu must not claim
+     * either one:
+     *
+     *   - a markdown link whose text is inline code: `<a href><code>…</code></a>`;
+     *   - a URL the renderer resolved as a link *inside* inline code:
+     *     `<code><a href>…</a></code>` — the globe glyph in front of the URL is
+     *     this shape, and `Ab(s)` in the shipped renderer is what produces it.
+     *
+     * The second shape is the one a bare `element.closest('a[href]')` misses:
+     * there the anchor is a **descendant** of the `code`, so walking up from
+     * the code never meets it. Checking both directions is what keeps every
+     * "this code is really a link" verdict in one function; a future rendering
+     * shape (a `role="link"` control, a new wrapper) is patched here, not in
+     * each caller.
+     *
+     * @param element - the `<code>` element a press landed in.
+     * @returns the owning/contained `<a href>`, or null when this code is not a link.
+     */
+    function inlineCodeLink(element) {
+      if (typeof element?.closest === 'function') {
+        const outer = element.closest('a[href]')
+        if (isElement(outer)) return outer
+      }
+      if (typeof element?.querySelector === 'function') {
+        const inner = element.querySelector('a[href]')
+        if (isElement(inner)) return inner
+      }
+      return null
+    }
+
+    /**
      * The inline `code` a context-menu press landed in, with the text to copy.
      *
      * Every exclusion here is a place where a `code` element means something
      * other than "a path or a snippet in the conversation": a fenced block
      * (`pre > code`) is multi-line and out of scope, the composer and the
-     * shortcut editor are contenteditable, and an anchor already has an owner —
+     * shortcut editor are contenteditable, and a link already has an owner —
      * the capture-phase click listener that hands off-origin URLs to the Host.
+     * A link reaches inline code from either direction, and `inlineCodeLink`
+     * is the one place that decides it: a markdown link whose text is code,
+     * and — the common one — a URL the shipped renderer resolved *inside*
+     * inline code (`code > a`). A future rendering shape is patched there,
+     * not here.
      *
      * The positive half of the scope is the markdown body itself. The shipped
      * renderer wraps every message body in `div._markdown_<hash>`, and the
@@ -570,7 +741,9 @@ window.__ModuleLoader__.load({
       if (!isElement(element) || typeof element.closest !== 'function') return null
       if (element.closest('pre') !== null) return null
       if (element.closest('[contenteditable]') !== null) return null
-      if (element.closest('a[href]') !== null) return null
+      // A link, in either direction, belongs to the off-origin hand-off. See
+      // `inlineCodeLink`.
+      if (inlineCodeLink(element) !== null) return null
       if (element.closest('[class*="_markdown_"]') === null) return null
       // An empty `code` has nothing to offer either entry of the menu.
       const text = String(element.textContent ?? '').trim()
@@ -3328,12 +3501,16 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         readCopyEnabled,
         readExternalLinkEnabled,
         linkOf,
+        textLinkOf,
+        linkTokenAt,
+        caretTextAt,
         openExternal,
         handleAnchorClick,
         copyCommand,
         copySessionId,
         createNoticeStore,
         CODE_MENU_ID,
+        inlineCodeLink,
         codeMenuTarget,
         clickTargetOf,
         activateInlineCode,
