@@ -446,30 +446,47 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Every URL token one plain-text run carries, with its offsets.
+     *
+     * A plain `https?://\S+` search cannot be used: the user's sentence puts a
+     * full-width comma right after the URL, and `\S+` would swallow it along
+     * with every following CJK character. Only ASCII URL characters are accepted
+     * after the scheme, so a token ends exactly where the shell's own linkifier
+     * would end it, and trailing ASCII sentence punctuation is trimmed.
+     *
+     * This is the one tokenizer behind both the click recognition and the visual
+     * link highlight, so what looks like a link and what opens are the same set.
+     *
+     * @param text - the text node's data.
+     * @returns `[{token, start, end}]`, in document order.
+     */
+    function linkTokensIn(text) {
+      if (typeof text !== 'string' || text === '') return []
+      const tokens = []
+      const pattern = /https?:\/\/[A-Za-z0-9\-._~:/?#@!$&()*+,;=%]+/g
+      let match
+      while ((match = pattern.exec(text)) !== null) {
+        const token = match[0].replace(/[.,;:!?)\]}>'"]+$/u, '')
+        if (token === '') continue
+        tokens.push({ token, start: match.index, end: match.index + token.length })
+      }
+      return tokens
+    }
+
+    /**
      * The URL token a plain-text run carries at one caret offset, or null.
      *
-     * A plain `https?://\S+` search cannot be used here: the user's sentence
-     * puts a full-width comma right after the URL, and `\S+` would swallow it
-     * along with every following CJK character. Only ASCII URL characters are
-     * accepted after the scheme, so the token ends exactly where the shell's own
-     * linkifier would end it, and trailing ASCII sentence punctuation is
-     * trimmed. A click has to fall **inside** the token — a press on the words
-     * around it is not this link's to take.
+     * A click has to fall **inside** a token — a press on the words around it is
+     * not that link's to take.
      *
      * @param text - the text node's data.
      * @param offset - the caret offset the click landed on.
      * @returns the URL text, or null.
      */
     function linkTokenAt(text, offset) {
-      if (typeof text !== 'string' || text === '') return null
       if (typeof offset !== 'number' || !Number.isFinite(offset)) return null
-      const pattern = /https?:\/\/[A-Za-z0-9\-._~:/?#@!$&()*+,;=%]+/g
-      let match
-      while ((match = pattern.exec(text)) !== null) {
-        const token = match[0].replace(/[.,;:!?)\]}>'"]+$/u, '')
-        if (token === '') continue
-        const end = match.index + token.length
-        if (offset >= match.index && offset <= end) return token
+      for (const hit of linkTokensIn(text)) {
+        if (offset >= hit.start && offset <= hit.end) return hit.token
       }
       return null
     }
@@ -551,6 +568,101 @@ window.__ModuleLoader__.load({
       if (!OPENABLE.has(url.protocol)) return null
       if (url.origin === origin) return null
       return url.href
+    }
+
+    /**
+     * One text node's URL ranges, inside the conversation body only.
+     *
+     * The paint uses the CSS Custom Highlight API, so nothing in React's tree is
+     * wrapped or moved: a Range is a paint instruction, not a DOM edit, and a
+     * re-render that replaces the node simply drops its Range until the next
+     * sync. Anchors are skipped because the shell already styled them, and
+     * `code`/`pre`/`contenteditable` surfaces keep their text exactly as it is.
+     *
+     * @param root - the conversation element to scan.
+     * @returns Range objects, one per URL token, capped at `TEXT_LINK_RANGE_LIMIT`.
+     */
+    function textLinkRanges(root) {
+      if (!isElement(root) || typeof root.ownerDocument?.createTreeWalker !== 'function') return []
+      const doc = root.ownerDocument
+      const ranges = []
+      const walker = doc.createTreeWalker(root, 4) // NodeFilter.SHOW_TEXT
+      let node = walker.nextNode()
+      while (node !== null && ranges.length < TEXT_LINK_RANGE_LIMIT) {
+        const tokens = linkTokensIn(node.data)
+        const parent = node.parentElement
+        if (tokens.length > 0 && parent !== null
+          && parent.closest('a[href]') === null
+          && parent.closest('code') === null
+          && parent.closest('pre') === null
+          && parent.closest('[contenteditable]') === null) {
+          for (const hit of tokens) {
+            if (ranges.length >= TEXT_LINK_RANGE_LIMIT) break
+            const range = doc.createRange()
+            range.setStart(node, hit.start)
+            range.setEnd(node, hit.end)
+            ranges.push(range)
+          }
+        }
+        node = walker.nextNode()
+      }
+      return ranges
+    }
+
+    /**
+     * Paint every plain-text URL under one root as a link.
+     *
+     * The CSS Custom Highlight API is optional: a shell whose engine lacks it
+     * simply keeps the click behaviour and shows no link styling. That is the
+     * only failure mode — this never throws into the page.
+     *
+     * @param root - the conversation element to scan.
+     * @returns the number of painted tokens, 0 when the API is absent.
+     */
+    function paintTextLinks(root) {
+      // \`globalThis.CSS\`, not \`CSS\`: this very module declares a \`const CSS\` for its
+      // stylesheet, so a bare \`CSS\` here is that string, not the browser's namespace.
+      const api = globalThis.CSS
+      const highlights = api === undefined || api === null ? undefined : api.highlights
+      const HighlightCtor = globalThis.Highlight
+      if (highlights === undefined || highlights === null || typeof HighlightCtor !== 'function') return 0
+      try {
+        const ranges = textLinkRanges(root)
+        highlights.set(TEXT_LINK_HIGHLIGHT, new HighlightCtor(...ranges))
+        return ranges.length
+      } catch {
+        return 0
+      }
+    }
+
+    /** Retire the plain-text link paint; an engine without the API has nothing to retire. */
+    function clearTextLinks() {
+      try {
+        const api = globalThis.CSS
+        if (api !== undefined && api !== null && api.highlights) api.highlights.delete(TEXT_LINK_HIGHLIGHT)
+      } catch {
+        // The API is optional; a refusal is not this feature's to report.
+      }
+    }
+
+    /**
+     * Whether one pointer position is over a plain-text URL, for the hand cursor.
+     *
+     * The same exclusions and the same tokenizer as the click: what the cursor
+     * promises is exactly what a press does.
+     *
+     * @param event - the document pointer event.
+     * @returns whether the cursor should read as a link.
+     */
+    function pointerOverTextLink(event) {
+      const target = event?.target
+      if (!isElement(target) || typeof target.closest !== 'function') return false
+      if (target.closest('a[href]') !== null) return false
+      if (target.closest('[contenteditable]') !== null) return false
+      if (target.closest('pre') !== null) return false
+      if (target.closest('code') !== null) return false
+      const caret = caretTextAt(target.ownerDocument, event.clientX, event.clientY)
+      return caret !== null && linkTokenAt(caret.node.data, caret.offset) !== null
     }
 
     /**
@@ -2057,6 +2169,15 @@ window.__ModuleLoader__.load({
      */
     const CODE_CURSOR_ATTR = 'data-flow-code-cursor'
 
+    /** The CSS Custom Highlight name the plain-text URLs are painted under. */
+    const TEXT_LINK_HIGHLIGHT = 'flow-text-link'
+
+    /** Upper bound on painted URL ranges, so a huge transcript cannot stall a frame. */
+    const TEXT_LINK_RANGE_LIMIT = 600
+
+    /** Document attribute that makes the cursor a hand while it is over a plain-text URL. */
+    const TEXT_LINK_CURSOR_ATTR = 'data-flow-text-link-cursor'
+
     /**
      * The shipped composer's editable root, which is the only place a swapped
      * Enter belongs.
@@ -2214,6 +2335,8 @@ window.__ModuleLoader__.load({
 .flow-app-icon{display:block;width:14px;height:14px;border-radius:3px}
 html[data-flow-code-cursor="true"] [class*="_markdown_"] code{cursor:pointer}
 html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
+html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] *{cursor:pointer}
+::highlight(flow-text-link){color:var(--dsw-alias-link,currentColor);text-decoration:underline dotted var(--dsw-alias-link,currentColor);text-underline-offset:3px}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -3007,6 +3130,68 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
           document.addEventListener('click', onClick, true)
           return () => { document.removeEventListener('click', onClick, true) }
         }, 'flow: external links')
+        // A plain-text URL does not look like a link: the shell styles a URL only
+        // when markdown made it an anchor, and a user's own message (and other
+        // plain runs) stay text. This paints the very tokens the click opens,
+        // using the CSS Custom Highlight API — a Range is a paint instruction,
+        // not a DOM edit, so React's tree is untouched — and keeps a hand cursor
+        // over them. The preference owns it: off means no paint, no cursor and no
+        // observer, exactly like the click listener above.
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          let observer = null
+          let timer = null
+          let lastMove = 0
+          const paintRoot = () => document.querySelector('[data-slot="conversation.session"]')
+            ?? document.querySelector('[data-slot="main.conversation"]')
+            ?? document.body
+          const schedule = () => {
+            if (timer !== null) return
+            timer = setTimeout(() => { timer = null; paintTextLinks(paintRoot()) }, 160)
+          }
+          const onPointerMove = (event) => {
+            const now = Date.now()
+            if (now - lastMove < 60) return
+            lastMove = now
+            if (pointerOverTextLink(event)) document.documentElement?.setAttribute(TEXT_LINK_CURSOR_ATTR, 'true')
+            else document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
+          }
+          let detach = null
+          const sync = () => {
+            if (!readExternalLinkEnabled(config)) {
+              clearTextLinks()
+              document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
+              detach?.()
+              detach = null
+              return
+            }
+            if (detach !== null) return
+            paintTextLinks(paintRoot())
+            // The conversation element itself is replaced when the shell switches
+            // sessions, so the observer must sit on a stable ancestor and let each
+            // repaint re-resolve the current conversation root.
+            const anchor = document.body ?? document.documentElement
+            if (typeof MutationObserver === 'function' && anchor !== null && anchor !== undefined) {
+              observer = new MutationObserver(schedule)
+              observer.observe(anchor, { childList: true, subtree: true, characterData: true })
+            }
+            document.addEventListener('pointermove', onPointerMove, true)
+            detach = () => {
+              if (timer !== null) { clearTimeout(timer); timer = null }
+              observer?.disconnect()
+              observer = null
+              document.removeEventListener('pointermove', onPointerMove, true)
+              clearTextLinks()
+              document.documentElement?.removeAttribute(TEXT_LINK_CURSOR_ATTR)
+            }
+          }
+          sync()
+          const unsubscribe = config.subscribe(sync)
+          return () => {
+            if (typeof unsubscribe === 'function') unsubscribe()
+            detach?.()
+          }
+        }, 'flow: plain-text link rendering')
         // The existence probe behind the left-press takeover. It is asked about
         // the planned path — the raw text for a shell-owned mention, the expanded
         // absolute path for a `~/…` code. The shell's own workspace-files remote
@@ -3503,7 +3688,13 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
         linkOf,
         textLinkOf,
         linkTokenAt,
+        linkTokensIn,
         caretTextAt,
+        textLinkRanges,
+        paintTextLinks,
+        clearTextLinks,
+        pointerOverTextLink,
+        TEXT_LINK_HIGHLIGHT,
         openExternal,
         handleAnchorClick,
         copyCommand,

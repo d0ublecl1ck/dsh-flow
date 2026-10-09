@@ -17,6 +17,9 @@
 - 单测 124 条全绿（新增 `inlineCodeLink()` 双向判定、`code > a` 不被菜单/左键接管两组断言）。
 - 外链识别认第二种形状：**没被渲染成锚点的纯文本 URL**。壳只对 markdown 做链接化，用户自己发的消息里 URL 是纯文本（`_plainRun_`），原来只认 `a[href]`，点上去没反应。现在 `linkOf()` 先看锚点、再看纯文本：`textLinkOf()` 用 `caretRangeFromPoint` / `caretPositionFromPoint` 取点击处的文本节点与偏移，`linkTokenAt()` 找包含该偏移的 `https?://` token——token 只吃 ASCII URL 字符，所以 `http://localhost:6006/，来自` 这种全角逗号/中文不会粘进 URL。刻意收窄：普通左键、无选中文本、不在 `contenteditable`/`pre`/`code` 内、单击；拖选、双选、输入框、代码块一律放行。
 - 单测 126 条全绿（新增 `linkTokenAt()` 的 token 边界与 `textLinkOf()` 的命中/放行两组断言）。
+- 纯文本 URL 现在**看起来也是链接**：壳只给 markdown 里的 URL 上链接样式，用户消息与其他纯文本 run 不会，所以识别到了仍「不像链接」。改用 **CSS Custom Highlight API**（`::highlight(flow-text-link)`）把 `linkTokensIn()` 找到的同一批 token 画成链接色 + 虚线下划线，并在其上给手型光标——不包装/移动 React 节点，只叠一层 Range 高亮；`MutationObserver` 挂在 `document.body` 上、每次重画现查 `[data-slot="conversation.session"]`，160ms 去抖，单页上限 600 个 Range。引擎没有该 API 时静默不画，点击照常。
+- 修一个只有实拉才暴露的遮蔽：本模块自己的 `const CSS`（样式表字符串）会盖住浏览器的 `CSS` 命名空间，裸写 `CSS.highlights` 恒为空；高亮改走 `globalThis.CSS` / `globalThis.Highlight`。
+- 单测 128 条全绿（新增 `linkTokensIn()` 多 token/边界断言与「没有高亮 API 时 paintTextLinks 静默返回 0」断言）。
 
 ## 0.7.0
 

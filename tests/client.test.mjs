@@ -698,9 +698,10 @@ test('the inline-code listeners exist only while the preference is on', async ()
     // so this assertion stays about the inline-code pair alone.
     const form = fakeForm({ codeMenu: true, changesFileOpen: false, composerHistory: false })
     module.apply(fakeContext([], [], { form }))
-    // `click` first is the off-origin link hand-off, which is a separate
-    // feature; the menu press and the path press are the two below it.
-    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true]])
+    // `click` first is the off-origin link hand-off and `pointermove` is that
+    // same feature's link cursor; the menu press and the path press are the two
+    // below them.
+    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true]])
     // The pointer cursor rides the same switch: code is only clickable while the
     // menu owns the press.
     assert.deepEqual([...cursor], ['data-flow-code-cursor=true'])
@@ -709,8 +710,8 @@ test('the inline-code listeners exist only while the preference is on', async ()
     // leaving ones behind that decide to do nothing.
     form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false })
     assert.deepEqual(removed, [
-      { type: 'contextmenu', listener: added[1].listener, capture: true },
-      { type: 'click', listener: added[2].listener, capture: true },
+      { type: 'contextmenu', listener: added[2].listener, capture: true },
+      { type: 'click', listener: added[3].listener, capture: true },
     ])
     assert.deepEqual([...cursor], [], 'turning the feature off takes the cursor with it')
     form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false })
@@ -719,9 +720,9 @@ test('the inline-code listeners exist only while the preference is on', async ()
     // Turning it back on binds both again, and nothing else. The changed-file
     // menu keeps its own preference off throughout, so it never joins in.
     form.publish({ codeMenu: true, changesFileOpen: false, composerHistory: false })
-    assert.deepEqual(added.map((entry) => entry.type), ['click', 'contextmenu', 'click', 'contextmenu', 'click'])
-    assert.equal(added[3].capture, true)
+    assert.deepEqual(added.map((entry) => entry.type), ['click', 'pointermove', 'contextmenu', 'click', 'contextmenu', 'click'])
     assert.equal(added[4].capture, true)
+    assert.equal(added[5].capture, true)
     assert.deepEqual([...cursor], ['data-flow-code-cursor=true'])
   } finally {
     delete globalThis.document
@@ -988,6 +989,28 @@ test('linkTokenAt finds the URL a plain-text run carries, and only inside it', a
   assert.equal(linkTokenAt('http://x', undefined), null)
 })
 
+test('linkTokensIn returns every URL in a plain-text run, with offsets', async () => {
+  const { linkTokensIn } = (await load()).internals
+  assert.deepEqual(linkTokensIn('a http://x/ b'), [{ token: 'http://x/', start: 2, end: 11 }])
+  assert.deepEqual(linkTokensIn('见 http://a/ 与 https://b/c，完').map((t) => t.token), ['http://a/', 'https://b/c'])
+  // The full-width comma glued to the URL is the sentence's, not the URL's.
+  assert.deepEqual(linkTokensIn('跑在 http://localhost:6006/，来自').map((t) => t.token), ['http://localhost:6006/'])
+  // A CJK character glued in front of the scheme does not stop the token.
+  assert.deepEqual(linkTokensIn('比如https://elements.ai-sdk.dev/ 没必要').map((t) => t.token), ['https://elements.ai-sdk.dev/'])
+  assert.deepEqual(linkTokensIn('see https://example.com/a.').map((t) => t.token), ['https://example.com/a'])
+  assert.deepEqual(linkTokensIn('no url here'), [])
+  assert.deepEqual(linkTokensIn(null), [])
+  assert.deepEqual(linkTokensIn(''), [])
+})
+
+test('paintTextLinks is a silent no-op without the CSS Custom Highlight API', async () => {
+  const { paintTextLinks, clearTextLinks, TEXT_LINK_HIGHLIGHT } = (await load()).internals
+  assert.equal(typeof TEXT_LINK_HIGHLIGHT, 'string')
+  // The test harness has no CSS.highlights; the paint must answer 0, not throw.
+  assert.equal(paintTextLinks(null), 0)
+  assert.doesNotThrow(() => clearTextLinks())
+})
+
 test('linkOf claims a bare URL in plain text, and leaves everything else alone', async () => {
   const { linkOf, textLinkOf } = (await load()).internals
   const sentence = '请你在 Storybook 确认（跑在 http://localhost:6006/，来自 worktree）'
@@ -1121,20 +1144,21 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // Five separate capture-phase listeners: the link hand-off, the inline-code
-    // menu press, the inline-code path press, the changed-file menu press, and
-    // the recalled-messages arrow press. None can be reached through another's
-    // registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['keydown', true]])
+    // Six separate capture-phase listeners: the link hand-off, the plain-text
+    // link cursor, the inline-code menu press, the inline-code path press, the
+    // changed-file menu press, and the recalled-messages arrow press. None can be
+    // reached through another's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['keydown', true]])
     assert.deepEqual(removed, [])
     // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
     assert.deepEqual(removed, [
       { type: 'click', listener: listeners[0].listener },
-      { type: 'contextmenu', listener: listeners[1].listener },
-      { type: 'click', listener: listeners[2].listener },
-      { type: 'contextmenu', listener: listeners[3].listener },
-      { type: 'keydown', listener: listeners[4].listener },
+      { type: 'pointermove', listener: listeners[1].listener },
+      { type: 'contextmenu', listener: listeners[2].listener },
+      { type: 'click', listener: listeners[3].listener },
+      { type: 'contextmenu', listener: listeners[4].listener },
+      { type: 'keydown', listener: listeners[5].listener },
     ])
   } finally {
     delete globalThis.document
