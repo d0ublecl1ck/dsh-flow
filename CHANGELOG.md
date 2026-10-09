@@ -20,6 +20,8 @@
 - 纯文本 URL 现在**看起来也是链接**：壳只给 markdown 里的 URL 上链接样式，用户消息与其他纯文本 run 不会，所以识别到了仍「不像链接」。改用 **CSS Custom Highlight API**（`::highlight(flow-text-link)`）把 `linkTokensIn()` 找到的同一批 token 画成链接色 + 虚线下划线，并在其上给手型光标——不包装/移动 React 节点，只叠一层 Range 高亮；`MutationObserver` 挂在 `document.body` 上、每次重画现查 `[data-slot="conversation.session"]`，160ms 去抖，单页上限 600 个 Range。引擎没有该 API 时静默不画，点击照常。
 - 修一个只有实拉才暴露的遮蔽：本模块自己的 `const CSS`（样式表字符串）会盖住浏览器的 `CSS` 命名空间，裸写 `CSS.highlights` 恒为空；高亮改走 `globalThis.CSS` / `globalThis.Highlight`。
 - 单测 128 条全绿（新增 `linkTokensIn()` 多 token/边界断言与「没有高亮 API 时 paintTextLinks 静默返回 0」断言）。
+- 修「壳把 URL 后面的中文一起吞进链接」：GFM autolink literal 一路吃到空白，`http://localhost:6006/，来自 worktree）` 被渲染成一个 href 为 `http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA` 的锚点，蓝色铺到 `，来自`，点开还是错 URL。`overcapturedAnchor()` 把这种锚点收回到 `linkTokensIn()` 认出的 URL token——只在「锚点文本 = 自己的 href（解百分号后相等）+ token 是文本前缀」时生效，真实 markdown 链接不动；点击走收回的 URL，视觉用 `::highlight(flow-link-tail)` 把尾巴画回正文颜色。
+- 单测 129 条全绿（新增 `overcapturedAnchor()` 的命中/放行与 `anchorLinkOf()` 取回 URL 的断言）。
 
 ## 0.7.0
 

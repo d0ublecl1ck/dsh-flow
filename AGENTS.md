@@ -36,6 +36,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 - 浏览器半边：`document` 上的一个捕获监听（`capture: true`），每次都现读偏好，因此开关不需要重新绑定监听。**「这一下算不算链接」只有一个判定点 `linkOf()`**，它认两种形状，以后壳再换渲染形状也补在这里：① 壳渲染出来的锚点 `a[href]`（markdown 链接、以及被解析成链接的行内代码）——只认 `http`/`https`/`mailto`/`tel` + 非同源；② **没被渲染成锚点的纯文本 URL**（用户自己发的消息是 `_plainRun_` 纯文本，壳只对 markdown 做链接化）——由 `textLinkOf()` 用 `caretRangeFromPoint` / `caretPositionFromPoint` 取点击处的文本节点与偏移，再用 `linkTokenAt()` 找包含该偏移的 `https?://` token（token 只吃 ASCII URL 字符，所以紧跟 URL 的全角逗号/中文不会粘进 URL）。② 是刻意收窄的：只认「普通左键 + 无选中文本 + 不在 `contenteditable`/`pre`/`code` 内 + 单击（`detail <= 1`）」；拖选、双选、输入框、围栏代码块都放行，同源与其它协议也一律放行。
 - **纯文本 URL 也会被画成链接**：壳只给 markdown 里的 URL 上样式（`var(--dsw-alias-link)`），用户消息与其它纯文本 run 没有，所以光有识别还是「看起来不像链接」。本插件用 **CSS Custom Highlight API**（`::highlight(flow-text-link)`）把 `linkTokensIn()` 找到的同一批 token 画成链接色 + 虚线下划线，并用 `pointermove` 在其上给手型光标——**不包装、不移动 React 的节点**，只叠一层 Range 高亮，所以壳重渲染不会打架。`MutationObserver` 挂在 `document.body` 这个稳定祖先上（会话容器 `[data-slot="conversation.session"]` 换会话时会被替换，不能挂在它上面），每次重画现查当前容器，160ms 去抖；每页最多 `TEXT_LINK_RANGE_LIMIT`（600）个 Range。**引擎没有该 API 时静默不画**，点击识别照常。**坑：本模块自己声明了 `const CSS`（样式表字符串），会遮蔽浏览器的 `CSS` 命名空间**，所以高亮必须走 `globalThis.CSS` / `globalThis.Highlight`（已踩：写裸 `CSS` 时手型光标生效、高亮恒为空）。
+- **壳把 URL 后面的 CJK 一起吞进链接时要收回**：GFM 的 autolink literal 一直吃到空白，所以 `http://localhost:6006/，来自 worktree）` 会被壳渲染成**一个** href 为 `http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA` 的锚点——链向一个没人写过的 URL，蓝色也铺到 `，来自` 上。判定收进 `overcapturedAnchor()`：只有当锚点文本就是它自己的 href（解百分号后逐字相等）、且 `linkTokensIn()` 的 token 只是文本前缀时才生效；markdown 里「文字是另一个 URL」的真实链接不动。两处都挂在这一个判定上：点击用 `anchorLinkOf()` 取回 token，视觉用第二个高亮 `::highlight(flow-link-tail)` 把尾巴画回正文颜色（锚点本身不动，不碰 React 树）。
 - 宿主半边：`ctx.inject(['webServer', 'connection'])` 的子 fiber 上注册 `{ kind: 'exact', path: '/flow/open-external' }`。先过 `connection.requestRejection`（未认证 401），再要求 `POST`（405）、限制 16KB 请求体（413）、只放行四种协议且长度 ≤ 8192（400），最后才 spawn。**只把 `new URL()` 解析后的 `href` 交给打开器**，原始字符串永不出现在命令行参数里。
 - **宿主答非 2xx 时浏览器半边回退到 `window.open`**：`fetch` 对 404/500 是 resolve 不是 reject，只看 reject 会把点击吞掉——客户端先更新、宿主还是旧版的那段窗口里，链接会变成「点了没反应」。这条回退是给那个窗口兜底的，别删。
 - **和 `dsh-external-link` 不能同时装**：那个插件在同一个节点上也挂了捕获监听，`stopPropagation()` 拦不住同节点的另一个监听，两边都会 POST、链接会被打开两次。合并进本插件之后应当把 `dsh-external-link` 从 profile 的 bundles 里去掉。
@@ -138,7 +139,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 128 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 129 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

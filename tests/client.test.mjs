@@ -989,6 +989,34 @@ test('linkTokenAt finds the URL a plain-text run carries, and only inside it', a
   assert.equal(linkTokenAt('http://x', undefined), null)
 })
 
+test('an anchor the shell over-captured is trimmed back to its URL token', async () => {
+  const { overcapturedAnchor, linkOf, anchorLinkOf } = (await load()).internals
+  const text = 'http://localhost:6006/，来自'
+  const href = 'http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA'
+  const capture = {
+    nodeType: 1,
+    textContent: text,
+    getAttribute: (name) => (name === 'href' ? href : null),
+    href,
+  }
+  assert.deepEqual(overcapturedAnchor(capture), { url: 'http://localhost:6006/', tailStart: 22, tailEnd: 25 })
+  // The click opens the recovered URL, not the over-captured attribute.
+  const event = { target: { closest: (selector) => (selector === 'a[href]' ? capture : null) } }
+  assert.equal(anchorLinkOf(event, BASE, ORIGIN), 'http://localhost:6006/')
+  assert.equal(linkOf(event, BASE, ORIGIN), 'http://localhost:6006/')
+
+  // An exact anchor is left alone.
+  const exact = { nodeType: 1, textContent: 'http://localhost:6006/', getAttribute: () => 'http://localhost:6006/', href: 'http://localhost:6006/' }
+  assert.equal(overcapturedAnchor(exact), null)
+  // A deliberate markdown link whose href differs from its text stays as written.
+  const deliberate = { nodeType: 1, textContent: text, getAttribute: () => 'https://example.com/x', href: 'https://example.com/x' }
+  assert.equal(overcapturedAnchor(deliberate), null)
+  // A link whose text is not a URL at all is left alone.
+  const labelled = { nodeType: 1, textContent: '点这里', getAttribute: () => 'https://example.com/x', href: 'https://example.com/x' }
+  assert.equal(overcapturedAnchor(labelled), null)
+  assert.equal(overcapturedAnchor(null), null)
+})
+
 test('linkTokensIn returns every URL in a plain-text run, with offsets', async () => {
   const { linkTokensIn } = (await load()).internals
   assert.deepEqual(linkTokensIn('a http://x/ b'), [{ token: 'http://x/', start: 2, end: 11 }])

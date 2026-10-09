@@ -421,7 +421,50 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The URL an anchor really names when the shell's linkifier over-captured it.
+     *
+     * GFM's autolink literal runs to the next whitespace, so a bare URL glued to
+     * CJK takes the sentence tail with it: the shipped renderer turns
+     * `http://localhost:6006/，来自 worktree）` into one anchor whose href is the
+     * URL **plus** the percent-encoded `，来自`, and the link then points at a URL
+     * nobody wrote. This is the one recognition patch for that shape.
+     *
+     * It only fires when the anchor is exactly its own text — a deliberate
+     * markdown link whose text is another URL, or whose href differs from its
+     * text, is left alone — and when the URL token is only a prefix of that text,
+     * so `linkTokensIn` (the same tokenizer the click and the paint already use)
+     * says where the real URL ends.
+     *
+     * @param anchor - the `<a href>` element.
+     * @returns `{url, tailStart, tailEnd}`, or null when the anchor is exact.
+     */
+    function overcapturedAnchor(anchor) {
+      if (!isElement(anchor) || typeof anchor.textContent !== 'string') return null
+      const text = anchor.textContent
+      const first = linkTokensIn(text)[0]
+      if (first === undefined || first.start !== 0) return null
+      if (first.end >= text.length) return null
+      let href
+      try {
+        href = String(anchor.getAttribute('href') ?? '')
+      } catch {
+        return null
+      }
+      let decoded = href
+      try {
+        decoded = decodeURIComponent(href)
+      } catch {
+        decoded = href
+      }
+      if (decoded !== text) return null
+      return { url: first.token, tailStart: first.end, tailEnd: text.length }
+    }
+
+    /**
      * The off-origin URL behind a click on a rendered anchor, or null.
+     *
+     * An anchor the shell over-captured is handed the URL `overcapturedAnchor`
+     * recovered rather than the one the attribute spells.
      *
      * @param event - the document click event.
      * @param base - `location.href`.
@@ -434,9 +477,10 @@ window.__ModuleLoader__.load({
         ? target.closest('a[href]')
         : null
       if (anchor === null || anchor === undefined) return null
+      const overcaptured = overcapturedAnchor(anchor)
       let url
       try {
-        url = new URL(anchor.href, base)
+        url = new URL(overcaptured === null ? anchor.href : overcaptured.url, base)
       } catch {
         return null
       }
@@ -610,6 +654,36 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * One Range per sentence tail the shell's linkifier swallowed into an anchor.
+     *
+     * These are painted back to the ordinary text colour, so a link that points
+     * at `http://localhost:6006/，来自` still *looks* like it ends at the URL.
+     * The anchor itself is untouched — a Range is a paint instruction — which is
+     * what keeps React's tree reconcilable.
+     *
+     * @param root - the conversation element to scan.
+     * @returns Range objects, one per over-captured anchor tail.
+     */
+    function linkTailRanges(root) {
+      if (!isElement(root) || typeof root.querySelectorAll !== 'function') return []
+      const doc = root.ownerDocument
+      if (typeof doc?.createRange !== 'function') return []
+      const ranges = []
+      for (const anchor of root.querySelectorAll('a[href]')) {
+        if (ranges.length >= TEXT_LINK_RANGE_LIMIT) break
+        const tail = overcapturedAnchor(anchor)
+        if (tail === null) continue
+        const node = [...anchor.childNodes].find((child) => child.nodeType === 3)
+        if (node === undefined || anchor.textContent !== node.data) continue
+        const range = doc.createRange()
+        range.setStart(node, tail.tailStart)
+        range.setEnd(node, tail.tailEnd)
+        ranges.push(range)
+      }
+      return ranges
+    }
+
+    /**
      * Paint every plain-text URL under one root as a link.
      *
      * The CSS Custom Highlight API is optional: a shell whose engine lacks it
@@ -620,7 +694,7 @@ window.__ModuleLoader__.load({
      * @returns the number of painted tokens, 0 when the API is absent.
      */
     function paintTextLinks(root) {
-      // \`globalThis.CSS\`, not \`CSS\`: this very module declares a \`const CSS\` for its
+      // `globalThis.CSS`, not `CSS`: this very module declares a `const CSS` for its
       // stylesheet, so a bare \`CSS\` here is that string, not the browser's namespace.
       const api = globalThis.CSS
       const highlights = api === undefined || api === null ? undefined : api.highlights
@@ -629,6 +703,8 @@ window.__ModuleLoader__.load({
       try {
         const ranges = textLinkRanges(root)
         highlights.set(TEXT_LINK_HIGHLIGHT, new HighlightCtor(...ranges))
+        const tails = linkTailRanges(root)
+        highlights.set(TEXT_LINK_TAIL_HIGHLIGHT, new HighlightCtor(...tails))
         return ranges.length
       } catch {
         return 0
@@ -639,7 +715,9 @@ window.__ModuleLoader__.load({
     function clearTextLinks() {
       try {
         const api = globalThis.CSS
-        if (api !== undefined && api !== null && api.highlights) api.highlights.delete(TEXT_LINK_HIGHLIGHT)
+        if (api === undefined || api === null || !api.highlights) return
+        api.highlights.delete(TEXT_LINK_HIGHLIGHT)
+        api.highlights.delete(TEXT_LINK_TAIL_HIGHLIGHT)
       } catch {
         // The API is optional; a refusal is not this feature's to report.
       }
@@ -2172,6 +2250,9 @@ window.__ModuleLoader__.load({
     /** The CSS Custom Highlight name the plain-text URLs are painted under. */
     const TEXT_LINK_HIGHLIGHT = 'flow-text-link'
 
+    /** The CSS Custom Highlight name the over-captured sentence tails are painted under. */
+    const TEXT_LINK_TAIL_HIGHLIGHT = 'flow-link-tail'
+
     /** Upper bound on painted URL ranges, so a huge transcript cannot stall a frame. */
     const TEXT_LINK_RANGE_LIMIT = 600
 
@@ -2337,6 +2418,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] code{cursor:pointer}
 html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
 html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] *{cursor:pointer}
 ::highlight(flow-text-link){color:var(--dsw-alias-link,currentColor);text-decoration:underline dotted var(--dsw-alias-link,currentColor);text-underline-offset:3px}
+::highlight(flow-link-tail){color:var(--dsw-alias-label-primary,currentColor);text-decoration:none}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -3686,15 +3768,19 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
         readCopyEnabled,
         readExternalLinkEnabled,
         linkOf,
+        anchorLinkOf,
         textLinkOf,
+        overcapturedAnchor,
         linkTokenAt,
         linkTokensIn,
         caretTextAt,
         textLinkRanges,
+        linkTailRanges,
         paintTextLinks,
         clearTextLinks,
         pointerOverTextLink,
         TEXT_LINK_HIGHLIGHT,
+        TEXT_LINK_TAIL_HIGHLIGHT,
         openExternal,
         handleAnchorClick,
         copyCommand,
