@@ -221,6 +221,123 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The Workspace registry row that owns a Session, or null.
+     *
+     * @param items - Workspace registry rows.
+     * @param sessionId - Session to place.
+     * @returns the owning row, or null when the Session sits in the ungrouped bucket.
+     */
+    function owningWorkspace(items, sessionId) {
+      if (sessionId === undefined || sessionId === null || sessionId === '') return null
+      for (const workspace of items ?? []) {
+        if (workspace?.sessionIds?.includes(sessionId)) return workspace
+      }
+      return null
+    }
+
+    /**
+     * Directory basename, accepting both separators and ignoring a trailing one.
+     *
+     * @param path - a stored Workspace path.
+     * @returns the last segment, or `''` when the path has none.
+     */
+    function directoryName(path) {
+      if (typeof path !== 'string') return ''
+      const parts = path.split(/[\\/]+/u).filter((part) => part !== '')
+      return parts.length === 0 ? '' : parts[parts.length - 1]
+    }
+
+    /**
+     * The name the header shows for a Session's Workspace.
+     *
+     * The registry's `title` is the sidebar's own display label — the shipped
+     * workspace browser reads it the same way — so it wins over the directory
+     * name; the basename is only the fallback for a row that carries no title
+     * yet. A Session no Workspace claims answers null, and the shipped button
+     * then keeps exactly the shape it shipped with.
+     *
+     * @param items - Workspace registry rows.
+     * @param sessionId - Session whose Workspace name is wanted.
+     * @returns the display name, `''` when the row has none, or null for the ungrouped bucket.
+     */
+    function workspaceNameFor(items, sessionId) {
+      const workspace = owningWorkspace(items, sessionId)
+      if (workspace === null) return null
+      const title = typeof workspace.title === 'string' ? workspace.title.trim() : ''
+      return title !== '' ? title : directoryName(workspace.path)
+    }
+
+    /** The attribute the stylesheet renders as the name inside the shipped button. */
+    const WORKSPACE_NAME_ATTR = 'data-flow-workspace'
+
+    /** The seat's own registration id inside the header utilities list. */
+    const UTILITIES_ID = 'flow.workspace-name'
+
+    /** Where the seat sorts in that list; the shipped open-in-app entry is -10. */
+    const UTILITIES_ORDER = -20
+
+    /**
+     * The main half of the shipped "Open In…" split button, or undefined.
+     *
+     * `data-open-target` is the control's own contract — the shipped package puts
+     * it on the pill div — while the class names beside it are CSS-module hashes
+     * that move between builds. Only the first button inside that pill is
+     * addressed: it is the one carrying the icon and the activation.
+     *
+     * @param scope - a header node to search, typically the utilities seat.
+     * @returns the shipped main button, or undefined when this header has none.
+     */
+    function openInAppMainButton(scope) {
+      if (scope === null || scope === undefined) return undefined
+      const split = scope.querySelector('[data-open-target="directory"]')
+      if (split === null || split === undefined) return undefined
+      return split.querySelector('button') ?? undefined
+    }
+
+    /**
+     * Write the Workspace name onto the shipped button, or clear it.
+     *
+     * The write is skipped when the attribute already carries that name: the seat
+     * re-syncs on every DOM change the shell makes, and an unconditional write
+     * would keep touching an element that is already correct.
+     *
+     * @param scope - the header node that owns the shipped button.
+     * @param name - the name to show, or null/'' to clear it.
+     * @returns whether a shipped button was found to write to.
+     */
+    function applyWorkspaceName(scope, name) {
+      const main = openInAppMainButton(scope)
+      if (main === undefined) return false
+      const next = typeof name === 'string' ? name : ''
+      const current = main.getAttribute(WORKSPACE_NAME_ATTR)
+      if (next === '') {
+        if (current !== null) main.removeAttribute(WORKSPACE_NAME_ATTR)
+        return true
+      }
+      if (current !== next) main.setAttribute(WORKSPACE_NAME_ATTR, next)
+      return true
+    }
+
+    /**
+     * The nearest ancestor of a seat that owns the shipped split button.
+     *
+     * The seat is rendered into the utilities list, but the shell is free to wrap
+     * it, so the header is found by walking up to the first node that actually
+     * contains the button rather than by trusting a fixed parent.
+     *
+     * @param seat - the seat element, or its ref value.
+     * @returns that node, or null when no shipped button is above the seat.
+     */
+    function headerUtilitiesScope(seat) {
+      let node = seat
+      while (node !== null && node !== undefined) {
+        if (openInAppMainButton(node) !== undefined) return node
+        node = node.parentElement
+      }
+      return null
+    }
+
+    /**
      * Bring one Session's row into view, taking the one expansion step that
      * stands between the row and the viewport.
      *
@@ -2287,6 +2404,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read the workspace-name preference off the plugin's config form.
+     *
+     * The default is on, and an unreadable form keeps that default: a Host that
+     * does not project the field yet must not silently take the name away.
+     *
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether the shipped "Open In…" button carries the Workspace name.
+     */
+    function readWorkspaceNameEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.workspaceName !== false
+    }
+
+    /**
      * The rows one changed-file menu shows.
      *
      * The default action and the file-manager reveal are always there, so the
@@ -2565,6 +2702,8 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
 a[data-flow-link-trimmed]{text-decoration:none!important}
 ::highlight(flow-link-hover){text-decoration:underline solid var(--dsw-alias-link,currentColor);text-underline-offset:3px}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.flow-workspace-seat{display:none}
+[data-flow-workspace]::before{content:attr(data-flow-workspace);max-width:140px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,currentColor);font-size:12px;line-height:16px}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
 .flow-row__title{font-size:14px;line-height:20px}
@@ -2662,6 +2801,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'history.file': '[附件：{name}]',
       'section.history.title': '↑↓ 切换发过的消息',
       'section.history.description': '草稿为空时，用 ↑/↓ 在当前对话发过的消息之间切换：↑ 更早、↓ 更新，越过最新一条回到原来的草稿。带图片的消息会把图片重新粘回草稿；文件附件（本插件读不回内容）以一行占位文字保留，可自行删除。',
+      'section.workspaceName.title': '在「打开」按钮里显示当前工作区名',
+      'section.workspaceName.description': '在会话标题行右侧「打开」按钮的图标左侧显示当前工作区名（过长会截断）。名字属于同一个按钮，点它的效果和点图标完全一样；没有归属工作区的会话不显示，关闭后按钮恢复原样。',
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -2737,6 +2878,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'history.file': '[attachment: {name}]',
       'section.history.title': 'Recall sent messages with ↑/↓',
       'section.history.description': 'With an empty draft, ↑/↓ walks the messages this conversation already sent: ↑ older, ↓ newer, and ↓ past the newest restores your draft. A recalled image is pasted back into the draft; a file attachment, whose bytes this plugin cannot read back, stays as one placeholder line you can delete.',
+      'section.workspaceName.title': 'Show the workspace name in the “Open In” button',
+      'section.workspaceName.description': 'Show the current workspace name to the left of the icon inside the header’s “Open In” button (long names are truncated). The name belongs to that same button, so clicking it does exactly what clicking the icon does; a Session no workspace claims shows nothing, and switching this off restores the button.',
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -3210,7 +3353,50 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
     }
 
     /**
-     * The 心流 settings page: the five preferences this plugin owns.
+     * The seat that carries the current Workspace name into the shipped split button.
+     *
+     * The name does not become a second control: this seat renders nothing visible
+     * (the stylesheet hides it) and writes an attribute onto the shipped main
+     * button, which the stylesheet renders as that button's `::before`. The icon's
+     * own activation therefore stays untouched — clicking the name is clicking the
+     * shipped button — and the pair keeps the shipped padding, gap, hover and
+     * radius for free. Only the name itself is ours.
+     *
+     * The name is re-applied whenever the header's DOM changes, because the shell
+     * may rebuild that button (an application choice, a Session switch). React
+     * never manages this attribute, so a re-render that keeps the element keeps
+     * the name.
+     *
+     * @param props - the header slot's own props plus the injected seat face.
+     */
+    function WorkspaceNameSeat(props) {
+      const { config, workspaces, sessionId, read } = props
+      const anchor = useRef(null)
+      const enabled = useConfigValue(config, read)
+      const subscribe = useCallback((listener) => workspaces.subscribe(listener), [workspaces])
+      const snapshot = useCallback(() => workspaces.getSnapshot()?.items, [workspaces])
+      const items = useSyncExternalStore(subscribe, snapshot, snapshot)
+      const name = enabled ? workspaceNameFor(items, sessionId) : null
+
+      useEffect(() => {
+        const scope = headerUtilitiesScope(anchor.current?.parentElement ?? null)
+        if (scope === null) return undefined
+        const sync = () => { applyWorkspaceName(scope, name) }
+        sync()
+        // A re-render that replaces the button leaves the header's child list
+        // changed, which is exactly what this watches; our own attribute write is
+        // not a child-list mutation, so the sync cannot feed itself.
+        if (typeof MutationObserver !== 'function') return undefined
+        const observer = new MutationObserver(sync)
+        observer.observe(scope, { childList: true, subtree: true })
+        return () => { observer.disconnect() }
+      }, [name])
+
+      return h('span', { ref: anchor, className: 'flow-workspace-seat' })
+    }
+
+    /**
+     * The 心流 settings page: the preferences this plugin owns.
      *
      * @param props - localized copy and the plugin's config form.
      */
@@ -3279,6 +3465,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           read: readComposerHistoryEnabled,
           title: t('section.history.title'),
           description: t('section.history.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
+          field: 'workspaceName',
+          read: readWorkspaceNameEnabled,
+          title: t('section.workspaceName.title'),
+          description: t('section.workspaceName.description'),
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
@@ -3834,6 +4029,18 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           useLocaleRevision,
         }))), 'flow: locate button seat')
 
+        // The Workspace name is not a second header control: this seat renders
+        // nothing, and writes the name onto the shipped "Open In…" split button so
+        // the two read as one pill. It sorts ahead of that entry (-10) for the case
+        // where a shell lays the utilities out by order rather than by alignment.
+        ctx.effect(() => ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+          name: 'conversation.session.header.utilities',
+          id: UTILITIES_ID,
+          order: UTILITIES_ORDER,
+          locale: ENTRY_ID,
+          inject: () => ({ config, workspaces, read: readWorkspaceNameEnabled }),
+        }, WorkspaceNameSeat)), 'flow: workspace name seat')
+
         // The Session row menu is the shell's own: a right-click on the row opens
         // it, so registering into its item list is what reaches both gestures.
         ctx.effect(() => ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
@@ -3942,6 +4149,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         currentSessionId,
         findSessionRow,
         owningGroupKey,
+        owningWorkspace,
+        directoryName,
+        workspaceNameFor,
+        WORKSPACE_NAME_ATTR,
+        UTILITIES_ID,
+        UTILITIES_ORDER,
+        openInAppMainButton,
+        applyWorkspaceName,
+        headerUtilitiesScope,
         revealSessionRow,
         locateCurrentSession,
         resolveListArea,
@@ -3992,6 +4208,7 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         handleChangesContextMenu,
         createChangesMenuStore,
         readChangesFileOpen,
+        readWorkspaceNameEnabled,
         applicationsForKind,
         changesFileRows,
         openChangedFile,

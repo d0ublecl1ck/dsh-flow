@@ -19,10 +19,19 @@ function node({ className = '', attrs = {}, find, tag = 'div' } = {}) {
     parentElement: null,
     dataset: {},
     inserted: [],
+    writes: 0,
     clicks: 0,
     scrollOptions: undefined,
     animations: [],
     getAttribute: (name) => (name in attrs ? attrs[name] : null),
+    setAttribute(name, value) {
+      attrs[name] = String(value)
+      element.writes += 1
+    },
+    removeAttribute(name) {
+      delete attrs[name]
+      element.writes += 1
+    },
     querySelector: (selector) => (find === undefined ? null : (find(selector) ?? null)),
     insertAdjacentElement(position, child) {
       element.inserted.push({ position, child })
@@ -119,6 +128,119 @@ test('owningGroupKey finds the registry workspace, and the ungrouped bucket othe
   assert.equal(owningGroupKey(items, 's2'), 'w2')
   assert.equal(owningGroupKey(items, 'stray'), '')
   assert.equal(owningGroupKey(undefined, 'stray'), '')
+})
+
+test('the registry row behind a Session decides the displayed Workspace name', async () => {
+  const { owningWorkspace, workspaceNameFor, directoryName } = (await load()).internals
+  const items = [
+    { workspaceId: 'w1', title: 'dsh-flow', path: '/Users/x/dsh-flow', sessionIds: ['s1'] },
+    // The stored title is the sidebar's own label, not the directory basename.
+    { workspaceId: 'w2', title: '自由对话', path: '/Users/x/harness/scratchpad', sessionIds: ['s2'] },
+    // No title at all: the path answers.
+    { workspaceId: 'w3', path: '/Users/x/trailing/', sessionIds: ['s3'] },
+    // Neither: nothing to show, and the Session still owns a Workspace.
+    { workspaceId: 'w4', title: '   ', sessionIds: ['s4'] },
+  ]
+  assert.equal(owningWorkspace(items, 's1'), items[0])
+  assert.equal(owningWorkspace(items, 'stray'), null)
+  assert.equal(owningWorkspace(items, ''), null)
+  assert.equal(owningWorkspace(undefined, 's1'), null)
+
+  assert.equal(workspaceNameFor(items, 's1'), 'dsh-flow')
+  assert.equal(workspaceNameFor(items, 's2'), '自由对话')
+  assert.equal(workspaceNameFor(items, 's3'), 'trailing')
+  assert.equal(workspaceNameFor(items, 's4'), '')
+  // The ungrouped bucket has no name to write, so the button keeps its shipped shape.
+  assert.equal(workspaceNameFor(items, 'stray'), null)
+  assert.equal(workspaceNameFor(items, ''), null)
+  assert.equal(workspaceNameFor(undefined, 's1'), null)
+
+  assert.equal(directoryName('/a/b/c'), 'c')
+  assert.equal(directoryName('/a/b/c/'), 'c')
+  assert.equal(directoryName('C:\\x\\y'), 'y')
+  assert.equal(directoryName('C:\\x\\y\\'), 'y')
+  assert.equal(directoryName('c'), 'c')
+  assert.equal(directoryName('/'), '')
+  assert.equal(directoryName(''), '')
+  assert.equal(directoryName(undefined), '')
+})
+
+test('the shipped split button is addressed by its own data attribute', async () => {
+  const { openInAppMainButton, WORKSPACE_NAME_ATTR } = (await load()).internals
+  const main = node({ tag: 'button' })
+  const split = node({ find: (selector) => (selector === 'button' ? main : null) })
+  const scope = node({ find: (selector) => (selector === '[data-open-target="directory"]' ? split : null) })
+  assert.equal(openInAppMainButton(scope), main)
+  // A header whose shell builds no such button (or a missing scope) resolves nothing.
+  assert.equal(openInAppMainButton(node({ find: () => null })), undefined)
+  assert.equal(openInAppMainButton(node({ find: () => node() })), undefined)
+  assert.equal(openInAppMainButton(null), undefined)
+  assert.equal(WORKSPACE_NAME_ATTR, 'data-flow-workspace')
+})
+
+test('the name is written onto the shipped button, never beside it', async () => {
+  const { applyWorkspaceName, WORKSPACE_NAME_ATTR } = (await load()).internals
+  const main = node({ tag: 'button' })
+  const split = node({ find: (selector) => (selector === 'button' ? main : null) })
+  const scope = node({ find: (selector) => (selector === '[data-open-target="directory"]' ? split : null) })
+
+  assert.equal(applyWorkspaceName(scope, 'dsh-flow'), true)
+  assert.equal(main.getAttribute(WORKSPACE_NAME_ATTR), 'dsh-flow')
+  assert.equal(main.writes, 1)
+  // Re-applying the same name must not touch the DOM again: the seat re-syncs on
+  // every mutation the shell makes, and an unconditional write would never settle.
+  applyWorkspaceName(scope, 'dsh-flow')
+  assert.equal(main.writes, 1)
+
+  assert.equal(applyWorkspaceName(scope, null), true)
+  assert.equal(main.getAttribute(WORKSPACE_NAME_ATTR), null)
+  assert.equal(main.writes, 2)
+  // Nothing to clear on a header that never carried a name.
+  assert.equal(applyWorkspaceName(scope, ''), true)
+  assert.equal(main.writes, 2)
+
+  assert.equal(applyWorkspaceName(node({ find: () => null }), 'dsh-flow'), false)
+})
+
+test('the seat resolves its own header by walking up to the node that owns the button', async () => {
+  const { headerUtilitiesScope } = (await load()).internals
+  const main = node({ tag: 'button' })
+  const split = node({ find: (selector) => (selector === 'button' ? main : null) })
+  const host = node({ find: (selector) => (selector === '[data-open-target="directory"]' ? split : null) })
+  const wrapper = child(host, node())
+  const seat = child(wrapper, node())
+  // The nearest ancestor that owns the button wins, whatever wrapper sits between.
+  assert.equal(headerUtilitiesScope(seat), host)
+  // A header with no shipped button above the seat resolves nothing.
+  assert.equal(headerUtilitiesScope(node()), null)
+  assert.equal(headerUtilitiesScope(null), null)
+})
+
+test('the workspace-name switch defaults to on and is off only on an explicit false', async () => {
+  const { readWorkspaceNameEnabled } = (await load()).internals
+  assert.equal(readWorkspaceNameEnabled({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readWorkspaceNameEnabled({ getSnapshot: () => ({ value: { workspaceName: false } }) }), false)
+  assert.equal(readWorkspaceNameEnabled({ getSnapshot: () => ({ value: { workspaceName: true } }) }), true)
+  assert.equal(readWorkspaceNameEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+test('the workspace name rides inside the shipped header utilities slot', async () => {
+  const module = await load()
+  const { UTILITIES_ID, UTILITIES_ORDER, WORKSPACE_NAME_ATTR } = module.internals
+  const registrations = []
+  module.apply(fakeContext(registrations, []))
+  const seat = registrations.find((entry) => entry.name === 'conversation.session.header.utilities')
+  assert.ok(seat, 'the plugin contributes to the header utilities list')
+  assert.equal(seat.id, UTILITIES_ID)
+  assert.equal(seat.locale, 'flow')
+  // Ahead of the shipped open-in-app entry, whose order is -10.
+  assert.ok(UTILITIES_ORDER < -10)
+  assert.equal(seat.order, UTILITIES_ORDER)
+  assert.equal(WORKSPACE_NAME_ATTR, 'data-flow-workspace')
+  const face = seat.inject()
+  assert.equal(typeof face.config.getSnapshot, 'function')
+  assert.equal(typeof face.workspaces.getSnapshot, 'function')
+  assert.equal(face.read({ getSnapshot: () => ({ value: {} }) }), true)
 })
 
 test('revealSessionRow scrolls and flashes a rendered row', async () => {
@@ -879,6 +1001,8 @@ test('both dictionaries stay complete, copy included', async () => {
     'changesFile.revealFailed',
     'section.changesFile.title',
     'section.changesFile.description',
+    'section.workspaceName.title',
+    'section.workspaceName.description',
   ]) {
     assert.equal(typeof flow.zh[key], 'string', key)
     assert.notEqual(flow.zh[key].length, 0, key)

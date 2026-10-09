@@ -85,11 +85,18 @@ test('the send-key switch starts on the shell behaviour, and is volatile too', (
 })
 
 test('the toggles are volatile, which is what the settings form projects', () => {
-  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend']) {
+  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend', 'workspaceName']) {
     const field = Config.dict[name]
     assert.equal(field.meta.volatile, true, name)
     assert.equal(field.type, 'boolean', name)
   }
+})
+
+test('the workspace-name switch defaults to on, and is volatile too', () => {
+  assert.equal(z.resolve({}, Config)[0].workspaceName.get(), true)
+  assert.equal(z.resolve({ workspaceName: false }, Config)[0].workspaceName.get(), false)
+  assert.equal(z.resolve({ workspaceName: true }, Config)[0].workspaceName.get(), true)
+  assert.equal(Config.dict.workspaceName.meta.volatile, true)
 })
 
 test('the route path is namespaced by the bundle row that serves it', () => {

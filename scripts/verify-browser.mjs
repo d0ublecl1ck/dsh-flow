@@ -885,6 +885,77 @@ const COPY_PROBE = `(() => {
 })()`
 
 /**
+ * The shipped "Open In" button, the Workspace name it carries, and where that
+ * name really renders.
+ *
+ * `::before` is the only thing drawing the name, so the pseudo box's own width is
+ * the proof that the text sits *inside* the button rather than beside it: the
+ * icon's left edge has to clear that box. The sidebar's label for the group is
+ * read back as well, so the header and the sidebar cannot drift apart without
+ * this leg saying so.
+ */
+const WORKSPACE_NAME_PROBE = `(() => {
+  const split = document.querySelector('[data-open-target="directory"]');
+  if (split === null) return { hasSplit: false };
+  const main = split.querySelector('button');
+  if (main === null) return { hasSplit: false };
+  const img = main.querySelector('img');
+  const button = main.getBoundingClientRect();
+  const icon = img === null ? null : img.getBoundingClientRect();
+  const pseudo = getComputedStyle(main, '::before');
+  const row = document.querySelector('[data-row-key^="session:"][aria-selected="true"]');
+  // The sidebar label of the group this Session sits in. The list is flat, so
+  // the header that owns a rendered row is the last Workspace header above it;
+  // the group key itself is a Workspace id the page cannot map back to a name.
+  let group = null;
+  if (row !== null) {
+    const top = row.getBoundingClientRect().top;
+    for (const header of document.querySelectorAll('[data-row-key^="workspace:"]')) {
+      if (header.getBoundingClientRect().top <= top) group = header;
+    }
+  }
+  return {
+    hasSplit: true,
+    name: main.getAttribute('data-flow-workspace'),
+    pseudoContent: pseudo.content,
+    pseudoWidth: Number.parseFloat(pseudo.width),
+    buttonLeft: button.left,
+    buttonHeight: button.height,
+    splitHeight: split.getBoundingClientRect().height,
+    splitRadius: getComputedStyle(split).borderRadius,
+    iconLeft: icon === null ? null : icon.left,
+    groupLabel: group === null ? null : (group.innerText || '').split('\\n')[0].trim(),
+    sessionKey: row === null ? null : row.getAttribute('data-row-key'),
+  };
+})()`
+
+/**
+ * Measure what a name far longer than the cap does to the pill.
+ *
+ * The probe writes the long name itself and puts the real one back, so the
+ * assertion is about the stylesheet's clamp rather than about a workspace
+ * someone happens to have named badly.
+ */
+const WORKSPACE_NAME_LONG_PROBE = `(() => {
+  const main = document.querySelector('[data-open-target="directory"] button');
+  if (main === null) return null;
+  const before = main.getAttribute('data-flow-workspace');
+  const widthBefore = main.getBoundingClientRect().width;
+  main.setAttribute('data-flow-workspace', 'dsh-session-radar-fork-2026-and-then-some-more');
+  const pseudo = getComputedStyle(main, '::before');
+  const result = { pseudoWidth: Number.parseFloat(pseudo.width), pillWidth: main.getBoundingClientRect().width, shortPill: widthBefore };
+  if (before === null) main.removeAttribute('data-flow-workspace');
+  else main.setAttribute('data-flow-workspace', before);
+  return result;
+})()`
+
+/** The workspace-name switch: the last row of the 心流 page. */
+const WORKSPACE_NAME_SWITCH = '[role="dialog"] .flow-row:nth-child(8) [role="switch"]'
+
+/** Page-side predicate: the shipped button carries a Workspace name right now. */
+const WORKSPACE_NAME_PRESENT = `document.querySelector('[data-open-target="directory"] button[data-flow-workspace]') !== null`
+
+/**
  * Page-side predicate: a copy notice is on screen right now.
  *
  * The panel's own warnings use the same role, so the sentence is part of the
@@ -1675,8 +1746,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息'])) {
-      pass('the 心流 page renders all seven preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息', '在「打开」按钮里显示当前工作区名'])) {
+      pass('the 心流 page renders all eight preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -2264,6 +2335,86 @@ async function main() {
       if (startedOn !== null) {
         await click(cdp, sessionId, '[data-row-key=' + JSON.stringify(startedOn) + ']').catch(() => {})
         await sleep(400)
+      }
+    }
+
+    // ---- J. the Workspace name rides inside the shipped "Open In" button ----
+    // The name is not a second control: this plugin's own seat renders nothing
+    // and writes an attribute onto the shipped split button, which the stylesheet
+    // draws through `::before`. Every assertion below therefore reads that
+    // shipped button itself — a name that stopped being written shows up as a
+    // missing attribute, never as something the layout would betray.
+    {
+      const content = await openContentSession(cdp, sessionId)
+      if (!content.ok) {
+        console.log('  NOTE  no content Session opened; the workspace-name leg uses the Session already on screen')
+      }
+      const first = await evaluate(cdp, sessionId, WORKSPACE_NAME_PROBE)
+      if (first === null || first.hasSplit !== true) {
+        fail('no shipped "Open In" split button to check: ' + JSON.stringify(first))
+      } else if (first.name === null || first.name === '') {
+        skip('the open Session belongs to no Workspace, so this header has no name to show')
+      } else {
+        if (first.groupLabel === null) {
+          console.log('  NOTE  the sidebar group row behind this Session was not found; the header name is checked alone')
+        } else if (first.groupLabel !== first.name) {
+          fail('the header name and the sidebar label disagree: ' + JSON.stringify({ header: first.name, sidebar: first.groupLabel }))
+        } else {
+          pass('the shipped "Open In" button carries the sidebar label of this Session workspace: ' + first.name)
+        }
+        const gutter = first.iconLeft === null ? null : first.iconLeft - first.buttonLeft
+        if (first.pseudoContent !== JSON.stringify(first.name)) {
+          fail('the name is not drawn by the shipped button itself: ' + JSON.stringify(first.pseudoContent))
+        } else if (gutter === null || gutter < first.pseudoWidth - 0.5) {
+          fail('the name does not sit left of the icon inside the button: ' + JSON.stringify({ pseudoWidth: first.pseudoWidth, gutter }))
+        } else if (Math.abs(first.splitHeight - 24) > 0.6 || String(first.splitRadius).startsWith('8px') === false) {
+          fail('the pill stopped being the shipped one: ' + JSON.stringify({ pillHeight: first.splitHeight, buttonHeight: first.buttonHeight, radius: first.splitRadius }))
+        } else {
+          pass('the name is drawn inside the pill, left of the icon, at the shipped height and radius')
+        }
+        const long = await evaluate(cdp, sessionId, WORKSPACE_NAME_LONG_PROBE)
+        if (long === null) {
+          fail('the shipped button disappeared while a long name was measured')
+        } else if (long.pseudoWidth <= 141 && long.pillWidth < 200) {
+          pass('a name longer than the cap is ellipsized instead of widening the pill')
+        } else {
+          fail('a long name is not capped: ' + JSON.stringify(long))
+        }
+        await shoot(cdp, sessionId, 'workspace-name.png')
+      }
+
+      // Off and on again is a Host round trip through the settings form. A
+      // browser half running ahead of its Host cannot project the field at all,
+      // and that is a skip rather than a product failure.
+      await openFlowTab(cdp, sessionId)
+      const switchedOff = await pressFlowSwitch(cdp, sessionId, WORKSPACE_NAME_SWITCH, 'false')
+      if (!switchedOff) {
+        skip('this Host does not project the workspaceName field yet, so the off state is not exercised')
+        await pressEscape(cdp, sessionId)
+      } else {
+        await pressEscape(cdp, sessionId)
+        await sleep(500)
+        const cleared = await evaluate(cdp, sessionId, WORKSPACE_NAME_PROBE)
+        if (cleared !== null && cleared.hasSplit === true && (cleared.name === null || cleared.name === '')) {
+          pass('switching the preference off leaves the shipped button exactly as it shipped')
+        } else {
+          fail('the name survived the preference being switched off: ' + JSON.stringify(cleared === null ? null : cleared.name))
+        }
+        await openFlowTab(cdp, sessionId)
+        const switchedOn = await pressFlowSwitch(cdp, sessionId, WORKSPACE_NAME_SWITCH, 'true')
+        await pressEscape(cdp, sessionId)
+        if (!switchedOn) {
+          fail('the workspace-name preference would not switch back on')
+        } else {
+          try {
+            await waitFor(cdp, sessionId, WORKSPACE_NAME_PRESENT, 'the workspace name to come back', 8000)
+            pass('switching the preference back on shows the name again')
+          } catch {
+            const back = await evaluate(cdp, sessionId, WORKSPACE_NAME_PROBE)
+            fail('the name did not come back: ' + JSON.stringify(back === null ? null : back.name))
+          }
+        }
+        await shoot(cdp, sessionId, 'workspace-name-restored.png')
       }
     }
   } finally {

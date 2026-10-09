@@ -1,6 +1,6 @@
 # dsh-flow
 
-DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由、对话输入框里把 Enter 与 ⌘/Ctrl+Enter 对调的发送键开关、用 ↑/↓ 在当前对话发过的消息之间切换的历史回填，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
+DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧⌘D`）、会话行菜单里的「复制会话 ID」（+ `⇧⌘C`）、把外链交给系统默认程序打开的宿主路由、对话输入框里把 Enter 与 ⌘/Ctrl+Enter 对调的发送键开关、用 ↑/↓ 在当前对话发过的消息之间切换的历史回填、把当前工作区名写进标题行「打开」按钮的显示开关，以及设置里的「心流」页。面向后续在本目录继续开发的人（或 agent）。
 
 ## 结构与约定
 
@@ -104,10 +104,22 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **监听只在偏好打开时存在**（与行内代码菜单同一范式）；关掉时 document 上没有 keydown 监听。
 - 真浏览器实测（无头 Chrome，worktree client）：空草稿 ↑ 回填出真实用户消息，非空草稿 ↑ 不动草稿。**宿主是旧版时 I 段记 `SKIP`**（`composerHistory` 没被 settings 域投影）。
 
+## 工作区名写进「打开」按钮（为什么是写属性 + `::before`）
+
+会话标题行右侧那个官方 split button（`[data-open-target="directory"]`）里，图标左边显示当前工作区名。
+
+- **名字不是第二个控件**：本插件在该槽 `conversation.session.header.utilities`（`kind: 'list'`、`scope: 'session'`）注册一个 `display:none` 的座位 span（id `flow.workspace-name`、`order: -20`，官方 `open-in-app` 是 `-10`），由它把名字写成官方主按钮上的 `data-flow-workspace` 属性，样式表用 `[data-flow-workspace]::before{content:attr(data-flow-workspace)}` 渲染。**点名字就是点官方按钮**（同一个元素、同一条激活路径），所以「点名字和点图标效果一样」是结构保证，不是靠两个处理器对齐行为。
+- **实拉测出来的形状**：右对齐的药丸加名字后只往左长（图标 `imgShift: 0`）；`::before` 在 `display:flex` 的按钮里就是一个正常 flex item（`max-width:140px` 时宽度正好 140px、出现 `…`）；主按钮 22px 高、外层药丸 24px 高、圆角 8px（J 段按这些数字断言，任何一项变了都说明官方改了那颗药丸）。
+- **名字来源是工作区注册表**：`ctx.workspaces.list.getSnapshot().items` 里 `sessionIds` 命中当前会话的那行，取 `title`（官方 workspace 浏览器就是用它当显示标签，实测 `title:"自由对话"` 的 `path` 是 `…/scratchpad`，所以**不能**用目录名代替标题），标题为空才退回 `path` 的 basename（两个分隔符都认）。没有归属工作区时返回 null、**不写属性**，按钮保持出厂样子。
+- **重渲染由 childList 观察兜住**：`MutationObserver` 挂在座位所在的那个 utilities 容器上（从座位往上走，第一个含官方主按钮的祖先 —— 也就是那颗药丸的父级），只观察 `childList/subtree`；`applyWorkspaceName()` 只在属性值真的变了才写，而写属性不是 childList 变更，所以同步不会自己喂自己（官方按钮被整颗替换时才需要重写，那正是 childList 变更）。
+- **开关**：`flow.workspaceName`（默认开）。关掉时 `name` 变 null，下一次同步把属性摘掉。
+- **脆弱点（静默失效型）只有一处**：`[data-open-target="directory"] button` —— `data-open-target` 是官方 `open-in-app` 自己设的数据属性（旁边的 class 是 CSS module 哈希，不能依赖）。官方改属性名或把图标挪出主按钮后，症状只是「名字不见了」，不报错。`scripts/verify-browser.mjs` 的 J 段钉住这件事：属性存在且等于侧栏那个分组的标签、`::before` 的内容等于属性值、伪元素宽度不越过图标的左边缘、超长名被夹在 140px 内、关掉开关后属性消失、开回来又出现。
+
 ## 依赖的官方契约（脆弱点集中在这里）
 
-- 槽位：`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占三个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单，`flow.changes-menu` 放改动文件菜单）。
+- 槽位：`conversation.session.header.utilities`（`kind: 'list'`、`scope: 'session'`；官方 `open-in-app` 注册在这里，`order: -10`；本插件注册一个不渲染可见内容的座位 `flow.workspace-name`，`order: -20`，名字由它写到官方按钮上）、`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占三个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单，`flow.changes-menu` 放改动文件菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
+- DOM（工作区名）：会话标题行右侧那颗官方 split button 的**主按钮**，选择器 `[data-open-target="directory"] button`（同槽的第二个 button 是下拉箭头）。本插件把工作区名写成它的 `data-flow-workspace` 属性、由 `::before` 画出来，按钮自身的 hover / 圆角 / padding 都是官方那一套。**静默失效型**：属性改名或图标换位置后症状只是「名字不见了」，不报错。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`、以及**链接形态** `code > a`（URL 的行内代码，锚点是 `code` 的后代，判定在 `inlineCodeLink()`；漏了它就会「点了链接又被复制」）。
 - DOM（改动文件菜单）：改动文件卡片根 `[data-changed-files]`，以及卡内带 `aria-describedby` 的按钮——那个 id 指向的隐藏元素里是 Host 路径。两者都是**静默失效型**依赖：官方改渲染形状后症状只是「右键没菜单」，不报错，所以改完必须跑真浏览器验收。
 - 服务与数据（打开方式）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）仍是 `~/…` **普通文件**的打开路径。**目录与应用行**统一走本插件的宿主路由：`GET /flow/apps` 列本机真实安装的应用（`{id,name,kind}`，kind ∈ `ide`/`terminal`/`files`）；`POST /flow/open-with` 收 `{app, path}`，`app` 是 catalog id，或 `'default'`（系统默认应用）、`'reveal'`（文件管理器中显示）；`path` 必须绝对且存在（否则 400/404），**文件只接受 `kind === 'ide'`、目录接受任意 kind**（否则 403），未认证 401。两条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开；catalog 一页只取一次并记住，失败不缓存。图标沿用 `GET /open-in-app/icon/<id>`（未知 id 404，`<img>` 自己 `onError` 隐藏）。本机实拉 kind：`ide` = vscode/zed/xcode/androidstudio/intellij/pycharm，`terminal` = iterm/terminal，`files` = finder。
@@ -126,7 +138,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, composerHistory, modEnterSend })`，七个字段都是 `z.boolean().volatile()` —— 前六个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, composerHistory, modEnterSend, workspaceName })`，八个字段都是 `z.boolean().volatile()` —— 前七个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -140,7 +152,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 131 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 138 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）
@@ -152,6 +164,7 @@ npm run assets           # 重新生成 assets/ 里的示意图（需要本机 C
 
 - **启动面板会挡住一切按压**：客户端上次意外退出后，shell 会给下一个连接弹「上次中断的任务」面板，它的 `.rt-veil` 让 `elementFromPoint` 命中遮罩，`aim()` 恒失败（症状是「按钮明明在，却报 nothing clickable」）。`aim()` 现在会调 `clearStartupVeil()` 点它自己的「稍后处理」把面板关掉（**绝不点「重试选中 N 个」**，那会真的续跑），这是 throwaway profile 里的本地动作。
 - **验收脚本会抖**：同一次运行里「复制偏好写不回去」「openContentSession 找不到有 code 的会话」这类失败与功能改动无关，是偏好残留与面板时序造成的；判断回归要拿同一份脚本的前后两次运行对比，不要只看一次红。
+- **工作区名那段（J）会拨一次开关**：先断言官方按钮上的属性等于侧栏那个分组的标签、`::before` 的内容等于属性值、伪元素宽度不越到图标左边、超长名被夹在 140px，再把 `flow.workspaceName` 关掉（属性必须消失）、开回来（名字必须回来）。旧宿主没投影这个字段时那段按约定记 `SKIP`；跑完开关留在开。
 - **下面的两条也必须知道**：
 
 
@@ -193,3 +206,4 @@ curl -s -H "Cookie: <现签的会话 Cookie>" http://127.0.0.1:43129/ | grep -c 
 - 侧边栏折叠成 rail 时按钮**故意不出现**（rail 标题行没有搜索座位）。这是已确认的设计选择，不要加「找不到 searchSlot 就退回 headerActions」之类的兜底；快捷键在这一形态下会以「侧边栏已折叠」拒绝按下。
 - 不要因为定位不到就把侧边栏展开：那会和用户刚做的收起动作打架。
 - 不要为了「顺手」去清用户的搜索词或筛选：定位不到就如实说明。
+- 「未分组」的会话**故意没有工作区名**：那是数据本身的状态（`sessionIds` 无人认领），不要替它编一个「未分组」之类的占位文案 —— 那和侧栏分组的措辞打架，也会把「这个名字是工作区自己的标题」这条口径弄脏。
