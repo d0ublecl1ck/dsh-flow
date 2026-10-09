@@ -1076,6 +1076,45 @@ test('a press on the over-captured tail is claimed but opens nothing', async () 
   assert.deepEqual(urlCalls.map((init) => JSON.parse(init.body)), [{ url: 'http://localhost:6006/' }])
 })
 
+test('an over-captured anchor loses the shell underline and keeps the URL one', async () => {
+  const { markTrimmedAnchors, trimmedUrlRanges, LINK_TRIM_ATTR } = (await load()).internals
+  const href = 'http://localhost:6006/%EF%BC%8C%E6%9D%A5%E8%87%AA'
+  const text = 'http://localhost:6006/，来自'
+  const textNode = { nodeType: 3, data: text }
+  const anchor = {
+    nodeType: 1,
+    textContent: text,
+    childNodes: [textNode],
+    _attrs: {},
+    getAttribute(name) { return name === 'href' ? href : (this._attrs[name] ?? null) },
+    setAttribute(name, value) { this._attrs[name] = value },
+  }
+  const ownerDocument = {
+    createRange: () => ({ setStart(node, offset) { this.start = [node, offset] }, setEnd(node, offset) { this.end = [node, offset] } }),
+  }
+  const root = { nodeType: 1, ownerDocument, querySelectorAll: () => [anchor] }
+  assert.equal(markTrimmedAnchors(root), 1)
+  assert.equal(anchor.getAttribute(LINK_TRIM_ATTR), 'true')
+  assert.equal(markTrimmedAnchors(root), 0, 'marking is idempotent')
+  const urlRanges = trimmedUrlRanges(root)
+  assert.equal(urlRanges.length, 1)
+  assert.deepEqual(urlRanges[0].start, [textNode, 0])
+  assert.deepEqual(urlRanges[0].end, [textNode, 22])
+
+  // An exact anchor is neither marked nor given a second underline.
+  const exactText = 'http://localhost:6006/'
+  const exact = {
+    nodeType: 1,
+    textContent: exactText,
+    childNodes: [{ nodeType: 3, data: exactText }],
+    getAttribute: (name) => (name === 'href' ? exactText : null),
+    setAttribute() { throw new Error('an exact anchor must not be marked') },
+  }
+  const exactRoot = { nodeType: 1, ownerDocument, querySelectorAll: () => [exact] }
+  assert.equal(markTrimmedAnchors(exactRoot), 0)
+  assert.deepEqual(trimmedUrlRanges(exactRoot), [])
+})
+
 test('linkTokensIn returns every URL in a plain-text run, with offsets', async () => {
   const { linkTokensIn } = (await load()).internals
   assert.deepEqual(linkTokensIn('a http://x/ b'), [{ token: 'http://x/', start: 2, end: 11 }])

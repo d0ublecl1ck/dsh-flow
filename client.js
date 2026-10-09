@@ -684,6 +684,64 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Take the shell's underline off every over-captured anchor under one root.
+     *
+     * The anchor is one decorating box, so its underline runs under the sentence
+     * tail it swallowed no matter what a highlight says — a highlight can add
+     * decoration, not remove it. The mark lets the stylesheet drop the anchor's
+     * own line; the URL gets the plugin's underline back through
+     * `trimmedUrlRanges`, so the visible line still ends where the URL ends.
+     *
+     * @param root - the conversation element to scan.
+     * @returns how many anchors were newly marked.
+     */
+    function markTrimmedAnchors(root) {
+      if (!isElement(root) || typeof root.querySelectorAll !== 'function') return 0
+      let count = 0
+      for (const anchor of root.querySelectorAll('a[href]')) {
+        if (overcapturedAnchor(anchor) === null) continue
+        if (anchor.getAttribute(LINK_TRIM_ATTR) === 'true') continue
+        try {
+          anchor.setAttribute(LINK_TRIM_ATTR, 'true')
+          count += 1
+        } catch {
+          // A hostile attribute is not this feature's to report.
+        }
+      }
+      return count
+    }
+
+    /**
+     * One Range per URL that lives inside an over-captured anchor.
+     *
+     * `markTrimmedAnchors` drops the shell's underline for those anchors, so the
+     * URL part is underlined by the same highlight the plain-text URLs use —
+     * the plugin's own link style, and the only line the reader sees.
+     *
+     * @param root - the conversation element to scan.
+     * @returns Range objects, one per over-captured URL.
+     */
+    function trimmedUrlRanges(root) {
+      if (!isElement(root) || typeof root.querySelectorAll !== 'function') return []
+      const doc = root.ownerDocument
+      if (typeof doc?.createRange !== 'function') return []
+      const ranges = []
+      for (const anchor of root.querySelectorAll('a[href]')) {
+        if (ranges.length >= TEXT_LINK_RANGE_LIMIT) break
+        if (overcapturedAnchor(anchor) === null) continue
+        const node = [...anchor.childNodes].find((child) => child.nodeType === 3)
+        if (node === undefined || anchor.textContent !== node.data) continue
+        const first = linkTokensIn(node.data)[0]
+        if (first === undefined) continue
+        const range = doc.createRange()
+        range.setStart(node, first.start)
+        range.setEnd(node, first.end)
+        ranges.push(range)
+      }
+      return ranges
+    }
+
+    /**
      * Paint every plain-text URL under one root as a link.
      *
      * The CSS Custom Highlight API is optional: a shell whose engine lacks it
@@ -695,13 +753,14 @@ window.__ModuleLoader__.load({
      */
     function paintTextLinks(root) {
       // `globalThis.CSS`, not `CSS`: this very module declares a `const CSS` for its
-      // stylesheet, so a bare \`CSS\` here is that string, not the browser's namespace.
+      // stylesheet, so a bare `CSS` here is that string, not the browser's namespace.
       const api = globalThis.CSS
       const highlights = api === undefined || api === null ? undefined : api.highlights
       const HighlightCtor = globalThis.Highlight
       if (highlights === undefined || highlights === null || typeof HighlightCtor !== 'function') return 0
       try {
-        const ranges = textLinkRanges(root)
+        markTrimmedAnchors(root)
+        const ranges = [...textLinkRanges(root), ...trimmedUrlRanges(root)]
         highlights.set(TEXT_LINK_HIGHLIGHT, new HighlightCtor(...ranges))
         const tails = linkTailRanges(root)
         highlights.set(TEXT_LINK_TAIL_HIGHLIGHT, new HighlightCtor(...tails))
@@ -2287,6 +2346,9 @@ window.__ModuleLoader__.load({
     /** The CSS Custom Highlight name the over-captured sentence tails are painted under. */
     const TEXT_LINK_TAIL_HIGHLIGHT = 'flow-link-tail'
 
+    /** The attribute that takes the shell's underline off an over-captured anchor. */
+    const LINK_TRIM_ATTR = 'data-flow-link-trimmed'
+
     /** Upper bound on painted URL ranges, so a huge transcript cannot stall a frame. */
     const TEXT_LINK_RANGE_LIMIT = 600
 
@@ -2453,6 +2515,7 @@ html[data-flow-code-cursor="true"] [class*="_markdown_"] pre code{cursor:auto}
 html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] *{cursor:pointer}
 ::highlight(flow-text-link){color:var(--dsw-alias-link,currentColor);text-decoration:underline dotted var(--dsw-alias-link,currentColor);text-underline-offset:3px}
 ::highlight(flow-link-tail){color:var(--dsw-alias-label-primary,currentColor);text-decoration:none}
+a[data-flow-link-trimmed]{text-decoration:none!important}
 .flow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .flow-section{display:flex;flex-direction:column}
 .flow-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,140,.2))}
@@ -3830,11 +3893,14 @@ html[data-flow-text-link-cursor="true"],html[data-flow-text-link-cursor="true"] 
         caretTextAt,
         textLinkRanges,
         linkTailRanges,
+        markTrimmedAnchors,
+        trimmedUrlRanges,
         paintTextLinks,
         clearTextLinks,
         pointerOverTextLink,
         TEXT_LINK_HIGHLIGHT,
         TEXT_LINK_TAIL_HIGHLIGHT,
+        LINK_TRIM_ATTR,
         openExternal,
         handleAnchorClick,
         copyCommand,
