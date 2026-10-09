@@ -15,6 +15,10 @@
  *    swap, plus what the rewrite does and does not touch;
  *  - `assets/link-open.svg` — the same `http://localhost` click before and after
  *    the plugin, plus the host route's contract (see `index.js` `openRequestHandler`).
+ *  - `assets/workspace-name.svg` — the shipped "Open In…" split button with
+ *    and without the Workspace name, plus why the name can live inside that
+ *    button at all (the seat writes data-flow-workspace, and the stylesheet
+ *    draws it as that button's ::before; see client.js applyWorkspaceName).
  *  - `assets/*.png` — each drawing rasterised at 2x through a headless Chrome,
  *    because several marketplaces and package pages do not render SVG.
  *
@@ -97,6 +101,11 @@ const searchMark = (x, y, size, color) =>
 const bellMark = (x, y, size, color) =>
   `<g transform="translate(${x} ${y}) scale(${size / 16})" fill="none" stroke="${color}" stroke-width="1.4">`
   + '<path d="M4.2 11.2V7.4a3.8 3.8 0 0 1 7.6 0v3.8l1 .9H3.2l1-.9Z"/><path d="M6.8 13.4a1.3 1.3 0 0 0 2.4 0"/></g>'
+
+/** A plain folder — the shipped "Open In…" glyph. */
+const folderMark = (x, y, size, color) =>
+  `<g transform="translate(${x} ${y}) scale(${size / 16})" fill="none" stroke="${color}" stroke-width="1.4" stroke-linejoin="round">`
+  + '<path d="M2 4.4h4.2l1.3 1.7H14v6.5H2z"/></g>'
 
 /** The trailing action glyph, drawn as a folder-with-plus. */
 const addMark = (x, y, size, color) =>
@@ -447,6 +456,105 @@ function sendKeyDrawing() {
 }
 
 /**
+ * The shipped "Open In…" split button, at the proportions the real one has.
+ *
+ * The Workspace name is not a second control: when there is one, it is drawn
+ * inside the main half, which is exactly where the stylesheet renders it (the
+ * ::before of the button that carries data-flow-workspace). The pill is
+ * right-aligned in the header, so a name can only make it grow to the left —
+ * the icon never moves (measured 0px shift on a live instance).
+ *
+ * @param x - left edge of the pill.
+ * @param y - top edge of the pill.
+ * @param name - the name drawn inside the main half, or '' for the shipped pill.
+ * @returns SVG fragments for one pill.
+ */
+function splitPill(x, y, name) {
+  const out = []
+  const nameW = name === '' ? 0 : Math.min(name.length * 12.5, 140)
+  const mainW = 34 + nameW
+  const totalW = mainW + 26
+  out.push(rect(x, y, totalW, 24, { fill: '#f4f5f7', stroke: LINE, radius: 8 }))
+  if (nameW > 0) out.push(text(x + 11, y + 16, name, { size: 12, fill: ACCENT, weight: 500 }))
+  out.push(folderMark(x + 11 + nameW, y + 5, 14, INK))
+  out.push('<line x1="' + (x + mainW) + '" y1="' + (y + 5) + '" x2="' + (x + mainW) + '" y2="' + (y + 19) + '" stroke="' + LINE + '"/>')
+  out.push(chevron(x + mainW + 8, y + 7, 10, MUTED, true))
+  return out
+}
+
+/**
+ * The header row the button lives in: the search control, the plugin's locate
+ * button, then the shipped split button, right-aligned.
+ *
+ * @param x - left edge of the row.
+ * @param y - vertical centre of the row.
+ * @param name - the Workspace name drawn inside the split button, or ''.
+ * @param named - whether this row is meant to show a name.
+ * @returns SVG fragments for one header row.
+ */
+function headerRow(x, y, name, named) {
+  const out = []
+  const w = 470
+  out.push(rect(x, y - 24, w, 48, { fill: PANEL, radius: 10 }))
+  out.push(searchMark(x + 16, y - 8, 16, MUTED))
+  out.push(locateMark(x + 46, y - 8, 16, named ? ACCENT : MUTED))
+  const nameW = name === '' ? 0 : Math.min(name.length * 12.5, 140)
+  const pillW = 34 + nameW + 26
+  out.push(...splitPill(x + w - 16 - pillW, y - 12, name))
+  if (named) out.push(text(x + w - 16 - pillW + 11, y - 18, '名字写在这里', { size: 10, fill: ACCENT }))
+  return out
+}
+
+/**
+ * The Workspace name inside the shipped "Open In…" button.
+ *
+ * Two states side by side (shipped pill vs. pill with a name), then why the name
+ * can live inside the button at all. The name shown is a placeholder: this file
+ * must stay free of any real workspace, project or session.
+ */
+function workspaceNameDrawing() {
+  const parts = []
+  parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
+  parts.push(text(28, 44, '工作区名写进「打开」按钮：点名字 = 点图标', { size: 22, weight: 600 }))
+  parts.push(text(28, 68, '名字是那颗按钮自己的一部分，不是旁边多出来的控件（示意图，非截图）', { size: 13, fill: MUTED }))
+  const capW = 316
+  parts.push(rect(WIDTH - 28 - capW, 26, capW, 44, { fill: PANEL, radius: 10 }))
+  parts.push(text(WIDTH - 28 - capW / 2, 54, '心流 → 在「打开」按钮里显示当前工作区名', { size: 13, weight: 600, anchor: 'middle' }))
+  const py = 104
+  const ph = 300
+  const pw = 520
+  parts.push(rect(28, py, pw, ph, { radius: 12 }))
+  parts.push(text(48, py + 32, '没有名字时（或「未分组」的会话）', { size: 14, weight: 600, fill: MUTED }))
+  parts.push(text(48, py + 56, '按钮保持出厂样子：图标 + 下拉箭头', { size: 12, fill: MUTED }))
+  parts.push(...headerRow(48, py + 128, '', false))
+  parts.push(text(48, py + 196, '会话标题行右侧，右对齐', { size: 11, fill: MUTED }))
+  parts.push(text(48, py + 224, '同一个槽：搜索控件、插件的定位按钮、官方那颗「打开」按钮', { size: 11, fill: MUTED }))
+  parts.push(text(48, py + 252, '名字取不到就不写属性 —— 不猜、也不放占位文案', { size: 11, fill: MUTED }))
+  parts.push(text(568, py + 150, '→', { size: 22, fill: MUTED, anchor: 'middle' }))
+  parts.push(text(568, py + 174, '有归属工作区', { size: 11, fill: MUTED, anchor: 'middle' }))
+  parts.push(rect(652, py, pw, ph, { radius: 12 }))
+  parts.push(text(672, py + 32, '现在：图标左边就是当前工作区名', { size: 14, weight: 600, fill: ACCENT }))
+  parts.push(text(672, py + 56, '侧栏分组行那个名字（工作区自己的标题）', { size: 12, fill: MUTED }))
+  parts.push(...headerRow(672, py + 128, '示例工作区', true))
+  parts.push(rect(672, py + 176, pw - 40, 34, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(690, py + 198, '点名字 = 点图标：同一个按钮、同一条激活路径', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(672, py + 236, '药丸往左长，图标不挪位；名字最长 140px 后以 … 收尾', { size: 11, fill: MUTED }))
+  const cy = 428
+  parts.push(rect(28, cy, WIDTH - 56, 164, { radius: 12 }))
+  parts.push(text(48, cy + 32, '名字怎么进去的：座位写一个属性，样式表把它画出来', { size: 13, weight: 600 }))
+  parts.push(text(48, cy + 58, '座位注册在 conversation.session.header.utilities，它把名字写成官方主按钮的 data-flow-workspace，样式表用 ::before 显示', { size: 12 }))
+  parts.push(text(48, cy + 80, '不插节点、不改按钮行为 → 药丸的 padding、圆角、hover 底色、图标位置全部照旧；官方换掉按钮时由 childList 观察重新写上', { size: 12 }))
+  parts.push(text(48, cy + 102, '没有归属工作区就不写属性；开关默认开（设置 → 心流 第 8 行），关掉时把属性摘掉，按钮立刻回到出厂样子', { size: 12 }))
+  parts.push(rect(44, cy + 118, WIDTH - 88, 32, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(60, cy + 139, '脆弱点只有一处：[data-open-target="directory"] button（数据属性；旁边的 class 是构建哈希）——官方改形状时症状只是「名字不见了」，不报错。', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(28, HEIGHT - 16, '本插件不读工作区内容、不改那颗按钮的行为；唯一的副作用是往官方按钮上写一个属性。', { size: 11, fill: MUTED }))
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：把当前工作区名写进「打开」按钮，以及它的实现边界">'
+    + parts.join('') + '</svg>\n'
+}
+
+
+/**
  * Rasterise one local file through a throwaway headless Chrome.
  *
  * Chrome writes the screenshot and then, on this platform, sometimes keeps the
@@ -509,6 +617,7 @@ const ASSETS = [
   { name: 'code-menu', draw: codeMenuDrawing },
   { name: 'link-open', draw: linkDrawing },
   { name: 'send-key', draw: sendKeyDrawing },
+  { name: 'workspace-name', draw: workspaceNameDrawing },
 ]
 
 async function main() {

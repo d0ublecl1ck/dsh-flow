@@ -110,7 +110,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 - **名字不是第二个控件**：本插件在该槽 `conversation.session.header.utilities`（`kind: 'list'`、`scope: 'session'`）注册一个 `display:none` 的座位 span（id `flow.workspace-name`、`order: -20`，官方 `open-in-app` 是 `-10`），由它把名字写成官方主按钮上的 `data-flow-workspace` 属性，样式表用 `[data-flow-workspace]::before{content:attr(data-flow-workspace)}` 渲染。**点名字就是点官方按钮**（同一个元素、同一条激活路径），所以「点名字和点图标效果一样」是结构保证，不是靠两个处理器对齐行为。
 - **实拉测出来的形状**：右对齐的药丸加名字后只往左长（图标 `imgShift: 0`）；`::before` 在 `display:flex` 的按钮里就是一个正常 flex item（`max-width:140px` 时宽度正好 140px、出现 `…`）；主按钮 22px 高、外层药丸 24px 高、圆角 8px（J 段按这些数字断言，任何一项变了都说明官方改了那颗药丸）。
-- **名字来源是工作区注册表**：`ctx.workspaces.list.getSnapshot().items` 里 `sessionIds` 命中当前会话的那行，取 `title`（官方 workspace 浏览器就是用它当显示标签，实测 `title:"自由对话"` 的 `path` 是 `…/scratchpad`，所以**不能**用目录名代替标题），标题为空才退回 `path` 的 basename（两个分隔符都认）。没有归属工作区时返回 null、**不写属性**，按钮保持出厂样子。
+- **名字来源是工作区注册表**：`ctx.workspaces.list.getSnapshot().items` 里 `sessionIds` 命中当前会话的那行，取 `title`（官方 workspace 浏览器就是用它当显示标签；实测带标题的工作区 `path` 可能是 `…/scratchpad` 这类与标题无关的目录，所以**不能**用目录名代替标题），标题为空才退回 `path` 的 basename（两个分隔符都认）。没有归属工作区时返回 null、**不写属性**，按钮保持出厂样子。
 - **重渲染由 childList 观察兜住**：`MutationObserver` 挂在座位所在的那个 utilities 容器上（从座位往上走，第一个含官方主按钮的祖先 —— 也就是那颗药丸的父级），只观察 `childList/subtree`；`applyWorkspaceName()` 只在属性值真的变了才写，而写属性不是 childList 变更，所以同步不会自己喂自己（官方按钮被整颗替换时才需要重写，那正是 childList 变更）。
 - **开关**：`flow.workspaceName`（默认开）。关掉时 `name` 变 null，下一次同步把属性摘掉。
 - **脆弱点（静默失效型）只有一处**：`[data-open-target="directory"] button` —— `data-open-target` 是官方 `open-in-app` 自己设的数据属性（旁边的 class 是 CSS module 哈希，不能依赖）。官方改属性名或把图标挪出主按钮后，症状只是「名字不见了」，不报错。`scripts/verify-browser.mjs` 的 J 段钉住这件事：属性存在且等于侧栏那个分组的标签、`::before` 的内容等于属性值、伪元素宽度不越过图标的左边缘、超长名被夹在 140px 内、关掉开关后属性消失、开回来又出现。
@@ -189,7 +189,7 @@ curl -s -H "Cookie: <现签的会话 Cookie>" http://127.0.0.1:43129/ | grep -c 
 ## 图标与展示产物
 
 - 按钮图标是 IntelliJ 平台自带的 *Locate* 图形，逐字内联在 `client.js` 的 `LocateIcon` 里，仅把固定填充色换成 `currentColor`。`assets/locate-flow.svg` 里的同一图形由 `scripts/render-assets.mjs` 生成。**不要**凭印象重画这个图形：出处、改动说明与 Apache-2.0 正文在 `THIRD-PARTY-NOTICES.md`，改图必须同步改那里。
-- `assets/` 是**手绘示意图，不是截图**（生成脚本的可信来源只有代码本身），因此天然不含真实会话/工作区/账号信息。当前四张：`locate-flow`、`code-menu`、`link-open`、`send-key`（发送键对调）。若将来改用真实截图，必须先走裁剪与打码，再入库。
+- `assets/` 是**手绘示意图，不是截图**（生成脚本的可信来源只有代码本身），因此天然不含真实会话/工作区/账号信息。当前五张：`locate-flow`、`code-menu`、`link-open`、`send-key`（发送键对调）、`workspace-name`（工作区名写进「打开」按钮）。若将来改用真实截图，必须先走裁剪与打码，再入库。
 - `screenshots.json` 放在仓库根，市场会读它（1–8 张，图片必须是 GitHub 自己的托管域名，`raw.githubusercontent.com` 等）。
 
 ## 发布与上架（2026-10-04 实拉门槛）
