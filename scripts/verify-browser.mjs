@@ -821,6 +821,48 @@ async function removeProbeAnchors(cdp, sessionId) {
   })()`)
 }
 
+/**
+ * Plant one inline code the shell has wired that names no path.
+ *
+ * The shipped 打开 row survives only on a code the shell controls *and* the
+ * client refuses to spend a probe on, and whitespace is what makes it prose.
+ * Turns on screen rarely hold that shape, so this leg plants it: a real
+ * `<button>` inside a real markdown container, at a fixed point on screen.
+ */
+async function installCodeProbe(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    for (const stale of document.querySelectorAll('[data-flow-code-probe]')) stale.remove();
+    const markdown = document.querySelector('[class*="_markdown_"]');
+    const holder = document.createElement('div');
+    holder.dataset.flowCodeProbe = 'holder';
+    if (markdown !== null) holder.className = markdown.className;
+    holder.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#fff;padding:4px 8px;font:14px monospace';
+    const p = document.createElement('p');
+    p.textContent = 'flow probe: ';
+    const code = document.createElement('code');
+    code.dataset.flowCodeProbe = 'code';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'probe file name.txt';
+    code.appendChild(button);
+    p.appendChild(code);
+    holder.appendChild(p);
+    document.body.appendChild(holder);
+    return true;
+  })()`)
+}
+
+/** Take the planted inline code back off the page. */
+async function removeCodeProbe(cdp, sessionId) {
+  await evaluate(cdp, sessionId, `(() => {
+    for (const stale of document.querySelectorAll('[data-flow-code-probe]')) stale.remove();
+    return true;
+  })()`)
+}
+
+/** The planted inline code, for the press helper. */
+const CODE_PROBE_FINDER = `document.querySelector('[data-flow-code-probe="code"]')`
+
 /** Every call the two open routes have taken so far. */
 const OPEN_PROBE = `(() => ({ calls: (window.__openCalls ?? []).map((call) => ({ route: call.route, body: call.body })) }))()`
 
@@ -1775,20 +1817,28 @@ async function main() {
           window.__codeClickRecorder = true;
           return true;
         })()`)
-        // 打开 survives only on a code that names no path (a plain code), and
-        // there it dispatches the element the shell wired — the code itself when
-        // no control owns it.
-        await pressElement(cdp, sessionId, codeFinder('plain'), { contextMenu: true })
+        // 打开 survives only on a code the shell wired whose text is not a path
+        // (whitespace makes it prose, which the client will not spend a probe on).
+        // Turns on screen rarely hold that shape, so this leg plants it.
+        await installCodeProbe(cdp, sessionId)
+        await pressElement(cdp, sessionId, CODE_PROBE_FINDER, { contextMenu: true })
         await settleMenus(cdp, sessionId, 1)
+        code = await evaluate(cdp, sessionId, CODE_PROBE)
+        if (code.openItem && code.copyItem) {
+          pass('a shell-wired code that names no path keeps the shipped 打开 / 复制 pair')
+        } else {
+          fail('the planted code did not offer the shipped 打开 / 复制 pair: ' + JSON.stringify(code.items))
+        }
         await clickExactMenuEntry(cdp, sessionId, '打开')
         await sleep(800)
         code = await evaluate(cdp, sessionId, CODE_PROBE)
         const syntheticClicks = code.clicks.filter((click) => click.trusted === false)
-        if (syntheticClicks.length === 1 && syntheticClicks[0].tag === 'CODE') {
-          pass('打开 dispatches one synthetic left click on the code the shell wired')
+        if (syntheticClicks.length === 1 && syntheticClicks[0].tag === 'BUTTON') {
+          pass('打开 dispatches one synthetic left click on the control the shell wired')
         } else {
           fail('打开 did not run the shell’s own click path: ' + JSON.stringify(code.clicks))
         }
+        await removeCodeProbe(cdp, sessionId)
 
         // ④ the invariant this feature exists to keep: a left click is untouched
         await evaluate(cdp, sessionId, 'window.__codeClicks = []')
@@ -1869,7 +1919,10 @@ async function main() {
             await pressElement(cdp, sessionId, codeFinder('mention'), { contextMenu: true })
             const restored = await settleMenus(cdp, sessionId, 1)
             code = await evaluate(cdp, sessionId, CODE_PROBE)
-            if (restored === 1 && code.openItem && code.copyItem) pass('switching it back on restores the menu')
+            // A mention names a path, so its rows are 复制 first plus the
+            // application rows — the shipped 打开 is gone for those. The shape to
+            // require is therefore copy-first, not an 打开 row.
+            if (restored === 1 && code.copyItem && code.items[0] === '复制') pass('switching it back on restores the menu')
             else fail('the menu did not come back: ' + JSON.stringify(code.items))
             await pressEscape(cdp, sessionId)
           }

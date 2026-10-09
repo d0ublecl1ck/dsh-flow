@@ -25,6 +25,7 @@
 - 下划线也只到 URL：下划线是锚点整条装饰盒画的线，`::highlight` 只能加不能减，所以 `markTrimmedAnchors()` 给这种锚点打 `data-flow-link-trimmed`，样式表用 `text-decoration:none!important` 关掉壳那条，再由 `trimmedUrlRanges()` 把 URL 那段并进 `flow-text-link`，用本插件自己的虚线下划线补回来。颜色、下划线、光标、命中区都以 URL 为界。
 - 悬停线回到「只有指到 URL 才出现」：`a[data-flow-link-trimmed]` 上壳那条已经关掉，指针落在 URL 上时（`pointerOverTrimmedUrl()`，与 `pointerOverLinkTail()` 互为镜像）由 `paintHoverUnderline()` 把 `::highlight(flow-link-hover)` 只画到 URL 一段；指到尾巴什么都不亮。
 - 单测 131 条全绿（新增 `markTrimmedAnchors()` 打标/幂等、`trimmedUrlRangeOf()` 只圈 URL、`pointerOverTrimmedUrl()` 命中/放行的断言）。
+- 验收脚本里两条常驻红其实是**断言过期**：`打开 did not run the shell's own click path` 与 `the menu did not come back` 都还在按「普通 code 也保留『打开』行」的老口径断言，而 0.8.0 起「打不开就不给打开按钮」——普通 code 与文件 mention 都不会再有精确的「打开」行。脚本改为自己植入一个「壳接了线的 `button` + 含空格（非路径）文本」的 code 来测「打开 / 复制」并断言合成 click 落在 `BUTTON` 上，恢复那条改成断言「复制在最上」。真机连跑两次：**55 passed / 0 failed / 1 skipped**。
 
 ## 0.7.0
 

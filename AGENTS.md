@@ -67,7 +67,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - 排除：`pre` 内（多行代码块）、`[contenteditable]` 内（输入框与快捷键编辑器）、**链接**（`inlineCodeLink()`，见下）、文本 trim 后为空、目标不在 `code` 内。
 - **「这段 code 其实是链接」只有一个判定点：`inlineCodeLink()`。** 壳从两个方向把链接送进行内代码：① markdown 链接的文字是行内代码（`<a href><code>…</code></a>`，锚点是 `code` 的祖先）；② 壳把行内代码里的 URL 解析成了链接（`<code><a href>…</a></code>`，锚点是 `code` 的后代，URL 前面那颗地球图标就是它，来源是壳渲染器 `inlineCode` 分支里的 `Ab(s)`）。只写 `closest('a[href]')` 会漏掉②，症状是**点一下既在外链那侧打开、又被当成路径复制并弹出「已复制行内代码」**（2026-10-08 实拉复现）。以后壳再换渲染形状（`role="link"`、新的包裹层……）就在 `inlineCodeLink()` 里补，不要散到 `codeMenuTarget()` / `codeOpenTarget()` 的调用点。
 - 收窄：必须落在 `[class*="_markdown_"]` 祖先里。实拉运行中的实例，正文里的行内代码是 `code < li < ol < div._markdown_1ypvv_5 < div.hWmORq_body < …`；`_markdown_` 是 CSS module 的 local name（哈希会变），与本仓库既有的 `[class*="listArea"]` / `[class*="sectionHeader"]` 是同一类依赖，也让工具卡、设置页、别的插件面板里的 `code` 不被误接管。**不要**改去写 `hWmORq_root` 之类的会话容器选择器 —— 那是构建哈希。
-- 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`，它断言「打开」派发的合成 click 落在 `BUTTON` 上。
+- 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`：它**自己植入**一个「壳接了线的 `button` + 含空格（非路径）文本」的行内代码，断言菜单给出「打开 / 复制」这对，并断言「打开」派发的合成 click 正好落在那个 `BUTTON` 上。**不要拿普通 `code` 去测这一条**：那种 code 现在只有「复制」（打不开就不给打开按钮），菜单里根本没有「打开」行。
 ## 「已编辑 N 个文件」卡片的右键菜单（用默认应用打开 / 显示位置）
 
 已完成轮次末尾的改动文件卡片（官方 `dsh-client-ui-deliverables`，0.2.0-rc.2 起标题是「已编辑 N 个文件」）里，每个文件行右键浮出一个菜单：第一行 `用默认应用打开`，随后是**本机装了的** IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标），最后一行 `在文件管理器中显示`。这条链路整个交给宿主，本插件不自己 spawn：
