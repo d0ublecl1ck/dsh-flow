@@ -3377,6 +3377,7 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           const clearTailCursor = () => {
             if (tailCursorAnchor === null) return
             tailCursorAnchor.style?.removeProperty?.('cursor')
+            tailCursorAnchor.style?.removeProperty?.('color')
             tailCursorAnchor = null
           }
           const paintRoot = () => document.querySelector('[data-slot="conversation.session"]')
@@ -3407,6 +3408,10 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
               clearTailCursor()
               if (tail !== null && tail.style !== undefined && tail.style !== null) {
                 tail.style.setProperty('cursor', 'text')
+                // The shell's own `a:hover` paints the whole anchor, so a pointer
+                // on the swallowed tail would tint the URL too. Hold the link
+                // colour while the pointer is on prose; it is restored on leave.
+                tail.style.setProperty('color', 'var(--dsw-alias-link, currentColor)')
                 tailCursorAnchor = tail
               }
             }
