@@ -611,6 +611,74 @@ async function rasterise(svgPath, pngPath) {
   }
 }
 
+/**
+ * The Otty row inserted into the shipped "Open In…" menu.
+ *
+ * One menu card whose last row is the one this plugin adds, beside the header
+ * control that opens it. The menu rows are drawn as placeholder labels — this
+ * file must stay free of any real application set, workspace or session.
+ *
+ * @returns SVG source.
+ */
+function ottyDrawing() {
+  const parts = []
+  parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
+  parts.push(text(28, 44, '在官方「打开」菜单里加一行 Otty', { size: 22, weight: 600 }))
+  parts.push(text(28, 68, '官方目录是编译期写死的、插件注册不进去 → 这一行是本插件在菜单打开时插进去的（示意图，非截图）', { size: 13, fill: MUTED }))
+  const capW = 300
+  parts.push(rect(WIDTH - 28 - capW, 26, capW, 44, { fill: PANEL, radius: 10 }))
+  parts.push(text(WIDTH - 28 - capW / 2, 54, '心流 → 在「打开」菜单里加入 Otty', { size: 13, weight: 600, anchor: 'middle' }))
+
+  // Left: the one header control whose menu this plugin extends.
+  const py = 104
+  const ph = 300
+  const pw = 520
+  parts.push(rect(28, py, pw, ph, { radius: 12 }))
+  parts.push(text(48, py + 32, '① 会话标题行右侧那颗「打开」按钮', { size: 14, weight: 600 }))
+  parts.push(text(48, py + 56, '只有这一颗的下拉菜单是本插件认的（侧栏 Files 页那颗形状相同，但不碰）', { size: 12, fill: MUTED }))
+  parts.push(...headerRow(48, py + 140, '', false))
+  parts.push(text(48, py + 208, '点右边那个小箭头 → 官方菜单浮出', { size: 12, fill: MUTED }))
+  parts.push(rect(48, py + 228, pw - 40, 48, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(64, py + 249, '插件在捕获阶段认领这一下，并且只认标题行那颗：', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(64, py + 267, '按下之后第一个出现的菜单，就是它要扩展的那一个', { size: 12, fill: ACCENT }))
+
+  // Right: the menu, with the inserted row last.
+  const mx = 596
+  const mw = WIDTH - 28 - mx
+  parts.push(rect(mx, py, mw, ph, { radius: 12 }))
+  parts.push(text(mx + 20, py + 32, '② 菜单最后多一行 Otty', { size: 14, weight: 600 }))
+  parts.push(text(mx + 20, py + 56, '样式从同菜单的兄弟行现抄；键盘 ↑/↓ 也能走到它', { size: 12, fill: MUTED }))
+  const rows = [
+    { label: '访达（默认）', active: false },
+    { label: 'Zed', active: false },
+    { label: 'iTerm2', active: false },
+    { label: '终端', active: false },
+    { label: 'Otty', active: true },
+  ]
+  let ry = py + 78
+  for (const entry of rows) {
+    parts.push(rect(mx + 20, ry, mw - 40, 34, { fill: entry.active ? ACCENT_SOFT : PANEL, stroke: entry.active ? ACCENT : LINE, radius: 9, width: entry.active ? 1.4 : 1 }))
+    parts.push(rect(mx + 32, ry + 9, 16, 16, { fill: entry.active ? ACCENT : MUTED, stroke: 'none', radius: 4 }))
+    parts.push(text(mx + 58, ry + 22, entry.label, { size: 12.5, fill: entry.active ? ACCENT : INK, weight: entry.active ? 600 : 400 }))
+    if (entry.active) parts.push(text(mx + mw - 32, ry + 22, '← 插件插入', { size: 11, fill: ACCENT, weight: 600, anchor: 'end' }))
+    ry += 40
+  }
+
+  // Bottom: where the row comes from, and when it is there at all.
+  const cy = 428
+  parts.push(rect(28, cy, WIDTH - 56, 164, { radius: 12 }))
+  parts.push(text(48, cy + 32, '这一行怎么来、什么时候在', { size: 13, weight: 600 }))
+  parts.push(text(48, cy + 58, '宿主新增 GET /flow/app-icon/<id>：从 .app 里 plutil + sips 提出 128px PNG，未知 id / 非 macOS 返 404（img 自己吸收）', { size: 12 }))
+  parts.push(text(48, cy + 80, 'Otty 的启动走它自己的 otty-cli open <目录>：点了会真的在新 Otty 窗口里打开当前工作区', { size: 12 }))
+  parts.push(text(48, cy + 102, '只在本机装了 Otty、且宿主是新版时出现；仅 macOS —— 检测不到就不插，不留一个点了没反应的空行', { size: 12 }))
+  parts.push(rect(44, cy + 118, WIDTH - 88, 32, { fill: ACCENT_SOFT, stroke: 'none', radius: 9 }))
+  parts.push(text(60, cy + 139, '静默失效点：槽名 / data-open-target / 官方 Menu 的 role 结构任一处改名，症状只是「这一行不见了」，不报错。', { size: 12, fill: ACCENT, weight: 600 }))
+  parts.push(text(28, HEIGHT - 16, '示意图，非截图：本文件不含任何真实会话、工作区或账号。', { size: 11, fill: MUTED }))
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：在官方「打开」菜单里插入一行 Otty，以及它的边界">'
+    + parts.join('') + '</svg>\n'
+}
+
 /** Every asset this repo publishes, in the order it renders them. */
 const ASSETS = [
   { name: 'locate-flow', draw: drawing },
@@ -618,6 +686,7 @@ const ASSETS = [
   { name: 'link-open', draw: linkDrawing },
   { name: 'send-key', draw: sendKeyDrawing },
   { name: 'workspace-name', draw: workspaceNameDrawing },
+  { name: 'otty-menu', draw: ottyDrawing },
 ]
 
 async function main() {

@@ -6,7 +6,7 @@ DSH Web 插件：工作区标题行里的「定位当前会话」按钮（+ `⇧
 
 - **零构建**：`client.js` 就是浏览器产物本体，直接由 `window.__ModuleLoader__.load` 装载；没有 TS、没有 esbuild、没有 `lib/`。改 `client.js` 刷新页面即生效。
 - **一个客户端入口**：模块 id 必须等于包名 `dsh-flow`。不要再挂第二个 `dsh.client` 入口。
-- **宿主半边只有五件事**：声明 `Config`、注册 `configure({ auto: false }, ctx.fiber)`、把 `POST /flow/open-external`、`GET /flow/apps`、`POST /flow/open-with` 挂到 `webServer` 上。除此之外不要往 `index.js` 塞业务逻辑：判断「这次点击算不算外链」、菜单该列哪些应用都是浏览器半边的事，宿主只按自己的 catalog 与 `kind` 规则复核一次。
+- **宿主半边只做这几件事**：声明 `Config`、注册 `configure({ auto: false }, ctx.fiber)`、把 `POST /flow/open-external`、`GET /flow/apps`、`POST /flow/open-with`、`GET /flow/app-icon/<id>` 挂到 `webServer` 上。除此之外不要往 `index.js` 塞业务逻辑：判断「这次点击算不算外链」、菜单该列哪些应用都是浏览器半边的事，宿主只按自己的 catalog 与 `kind` 规则复核一次。
 - **命名空间 = bundle row id = locale 命名空间 = `flow`**，三处同名；改 row id 会让 Host 不再服务命名空间、设置页静默消失。包名与 row id 是两件事：改包名不必改 row id。
 - **纯逻辑必须可从测试触达**：通过 factory 返回的 `internals` 暴露（`tests/client.test.mjs` 用假 `window.__ModuleLoader__` 装载），不要在 `apply` 里做无法单测的判断。
 - **README 只写使用者口径**，架构理由、官方契约、缓存规则、上架流程都留在本文件。
@@ -160,7 +160,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 ## 运行中的实例怎么认这份代码
 
-- **改了 `index.js`（宿主半边）必须 `remove` 再 `add`**：宿主按 URL 缓存模块，只 `add` 不会重新导入。
+- **改了 `index.js`（宿主半边）需要让 harness 进程重启**（2026-10-12 在 DSH Desktop、host 0.2.0-rc.2 实拉）：cordis loader 直接调 Node 内部 ESM loader 的 `import(url)`，URL 不变就永远命中 `loadCache`。三种在线重载都试过、都不换新代码 —— Remote `pluginManager/setBundleEnabled` 关→开（路由曾 404 再 200，但重新 import 拿到的仍是旧模块）、CLI `DSH_HOME=… <Electron helper> <app.asar>/node_modules/@deepseek-ai/dsh/lib/bin.js plugin --profile web remove/add dsh-flow`、以及 remove+add 之后再补一次 Remote 关→开。`dsh-hmr` 的 `partialReload` 有清 `loadCache` 的能力，但它的 watcher 只覆盖 profile 目录内（`link:` 到仓库外的目标不在监听范围），所以改文件也不会触发。**结论：DSH Desktop 上宿主半边改动只能靠「退出 DSH Desktop 再打开」生效**；CLI remove+add 仍会更新 profile 文件，下次启动自然加载。客户端半边不受影响（重载窗口即换新）。
 - **改了 `client.js` 后重载没生效，先硬刷新（`⌘⇧R`）**：宿主对 `plugins/??…/client.js` 回 `cache-control: public, max-age=31536000, immutable`，而 URL 上的 `rev` 是宿主在激活时算的、不保证每次改动都变，软刷新可能直接命中缓存里的旧文件（服务器侧取同一个 URL 拿到的却是新字节，2026-10-09 实拉：改动后 `rev` 隔一会儿才换）。
 - **客户端产物按请求现读磁盘**（2026-10-08 实拉）：把 boot HTML 里的 `plugins/??dsh-flow/client.js&rev=…` 原样取回，字节 = 磁盘 `client.js` + 一行 `;\n//# sourceMappingURL=…`。所以改完 `client.js` **重载窗口即换新**，不需要 `remove`/`add`，更不需要重启；boot 里的 `rev` 是激活时算的标签、可能滞后于磁盘，但同一个 URL 仍返回当前文件，对账方式就是取该 URL 与磁盘比字节。
 - **危险动作**：不要在插件目录不可达（例如链接指向已被删除的 worktree）时去 `pluginManager/setBundleEnabled` 关掉再打开这个 bundle。宿主会把「这个包不是客户端包 / 解析失败」的判定**缓存到重启为止**，此后该包不再出现在浏览器要加载的客户端清单里，反复重挂和刷新页面都救不回来，只能重启 DSH Desktop。症状：插件在 `pluginManager/listPlugins` 里 `enabled: true, fiberPhase: active`，但 boot HTML 的 `plugins/??...` 清单里没有它。
@@ -205,7 +205,7 @@ curl -s -H "Cookie: <现签的会话 Cookie>" http://127.0.0.1:43129/ | grep -c 
 ## 图标与展示产物
 
 - 按钮图标是 IntelliJ 平台自带的 *Locate* 图形，逐字内联在 `client.js` 的 `LocateIcon` 里，仅把固定填充色换成 `currentColor`。`assets/locate-flow.svg` 里的同一图形由 `scripts/render-assets.mjs` 生成。**不要**凭印象重画这个图形：出处、改动说明与 Apache-2.0 正文在 `THIRD-PARTY-NOTICES.md`，改图必须同步改那里。
-- `assets/` 是**手绘示意图，不是截图**（生成脚本的可信来源只有代码本身），因此天然不含真实会话/工作区/账号信息。当前五张：`locate-flow`、`code-menu`、`link-open`、`send-key`（发送键对调）、`workspace-name`（工作区名写进「打开」按钮）。若将来改用真实截图，必须先走裁剪与打码，再入库。
+- `assets/` 是**手绘示意图，不是截图**（生成脚本的可信来源只有代码本身），因此天然不含真实会话/工作区/账号信息。当前六张：`locate-flow`、`code-menu`、`link-open`、`send-key`（发送键对调）、`workspace-name`（工作区名写进「打开」按钮）、`otty-menu`（「打开」菜单里的 Otty 行）。若将来改用真实截图，必须先走裁剪与打码，再入库。
 - `screenshots.json` 放在仓库根，市场会读它（1–8 张，图片必须是 GitHub 自己的托管域名，`raw.githubusercontent.com` 等）。
 
 ## 发布与上架（2026-10-04 实拉门槛）
