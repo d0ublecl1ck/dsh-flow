@@ -4,10 +4,10 @@
 
 - 新增「在「打开」菜单里加入 Otty」：会话标题行右侧那颗官方「打开」split button 的下拉菜单里追加一行 Otty（本机装了、且宿主是新版才出现），点击后在新 Otty 窗口里打开当前工作区目录；默认开，设置 → **心流** 里可以关掉。
 - 官方那份应用目录是**编译期固定白名单**（`dsh-host-open-in-app` 的 `OPEN_IN_APP_CATALOG`），客户端还按 `APP_LABEL_KEY` 再过滤一遍，插件没有任何注册接口 —— 所以这一行是本插件在官方菜单 portal 打开时插进去的 DOM：`document` 捕获阶段监听会话标题行那颗 `[aria-haspopup="menu"]`，命中后认领「下一个出现的 `body > [role="menu"]`」，把行插进它的 viewport。官方 `Menu` 的方向键导航查的是实时 DOM（`button:not(:disabled)`），所以插入的行**自动纳入 ↑/↓、Home/End**；选完 dispatch 一次 `pointerdown` 到 body 关掉菜单。
-- 行的样式不写死：`className` 从同菜单的兄弟行现抄（CSS module 哈希会随构建变），图标、标签结构一致；宿主新增 `GET /flow/app-icon/<id>`（**prefix 路由**，`plutil` + `sips` 提 `.icns` 的 128px PNG，非 macOS / 未知 id / 提不出来都 404）供这一行取真图标，`<img>` 自己吸收 404。
+- 行的样式不写死：`className` 从同菜单的兄弟行现抄（CSS module 哈希会随构建变），**图标尺寸也一样抄**（官方把 `width`/`height` 设在 `<img>` 上，漏抄会让 128px 的 bundle PNG 撑破整行）；宿主新增 `GET /flow/app-icon/<id>`（**prefix 路由**，`plutil` + `sips` 提 `.icns` 的 128px PNG，非 macOS / 未知 id / 提不出来都 404）供这一行取真图标，`<img>` 自己吸收 404。
 - Otty 的启动方式与通用 `open -a <bundle>` 不同：`otty-cli open <dir>`，所以 catalog 条目带一个 per-platform 启动覆盖（`launch.darwin = { bin, args: ['open','{path}'] }`），`launchPath` 拆出纯函数 `launchArgv`（可单测）再 spawn。这是唯一一个走自己 CLI 的条目。
 - Wave 不放：Wave 没有「从外部在指定目录打开」的能力 —— `wsh` 在 Wave 之外直接拒绝（`WAVETERM_JWT not found`），Electron 主进程忽略 argv、没有 `open-file` handler、没有 URL scheme，官方文档也把 `wsh` 定为 Wave 内使用。所以本次只加 Otty。
-- 单测 138 → 150：catalog 只列已装且带启动覆盖、`launchArgv` 每种形状、`bundleIconFile` 声明/回退、`bundleIconPng` 平台闸与 plutil 先行、图标路由五种应答、`readOttyEnabled` / `ottyMenuRow` / `appIconUrl` / `isHeaderOpenInAppMore`、注入器插行形状与去重与清理、晚到 catalog 补插、双语词典。
+- 单测 138 → 151：catalog 只列已装且带启动覆盖、`launchArgv` 每种形状、`bundleIconFile` 声明/回退、`bundleIconPng` 平台闸与 plutil 先行、图标路由五种应答、`readOttyEnabled` / `ottyMenuRow` / `appIconUrl` / `isHeaderOpenInAppMore`、注入器插行形状与去重与清理、晚到 catalog 补插、双语词典。
 - `scripts/verify-browser.mjs` 新增 K 段：宿主 `/flow/apps` 不含 otty 就 SKIP（没装或宿主旧）；否则断言图标路由返 PNG、打开官方菜单、最后一行是图标为 `/flow/app-icon/otty` 的 Otty；**只读不点**（点了会真开 Otty）。E 段「心流页行标题列表」同步补成九行。
 
 ## 0.9.0

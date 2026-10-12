@@ -399,6 +399,22 @@ window.__ModuleLoader__.load({
       image.setAttribute('src', iconSrc)
       image.setAttribute('alt', '')
       image.setAttribute('draggable', 'false')
+      // The shipped row constrains its icon on the `img` itself — the class plus
+      // the width/height `ApplicationIcon` sets. Without them the browser paints
+      // the extracted bundle PNG at its natural 128px and the row overflows, so
+      // both are copied off the sibling image; the compact menu's 14px is the
+      // fallback for a menu that carries no image to copy.
+      const templateImage = typeof template.querySelector === 'function' ? template.querySelector('img') : null
+      if (templateImage !== null && templateImage !== undefined) {
+        if (typeof templateImage.className === 'string' && templateImage.className !== '') image.className = templateImage.className
+        for (const attribute of ['width', 'height']) {
+          const value = typeof templateImage.getAttribute === 'function' ? templateImage.getAttribute(attribute) : null
+          image.setAttribute(attribute, value === null || value === undefined || value === '' ? SHIPPED_ICON_SIZE : value)
+        }
+      } else {
+        image.setAttribute('width', SHIPPED_ICON_SIZE)
+        image.setAttribute('height', SHIPPED_ICON_SIZE)
+      }
       if (typeof icon.appendChild === 'function') icon.appendChild(image)
       const text = doc.createElement('span')
       if (children[1] !== undefined && typeof children[1].className === 'string') text.className = children[1].className
@@ -411,6 +427,9 @@ window.__ModuleLoader__.load({
       if (typeof wrap.appendChild === 'function') wrap.appendChild(button)
       return wrap
     }
+
+    /** The compact menu's icon size, used only when no sibling image can be copied. */
+    const SHIPPED_ICON_SIZE = '14'
 
     /** How long after a header press an appearing menu is still assumed to be that one. */
     const OTTY_PENDING_MS = 1500

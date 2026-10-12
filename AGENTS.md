@@ -121,7 +121,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 
 - **官方目录没有扩展点**：`@deepseek-ai/dsh-host-open-in-app` 的应用目录是编译期常量 `OPEN_IN_APP_CATALOG`（宿主 `Config` 只有三个超时字段），客户端还用自己的 `APP_LABEL_KEY` 过滤一遍；该包 `inject` 只有 `webServer`/`connection`/`subprocess`，不导出可注册的服务。2026-10-12 实拉结论：第三方插件没有任何官方接口能往那个下拉里加项。**不要**去找「注册 API」，没有；也**不要**去 fork 官方两个包。
 - **所以是插 DOM**：`document` 捕获阶段一个 `click` 监听（`isHeaderOpenInAppMore()`）认领**会话标题行**那颗 `[data-open-target="directory"] button[aria-haspopup="menu"]` 的按下（作用域是 `[data-slot="conversation.session.header.utilities"]` —— 侧栏 Files 页有同形状的药丸，不能误伤），命中后置一个 pending 标记；`MutationObserver` 挂在 `document.body`（childList/subtree），认领「这个按下之后第一个出现的 `body > [role="menu"]`」，把行插进它的 viewport（`[role="presentation"]`）。**只认自己那次按下之后出现的菜单**：一次按下只开一个菜单。
-- **行的样式从兄弟行现抄**：`buildMenuRow()` 取菜单里第一颗 `button[role="menuitem"]`，把 `itemWrap`/`item`/`itemIcon`/`itemLabel` 的 `className` 逐字复制到新行上 —— 那些是 CSS module 哈希，会随构建变，写死就等着某次官方升级后样式崩掉。图标、标签结构照抄，标签文本换成 Otty。
+- **行的样式从兄弟行现抄**：`buildMenuRow()` 取菜单里第一颗 `button[role="menuitem"]`，把 `itemWrap`/`item`/`itemIcon`/`itemLabel` 的 `className` 逐字复制到新行上 —— 那些是 CSS module 哈希，会随构建变，写死就等着某次官方升级后样式崩掉。图标、标签结构照抄，标签文本换成 Otty。**图标尺寸也必须抄**：官方把 `width`/`height` 设在 `<img>` 自身上（`ApplicationIcon`），只抄外层 span 的 class 会漏掉它，症状是 128px 的 bundle PNG **撑破整行**（2026-10-12 验收实拉踩到）；没有兄弟图可抄时才退回紧凑菜单的 14px。
 - **键盘导航不用自己写**：官方 `Menu` 的方向键/Home/End 处理查的是**实时 DOM**（`list.querySelectorAll('button:not(:disabled)')`），不是它 React 树里的 items 数组，所以插进去的 `button` 自动纳入漫游；`Esc`、点外面关闭也都还在官方手里。选中后用 `new Event('pointerdown', {bubbles:true})` 在 `document.body` 上派发一次外部按下，官方菜单自己的 outside-press 处理把菜单关掉。
 - **菜单会重渲染，但不会吞掉插入的行**：官方 React 只 reconcile 它自己的子节点；插入的容器是它不认识的额外子节点，重渲染不会删它。观察者每次 mutation 都检查「菜单还在不在、行还在不在」，掉了就补。
 - **图标的真身由本插件的宿主路由给**：官方 `GET /open-in-app/icon/<id>` 不认识 `otty`（404），所以新增 `GET /flow/app-icon/<id>`（**prefix 路由**，宿主 `plutil` + `sips` 从 `.app` 提 128px PNG，非 macOS / 未知 id / 提不出来都 404，`<img>` 自己吸收）。浏览器半边 `appIconUrl()` 只对 `otty` 用这条，其余 id 仍走官方路由（官方图标在 Windows/Linux 也能提，本插件只实现了 macOS 的）。
@@ -168,7 +168,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 150 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 151 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

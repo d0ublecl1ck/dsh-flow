@@ -2616,9 +2616,13 @@ function domNode({ tag = 'div', className = '', attrs = {}, children = [] } = {}
 
 /** One shipped directory menu: a viewport holding one templated app row. */
 function ottyMenuFixture() {
-  const icon = domNode({ tag: 'span', className: 'mi-icon' })
+  // The shipped row sizes its icon on the `img` itself; the fixture mirrors
+  // that so the inserted row can be asserted against the same attributes.
+  const image = domNode({ tag: 'img', className: 'mi-image', attrs: { width: '14', height: '14', src: '/open-in-app/icon/finder' } })
+  const icon = domNode({ tag: 'span', className: 'mi-icon', children: [image] })
   const text = domNode({ tag: 'span', className: 'mi-label' })
   const template = domNode({ tag: 'button', className: 'mi-item', attrs: { role: 'menuitem' }, children: [icon, text] })
+  template.querySelector = (selector) => (selector === 'img' ? image : null)
   const wrap = domNode({ className: 'mi-wrap', children: [template] })
   const viewport = domNode({ attrs: { role: 'presentation' }, children: [wrap] })
   const menu = domNode({ attrs: { role: 'menu' }, children: [viewport] })
@@ -2627,7 +2631,7 @@ function ottyMenuFixture() {
     if (selector === '[role="presentation"]') return viewport
     return null
   }
-  return { menu, viewport, template }
+  return { menu, viewport, template, image }
 }
 
 test('readOttyEnabled defaults to on and is off only on an explicit false', async () => {
@@ -2725,7 +2729,12 @@ test('the Otty row is inserted into the shipped menu on the header press', async
   assert.equal(button.getAttribute('role'), 'menuitem')
   assert.equal(button.className, 'mi-item')
   assert.equal(button.children[0].className, 'mi-icon')
-  assert.equal(button.children[0].children[0].getAttribute('src'), '/flow/app-icon/otty')
+  const image = button.children[0].children[0]
+  assert.equal(image.getAttribute('src'), '/flow/app-icon/otty')
+  // The icon must carry the shipped size, or the 128px bundle PNG bursts the row.
+  assert.equal(image.className, 'mi-image')
+  assert.equal(image.getAttribute('width'), '14')
+  assert.equal(image.getAttribute('height'), '14')
   assert.equal(button.children[1].className, 'mi-label')
   assert.equal(button.children[1].textContent, 'Otty')
   assert.equal(button.listeners.length, 1)
@@ -2742,6 +2751,24 @@ test('the Otty row is inserted into the shipped menu on the header press', async
   assert.equal(removed[0].type, 'click')
   assert.equal(onMutation, null)
   assert.equal(inserted.removed, true)
+})
+
+test('an inserted row constrains its icon even without a sibling image to copy', async () => {
+  const { buildMenuRow } = (await load()).internals
+  const template = domNode({
+    tag: 'button',
+    className: 'mi-item',
+    attrs: { role: 'menuitem' },
+    children: [domNode({ tag: 'span', className: 'mi-icon' }), domNode({ tag: 'span', className: 'mi-label' })],
+  })
+  template.querySelector = () => null
+  const menu = domNode({ attrs: { role: 'menu' } })
+  menu.querySelector = (selector) => (selector === 'button[role="menuitem"]' ? template : null)
+  const doc = { createElement: (tag) => domNode({ tag }) }
+  const row = buildMenuRow(doc, menu, { label: 'Otty', iconSrc: '/flow/app-icon/otty', onPick: () => {} })
+  const image = row.children[0].children[0].children[0]
+  assert.equal(image.getAttribute('width'), '14')
+  assert.equal(image.getAttribute('height'), '14')
 })
 
 test('a late catalog answer still fills a menu that is already open', async () => {
