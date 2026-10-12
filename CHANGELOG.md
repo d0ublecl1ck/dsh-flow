@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
 
 - 新增「在「打开」菜单里加入 Otty」：会话标题行右侧那颗官方「打开」split button 的下拉菜单里追加一行 Otty（本机装了、且宿主是新版才出现），点击后在新 Otty 窗口里打开当前工作区目录；默认开，设置 → **心流** 里可以关掉。
 - 官方那份应用目录是**编译期固定白名单**（`dsh-host-open-in-app` 的 `OPEN_IN_APP_CATALOG`），客户端还按 `APP_LABEL_KEY` 再过滤一遍，插件没有任何注册接口 —— 所以这一行是本插件在官方菜单 portal 打开时插进去的 DOM：`document` 捕获阶段监听会话标题行那颗 `[aria-haspopup="menu"]`，命中后认领「下一个出现的 `body > [role="menu"]`」，把行插进它的 viewport。官方 `Menu` 的方向键导航查的是实时 DOM（`button:not(:disabled)`），所以插入的行**自动纳入 ↑/↓、Home/End**；选完 dispatch 一次 `pointerdown` 到 body 关掉菜单。
