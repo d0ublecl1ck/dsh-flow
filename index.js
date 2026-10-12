@@ -5,7 +5,7 @@
  *
  *  - the plugin's preference surface. `locateButton`, `copySessionId`,
  *    `externalLink`, `codeMenu`, `changesFileOpen`, `composerHistory`,
- *    `modEnterSend` and `workspaceName` are volatile Config fields,
+ *    `modEnterSend`, `workspaceName` and `otty` are volatile Config fields,
  *    which is what makes the settings provider project them into the namespace
  *    named by this row's id (`flow`); the browser half reads and writes that
  *    namespace through `ctx.configForms`.
@@ -30,7 +30,9 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
-import { dirname, isAbsolute } from 'node:path'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 /** Stable cordis plugin name (the bundle row's id is `flow`). */
@@ -49,6 +51,7 @@ export const name = 'flow'
  * @property {boolean} composerHistory - whether ↑/↓ in an empty composer recalls the messages this conversation already sent.
  * @property {boolean} modEnterSend - whether Cmd/Ctrl+Enter sends and a plain Enter inserts a newline, instead of the shipped Enter-sends pair.
  * @property {boolean} workspaceName - whether the shipped "Open In…" split button carries the current Workspace's name beside its icon.
+ * @property {boolean} otty - whether the header's "Open In…" menu grows an Otty row that opens the current workspace directory.
  */
 export const Config = z.object({
   locateButton: z.boolean().default(true).volatile(),
@@ -59,6 +62,7 @@ export const Config = z.object({
   composerHistory: z.boolean().default(true).volatile(),
   modEnterSend: z.boolean().default(false).volatile(),
   workspaceName: z.boolean().default(true).volatile(),
+  otty: z.boolean().default(true).volatile(),
 })
 
 /** Exact route the browser half posts an off-origin link to. */
@@ -69,6 +73,9 @@ export const APPS_PATH = '/flow/apps'
 
 /** Exact route that opens one path in one chosen application. */
 export const OPEN_WITH_PATH = '/flow/open-with'
+
+/** Prefix route serving one PNG bundle icon per catalog id. */
+export const APP_ICON_PATH = '/flow/app-icon'
 
 /** Paths are shorter than this; anything longer is not a path. */
 const MAX_PATH_LENGTH = 4096
@@ -102,6 +109,9 @@ const APP_CATALOG = [
   { id: 'rustrover', name: 'RustRover', kind: 'ide', darwin: ['RustRover.app'], linux: ['rustrover'] },
   { id: 'finder', name: '访达', kind: 'files', darwin: ['/System/Library/CoreServices/Finder.app'] },
   { id: 'terminal', name: '终端', kind: 'terminal', darwin: ['/System/Applications/Utilities/Terminal.app'], win32: ['wt.exe'], linux: ['x-terminal-emulator'] },
+  // Otty takes its directory as a CLI argument rather than through the bundle's
+  // own open verb, so it carries a launch override the generic path cannot express.
+  { id: 'otty', name: 'Otty', kind: 'terminal', darwin: ['Otty.app'], launch: { darwin: { bin: 'Contents/MacOS/otty-cli', args: ['open', '{path}'] } } },
   { id: 'iterm', name: 'iTerm2', kind: 'terminal', darwin: ['iTerm.app'] },
   { id: 'ghostty', name: 'Ghostty', kind: 'terminal', darwin: ['Ghostty.app'], linux: ['ghostty'] },
   { id: 'warp', name: 'Warp', kind: 'terminal', darwin: ['Warp.app'], linux: ['warp-terminal'] },
@@ -171,7 +181,11 @@ export function installedApps(options = {}) {
     for (const candidate of entry[platform] ?? []) {
       const path = resolveCandidate(candidate, platform, { roots, exists, env })
       if (path === null) continue
-      apps.push({ id: entry.id, name: entry.name, kind: entry.kind, path })
+      const app = { id: entry.id, name: entry.name, kind: entry.kind, path }
+      // The launch override rides along so the open route can honour it; the
+      // list route maps it back to its {id, name, kind} wire shape.
+      if (entry.launch !== undefined) app.launch = entry.launch
+      apps.push(app)
       break
     }
   }
@@ -195,6 +209,151 @@ export function appsRequestHandler({ rejected = () => false, apps = () => instal
       return
     }
     sendJson(res, 200, { apps: apps().map(({ id, name, kind }) => ({ id, name, kind })) })
+  }
+}
+
+/** Per-command deadline for the icon extraction helper. */
+const ICON_COMMAND_TIMEOUT_MS = 10000
+
+/**
+ * The `.icns` a macOS bundle declares, or the first one it ships.
+ *
+ * `CFBundleIconFile` may omit the extension, and a bundle may declare an icon
+ * it does not actually ship, so the first `Resources/*.icns` is the fallback.
+ * Only the file name is derived here; the caller decides whether it exists.
+ *
+ * @param bundlePath - absolute path of the `.app` bundle.
+ * @param input.plistJson - `plutil -convert json` output for its Info.plist, or null.
+ * @param input.entries - `readdir` of its `Contents/Resources`, or null.
+ * @param input.joinPath - path joiner, injected so this stays pure for tests.
+ * @returns the absolute icon path, or null when the bundle names none.
+ */
+export function bundleIconFile(bundlePath, { plistJson = null, entries = null, joinPath = join } = {}) {
+  const resources = joinPath(bundlePath, 'Contents', 'Resources')
+  let iconFile = null
+  if (typeof plistJson === 'string') {
+    try {
+      const declared = JSON.parse(plistJson).CFBundleIconFile
+      if (typeof declared === 'string' && declared !== '') {
+        iconFile = declared.endsWith('.icns') ? declared : declared + '.icns'
+      }
+    } catch {
+      // Malformed plutil output falls through to the directory scan.
+    }
+  }
+  if (iconFile === null && Array.isArray(entries)) {
+    iconFile = entries.find((entry) => entry.endsWith('.icns')) ?? null
+  }
+  return iconFile === null ? null : joinPath(resources, iconFile)
+}
+
+/**
+ * Run one host command and capture its stdout, or null on any failure.
+ *
+ * @param command - the executable to run.
+ * @param args - its arguments.
+ * @param timeoutMs - the deadline after which the process is killed.
+ * @returns the stdout as text, or null when it failed, timed out or could not start.
+ */
+function captureCommand(command, args, timeoutMs = ICON_COMMAND_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let settled = false
+    const settle = (value) => { if (!settled) { settled = true; resolve(value) } }
+    let child
+    try {
+      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] })
+    } catch {
+      settle(null)
+      return
+    }
+    const chunks = []
+    const timer = setTimeout(() => { try { child.kill() } catch {} settle(null) }, timeoutMs)
+    child.stdout?.on('data', (chunk) => chunks.push(chunk))
+    child.on('error', () => { clearTimeout(timer); settle(null) })
+    child.on('close', (code) => { clearTimeout(timer); settle(code === 0 ? Buffer.concat(chunks).toString('utf8') : null) })
+  })
+}
+
+/**
+ * Extract one macOS bundle's icon as a 128px PNG, or null.
+ *
+ * @param bundlePath - absolute path of the `.app` bundle.
+ * @param input.platform - the host platform.
+ * @param input.run - the command runner, injected so tests own the subprocesses.
+ * @returns the PNG bytes, or null when this host serves none.
+ */
+export async function bundleIconPng(bundlePath, { platform = process.platform, run = captureCommand } = {}) {
+  if (platform !== 'darwin') return null
+  const resources = join(bundlePath, 'Contents', 'Resources')
+  const plistJson = await run('plutil', ['-convert', 'json', '-o', '-', join(bundlePath, 'Contents', 'Info.plist')])
+  let entries = null
+  try {
+    entries = await readdir(resources)
+  } catch {
+    // A missing Resources directory is a bundle with no icon.
+  }
+  const icns = bundleIconFile(bundlePath, { plistJson, entries })
+  if (icns === null || !existsSync(icns)) return null
+  let workDir = null
+  try {
+    workDir = await mkdtemp(join(tmpdir(), 'dsh-flow-icon-'))
+    const out = join(workDir, 'icon.png')
+    if (await run('sips', ['-s', 'format', 'png', '-Z', '128', icns, '--out', out]) === null) return null
+    try {
+      return await readFile(out)
+    } catch {
+      return null
+    }
+  } catch {
+    return null
+  } finally {
+    if (workDir !== null) await rm(workDir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Build the request handler for the per-id bundle-icon route.
+ *
+ * The icon is asked for by a catalog id the browser already knows; an unknown id
+ * or an extractable-less bundle answers 404, which the `img` absorbs.
+ *
+ * @param input.rejected - the trust fence's verdict.
+ * @param input.apps - `() => [{id, name, kind, path}]`.
+ * @param input.extract - `(bundlePath) => Promise<Buffer|null>`.
+ * @returns the request handler.
+ */
+export function appIconRequestHandler({
+  rejected = () => false,
+  apps = () => installedApps(),
+  extract = (bundlePath) => bundleIconPng(bundlePath),
+} = {}) {
+  return async (req, res) => {
+    if (rejected(req, res)) return
+    if (req.method !== 'GET') {
+      res.statusCode = 405
+      res.setHeader('allow', 'GET')
+      res.end()
+      return
+    }
+    const pathname = new URL(String(req.url), 'http://localhost').pathname
+    const id = pathname.slice(APP_ICON_PATH.length).replace(/^\//, '')
+    const entry = apps().find((candidate) => candidate.id === id)
+    let bytes = null
+    if (entry !== undefined) {
+      try {
+        bytes = await extract(entry.path)
+      } catch {
+        bytes = null
+      }
+    }
+    if (bytes === null) {
+      sendJson(res, 404, { code: 'not-found', message: 'no icon for ' + id })
+      return
+    }
+    res.statusCode = 200
+    res.setHeader('content-type', 'image/png')
+    res.setHeader('cache-control', 'public, max-age=3600')
+    res.end(bytes)
   }
 }
 
@@ -283,6 +442,44 @@ export function openWithRequestHandler({
 }
 
 /**
+ * The command and arguments that launch one catalog application, or the OS
+ * default gesture, on one path.
+ *
+ * Exported separately from {@link launchPath} so the launcher's exact shape is
+ * asserted without spawning anything.
+ *
+ * @param entry - the catalog entry, or null for `default`/`reveal`.
+ * @param path - the verified absolute path.
+ * @param action - `open` or `reveal`.
+ * @param platform - `process.platform` of the host.
+ * @returns `[command, args]`.
+ */
+export function launchArgv(entry, path, action, platform = process.platform) {
+  if (entry === null && action === 'reveal') {
+    if (platform === 'darwin') return ['open', ['-R', path]]
+    if (platform === 'win32') return ['explorer', ['/select,' + path]]
+    return ['xdg-open', [dirname(path)]]
+  }
+  if (entry === null) {
+    if (platform === 'darwin') return ['open', [path]]
+    if (platform === 'win32') return ['cmd', ['/c', 'start', '', path]]
+    return ['xdg-open', [path]]
+  }
+  if (entry.launch?.[platform] !== undefined) {
+    // A catalog entry whose own CLI takes the directory: `bin` is relative to
+    // the resolved bundle (or absolute), and `{path}` is the one argument the
+    // verified path fills — never interpolated into a shell string.
+    const spec = entry.launch[platform]
+    return [
+      spec.bin.startsWith('/') ? spec.bin : join(entry.path, spec.bin),
+      spec.args.map((arg) => (arg === '{path}' ? path : arg)),
+    ]
+  }
+  if (platform === 'darwin') return ['open', ['-a', entry.path, path]]
+  return [entry.path, [path]]
+}
+
+/**
  * Launch one catalog application, or the OS default gesture, on one path.
  *
  * @param entry - the catalog entry, or null for `default`/`reveal`.
@@ -292,21 +489,7 @@ export function openWithRequestHandler({
  * @returns whether the command could be started.
  */
 export function launchPath(entry, path, action, platform = process.platform) {
-  let argv
-  if (entry === null && action === 'reveal') {
-    if (platform === 'darwin') argv = ['open', ['-R', path]]
-    else if (platform === 'win32') argv = ['explorer', ['/select,' + path]]
-    else argv = ['xdg-open', [dirname(path)]]
-  } else if (entry === null) {
-    if (platform === 'darwin') argv = ['open', [path]]
-    else if (platform === 'win32') argv = ['cmd', ['/c', 'start', '', path]]
-    else argv = ['xdg-open', [path]]
-  } else if (platform === 'darwin') {
-    argv = ['open', ['-a', entry.path, path]]
-  } else {
-    argv = [entry.path, [path]]
-  }
-  const [command, args] = argv
+  const [command, args] = launchArgv(entry, path, action, platform)
   return new Promise((resolve) => {
     try {
       const child = spawn(command, args, { detached: true, stdio: 'ignore' })
@@ -507,5 +690,10 @@ export function apply(ctx) {
       path: OPEN_WITH_PATH,
       handler: openWithRequestHandler({ rejected }),
     }), 'flow: POST ' + OPEN_WITH_PATH)
+    scope.effect(() => scope.webServer.register({
+      kind: 'prefix',
+      path: APP_ICON_PATH,
+      handler: appIconRequestHandler({ rejected }),
+    }), 'flow: GET ' + APP_ICON_PATH + '/<id>')
   })
 }

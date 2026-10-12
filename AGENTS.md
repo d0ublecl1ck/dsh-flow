@@ -115,14 +115,30 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **开关**：`flow.workspaceName`（默认开）。关掉时 `name` 变 null，下一次同步把属性摘掉。
 - **脆弱点（静默失效型）只有一处**：`[data-open-target="directory"] button` —— `data-open-target` 是官方 `open-in-app` 自己设的数据属性（旁边的 class 是 CSS module 哈希，不能依赖）。官方改属性名或把图标挪出主按钮后，症状只是「名字不见了」，不报错。`scripts/verify-browser.mjs` 的 J 段钉住这件事：属性存在且等于侧栏那个分组的标签、`::before` 的内容等于属性值、伪元素宽度不越过图标的左边缘、超长名被夹在 140px 内、关掉开关后属性消失、开回来又出现。
 
+## 在官方「打开」菜单里加一行 Otty（为什么是插 DOM）
+
+会话标题行右侧那颗官方「打开」split button 的下拉菜单是**官方 `open-in-app` 的**，本插件往里加一行 Otty（本机装了 Otty 才出现）。
+
+- **官方目录没有扩展点**：`@deepseek-ai/dsh-host-open-in-app` 的应用目录是编译期常量 `OPEN_IN_APP_CATALOG`（宿主 `Config` 只有三个超时字段），客户端还用自己的 `APP_LABEL_KEY` 过滤一遍；该包 `inject` 只有 `webServer`/`connection`/`subprocess`，不导出可注册的服务。2026-10-12 实拉结论：第三方插件没有任何官方接口能往那个下拉里加项。**不要**去找「注册 API」，没有；也**不要**去 fork 官方两个包。
+- **所以是插 DOM**：`document` 捕获阶段一个 `click` 监听（`isHeaderOpenInAppMore()`）认领**会话标题行**那颗 `[data-open-target="directory"] button[aria-haspopup="menu"]` 的按下（作用域是 `[data-slot="conversation.session.header.utilities"]` —— 侧栏 Files 页有同形状的药丸，不能误伤），命中后置一个 pending 标记；`MutationObserver` 挂在 `document.body`（childList/subtree），认领「这个按下之后第一个出现的 `body > [role="menu"]`」，把行插进它的 viewport（`[role="presentation"]`）。**只认自己那次按下之后出现的菜单**：一次按下只开一个菜单。
+- **行的样式从兄弟行现抄**：`buildMenuRow()` 取菜单里第一颗 `button[role="menuitem"]`，把 `itemWrap`/`item`/`itemIcon`/`itemLabel` 的 `className` 逐字复制到新行上 —— 那些是 CSS module 哈希，会随构建变，写死就等着某次官方升级后样式崩掉。图标、标签结构照抄，标签文本换成 Otty。
+- **键盘导航不用自己写**：官方 `Menu` 的方向键/Home/End 处理查的是**实时 DOM**（`list.querySelectorAll('button:not(:disabled)')`），不是它 React 树里的 items 数组，所以插进去的 `button` 自动纳入漫游；`Esc`、点外面关闭也都还在官方手里。选中后用 `new Event('pointerdown', {bubbles:true})` 在 `document.body` 上派发一次外部按下，官方菜单自己的 outside-press 处理把菜单关掉。
+- **菜单会重渲染，但不会吞掉插入的行**：官方 React 只 reconcile 它自己的子节点；插入的容器是它不认识的额外子节点，重渲染不会删它。观察者每次 mutation 都检查「菜单还在不在、行还在不在」，掉了就补。
+- **图标的真身由本插件的宿主路由给**：官方 `GET /open-in-app/icon/<id>` 不认识 `otty`（404），所以新增 `GET /flow/app-icon/<id>`（**prefix 路由**，宿主 `plutil` + `sips` 从 `.app` 提 128px PNG，非 macOS / 未知 id / 提不出来都 404，`<img>` 自己吸收）。浏览器半边 `appIconUrl()` 只对 `otty` 用这条，其余 id 仍走官方路由（官方图标在 Windows/Linux 也能提，本插件只实现了 macOS 的）。
+- **Otty 的启动方式和别人不一样**：通用路径是 `open -a <bundle> <dir>`，但 Otty 要把目录当 CLI 参数：`/Applications/Otty.app/Contents/MacOS/otty-cli open <dir>`。所以 catalog 条目带一个 per-platform 覆盖 `launch.darwin = { bin, args: ['open', '{path}'] }`，`launchPath` 拆出纯函数 `launchArgv()`（可单测）再 spawn；`{path}` 是唯一被替换的 token，不做 shell 插值。
+- **开关**：`flow.otty`（默认开）。关掉时连监听器与观察者都不注册（与两个右键菜单同一范式）。
+- **脆弱点（静默失效型）**：① `[data-open-target="directory"]` + `button[aria-haspopup="menu"]` + `[data-slot="conversation.session.header.utilities"]` —— 官方改属性/槽名后症状是「菜单里没有 Otty」，不报错；② 官方菜单的 `[role="menu"]` / `[role="presentation"]` / `button[role="menuitem"]` 结构 —— 官方改 Menu 渲染形状后症状是「插不进去」或「插入的行不像样」；③ 兄弟行的 class 抄不到时 `buildMenuRow()` 返回 null、什么都不插（不报错）。`scripts/verify-browser.mjs` 的 K 段钉住：宿主 `/flow/apps` 不含 otty 就 SKIP；否则断言图标路由返 PNG、打开菜单、最后一行是图标 `/flow/app-icon/otty` 的 Otty；**只读不点**（点了会真开 Otty）。E 段「心流页行标题」同步补成九行。
+- **Wave 不放**：Wave 没有「从外部在指定目录打开」的能力 —— `wsh` 在 Wave 之外直接拒绝（`WAVETERM_JWT not found`），Electron 主进程忽略 argv、没有 `open-file` handler、Info.plist 没有 URL scheme，官方文档也把 `wsh` 定为 Wave 内使用。所以顶栏只加 Otty。
+
 ## 依赖的官方契约（脆弱点集中在这里）
 
 - 槽位：`conversation.session.header.utilities`（`kind: 'list'`、`scope: 'session'`；官方 `open-in-app` 注册在这里，`order: -10`；本插件注册一个不渲染可见内容的座位 `flow.workspace-name`，`order: -20`，名字由它写到官方按钮上）、`sidebar.footer.action`（生命周期与 locale 座位）、`settings.section`（`心流` 页）、`sidebar.workspaces.session.menu.item`（会话行菜单项 —— 右键与行尾 `...` 是**同一个**菜单，所以注册进这个列表就同时覆盖两种手势）、`shell.overlay`（本插件占三个 cell：`flow` 放复制提示的 `Toast`，`flow.code-menu` 放行内代码菜单，`flow.changes-menu` 放改动文件菜单）。
 - DOM：`[class*="sectionHeader"]` + 槽内 `[class*="searchSlot"]`（必须有 `button`）、`[class*="listArea"]`、`[data-row-key="session:<id>"]`、`[data-row-key="workspace:<key>"]` 的 `aria-expanded`、`[data-row-key="overflow:<key>"]`。
 - DOM（工作区名）：会话标题行右侧那颗官方 split button 的**主按钮**，选择器 `[data-open-target="directory"] button`（同槽的第二个 button 是下拉箭头）。本插件把工作区名写成它的 `data-flow-workspace` 属性、由 `::before` 画出来，按钮自身的 hover / 圆角 / padding 都是官方那一套。**静默失效型**：属性改名或图标换位置后症状只是「名字不见了」，不报错。
+- DOM（Otty 行）：会话标题行的槽宿主 `[data-slot="conversation.session.header.utilities"]`、那颗药丸的 `[data-open-target="directory"] button[aria-haspopup="menu"]`，以及官方菜单 portal 的 `body > [role="menu"]` / `[role="presentation"]` / `button[role="menuitem"]`。三处都是**静默失效型**：官方改槽名/属性/Menu 渲染形状后症状只是「菜单里没有 Otty」或「插入的行不像样」，不报错，所以改完必须跑真浏览器验收。
 - DOM（行内代码菜单）：正文里的 `<code>`（自身无 class）、它的 `[class*="_markdown_"]` 祖先、文件引用的 `code > button`、以及**链接形态** `code > a`（URL 的行内代码，锚点是 `code` 的后代，判定在 `inlineCodeLink()`；漏了它就会「点了链接又被复制」）。
 - DOM（改动文件菜单）：改动文件卡片根 `[data-changed-files]`，以及卡内带 `aria-describedby` 的按钮——那个 id 指向的隐藏元素里是 Host 路径。两者都是**静默失效型**依赖：官方改渲染形状后症状只是「右键没菜单」，不报错，所以改完必须跑真浏览器验收。
-- 服务与数据（打开方式）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）仍是 `~/…` **普通文件**的打开路径。**目录与应用行**统一走本插件的宿主路由：`GET /flow/apps` 列本机真实安装的应用（`{id,name,kind}`，kind ∈ `ide`/`terminal`/`files`）；`POST /flow/open-with` 收 `{app, path}`，`app` 是 catalog id，或 `'default'`（系统默认应用）、`'reveal'`（文件管理器中显示）；`path` 必须绝对且存在（否则 400/404），**文件只接受 `kind === 'ide'`、目录接受任意 kind**（否则 403），未认证 401。两条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开；catalog 一页只取一次并记住，失败不缓存。图标沿用 `GET /open-in-app/icon/<id>`（未知 id 404，`<img>` 自己 `onError` 隐藏）。本机实拉 kind：`ide` = vscode/zed/xcode/androidstudio/intellij/pycharm，`terminal` = iterm/terminal，`files` = finder。
+- 服务与数据（打开方式）：`ctx.remote.$host.home`（api-gateway 从连接 generation 的 `host: { home }` 取得，没有 generation 时为 `undefined`）与 `ctx.sidebarRight.openResource(address)`（地址语法 `dsh-resource://file/session/<sessionId>/<path>`，绝对路径保留前导 `/`、每段 component-encode 且 `:` 保持字面，`parseFileAddress` 的既有语法）仍是 `~/…` **普通文件**的打开路径。**目录与应用行**统一走本插件的宿主路由：`GET /flow/apps` 列本机真实安装的应用（`{id,name,kind}`，kind ∈ `ide`/`terminal`/`files`）；`POST /flow/open-with` 收 `{app, path}`，`app` 是 catalog id，或 `'default'`（系统默认应用）、`'reveal'`（文件管理器中显示）；`path` 必须绝对且存在（否则 400/404），**文件只接受 `kind === 'ide'`、目录接受任意 kind**（否则 403），未认证 401。两条都当**可选**：拿不到就不接管这一下，绝不抛错、绝不假装打开；catalog 一页只取一次并记住，失败不缓存。图标沿用 `GET /open-in-app/icon/<id>`（未知 id 404，`<img>` 自己 `onError` 隐藏）；本插件新加的 `otty` 走自己的 `GET /flow/app-icon/<id>`（**prefix 路由**，`plutil` + `sips` 从 `.app` 提 128px PNG，非 macOS / 未知 id 提不出来都 404）。本机实拉 kind：`ide` = vscode/zed/xcode/androidstudio/intellij/pycharm，`terminal` = iterm/terminal（本插件另加 `otty`），`files` = finder。
 - DOM（发送键）：对话输入框根 `[data-composer-input]`（实拉时它的类名是 `uV2eYG_input` —— 构建哈希，不要依赖；属性 `data-composer-input` 才是契约，带 contenteditable 与 Lexical 的 `__lexicalEditor`）、触发菜单容器 `[data-trigger-menu]` 与其中的 `[role="listbox"][aria-activedescendant]`。这两处都是**静默失效型**依赖：属性改名后症状只是「开关开了但 Enter 还是发送」，所以改完必须跑真浏览器验收。
 - 会话行自己的 `onContextMenu` 负责开菜单（本插件只是它菜单里的一行）：**空白「新会话」行故意不开菜单**，验收脚本因此要挑一行「问了才有反应」的行，不能假定当前会话行就行。菜单项是 `[role="menuitem"]`，按键提示在其中的 `[class*="shortcut"]` 里（前一个 `[aria-hidden]` 是图标，不是提示）。
 - 滚动方式与官方一致：官方自己的 reveal 就是对会话行 `scrollIntoView({block:'nearest'})`，本插件照抄这一个调用（含 `block:'nearest'`），不要再发明别的滚动姿势 —— 差别只在于官方只管搜索导航，我们先把折叠拆开。
@@ -138,7 +154,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 偏好与命名空间
 
 - 命名空间 = bundle row id = `flow`；locale 命名空间同名。
-- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, composerHistory, modEnterSend, workspaceName })`，八个字段都是 `z.boolean().volatile()` —— 前七个 `default(true)`，发送键那个 `default(false)`（默认必须是官方行为）。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
+- `index.js` 声明 `Config = z.object({ locateButton, copySessionId, externalLink, codeMenu, changesFileOpen, composerHistory, modEnterSend, workspaceName, otty })`，九个字段都是 `z.boolean().volatile()` —— 除发送键 `modEnterSend` 默认 `false`（默认必须是官方行为）外，其余默认 `true`。`volatile()` 是设置域投影该字段的前提；缺了它设置页读不到这一行，心流页里的开关点了会显示保存失败。
 - 同一处还注册 `configure({ auto: false }, ctx.fiber)`：本 bundle 自带页面，设置域不该再按 schema 自动生成一个。
 - 客户端经 `ctx.configForms` 读写：按钮读它决定显隐，页面读并写它。宿主未服务该命名空间时，只有**页面**被 `whileServed` 挡掉，按钮照常渲染。
 
@@ -152,7 +168,7 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 ## 验证
 
 ```sh
-npm test                 # 138 条纯逻辑 + 接线断言，不需要运行中的实例
+npm test                 # 150 条纯逻辑 + 接线断言，不需要运行中的实例
 npm run verify:browser   # 真浏览器断言，需要本机跑着 DSH Web 实例
 npm run verify:browser -- --client ./client.js   # 用本 checkout 的浏览器半边验收（`--` 不能省：不加时 npm 吞掉 `--client`，静默改成验收实例里已装的那份）
 npm run assets           # 重新生成 assets/ 里的示意图（需要本机 Chrome）

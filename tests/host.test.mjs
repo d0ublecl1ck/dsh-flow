@@ -12,15 +12,20 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import z from '@deepseek-ai/schemastery'
 import {
+  APP_ICON_PATH,
   APPS_PATH,
   Config,
   OPEN_PATH,
   OPEN_WITH_PATH,
   acceptedUrl,
   applicationRoots,
+  appIconRequestHandler,
   apply,
   appsRequestHandler,
+  bundleIconFile,
+  bundleIconPng,
   installedApps,
+  launchArgv,
   launchPath,
   mayOpen,
   name,
@@ -85,7 +90,7 @@ test('the send-key switch starts on the shell behaviour, and is volatile too', (
 })
 
 test('the toggles are volatile, which is what the settings form projects', () => {
-  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend', 'workspaceName']) {
+  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend', 'workspaceName', 'otty']) {
     const field = Config.dict[name]
     assert.equal(field.meta.volatile, true, name)
     assert.equal(field.type, 'boolean', name)
@@ -290,17 +295,17 @@ test('apply mounts the open route on the web transport it injects', () => {
     },
   }
   apply(ctx)
-  // Three exact routes: the link hand-off, the installed-application list, and
-  // the opener that takes a path plus one of those applications.
-  assert.deepEqual(routes.map((route) => route.path), [OPEN_PATH, APPS_PATH, OPEN_WITH_PATH])
-  for (const route of routes) {
-    assert.equal(route.kind, 'exact')
-    assert.equal(typeof route.handler, 'function')
-  }
+  // Four routes: the link hand-off, the installed-application list, the opener
+  // that takes a path plus one of those applications, and the per-id bundle icon
+  // (a prefix route, because the id is the path's last segment).
+  assert.deepEqual(routes.map((route) => route.path), [OPEN_PATH, APPS_PATH, OPEN_WITH_PATH, APP_ICON_PATH])
+  assert.deepEqual(routes.map((route) => route.kind), ['exact', 'exact', 'exact', 'prefix'])
+  for (const route of routes) assert.equal(typeof route.handler, 'function')
   assert.deepEqual(descriptions, [
     'flow: POST ' + OPEN_PATH,
     'flow: GET ' + APPS_PATH,
     'flow: POST ' + OPEN_WITH_PATH,
+    'flow: GET ' + APP_ICON_PATH + '/<id>',
   ])
 })
 
@@ -462,5 +467,106 @@ test('a file reaches only the IDEs; a directory reaches every catalog entry', as
   await failed(request({ method: 'POST', body: JSON.stringify({ app: 'vscode', path: '/work/file.ts' }) }), res)
   assert.equal(res.statusCode, 502)
   assert.equal(JSON.parse(res.body).code, 'open-failed')
+})
+
+// --- the Otty row the browser half adds to the shipped menu -------------------
+
+test('the Otty switch defaults to on, and is volatile too', () => {
+  assert.equal(z.resolve({}, Config)[0].otty.get(), true)
+  assert.equal(z.resolve({ otty: false }, Config)[0].otty.get(), false)
+  assert.equal(z.resolve({ otty: true }, Config)[0].otty.get(), true)
+  assert.equal(Config.dict.otty.meta.volatile, true)
+  assert.equal(Config.dict.otty.type, 'boolean')
+})
+
+test('the Otty entry is offered only when installed, and carries its own launcher', () => {
+  const apps = installedApps({
+    platform: 'darwin',
+    roots: ['/Applications'],
+    env: { HOME: '/Users/x' },
+    exists: (path) => path === '/Applications/Otty.app',
+  })
+  assert.deepEqual(apps.map((app) => [app.id, app.kind, app.path]), [['otty', 'terminal', '/Applications/Otty.app']])
+  assert.deepEqual(apps[0].launch, { darwin: { bin: 'Contents/MacOS/otty-cli', args: ['open', '{path}'] } })
+  // An entry without an override stays override-free, so the generic opener still applies.
+  const bare = installedApps({
+    platform: 'darwin',
+    roots: ['/Applications'],
+    env: { HOME: '/Users/x' },
+    exists: (path) => path === '/Applications/Zed.app',
+  })
+  assert.equal('launch' in bare[0], false)
+})
+
+test('an entry with its own CLI is launched through it, not through the bundle open verb', () => {
+  const otty = { id: 'otty', path: '/Applications/Otty.app', launch: { darwin: { bin: 'Contents/MacOS/otty-cli', args: ['open', '{path}'] } } }
+  assert.deepEqual(launchArgv(otty, '/work/dir', 'open', 'darwin'), ['/Applications/Otty.app/Contents/MacOS/otty-cli', ['open', '/work/dir']])
+  // An absolute override bin is used as is; an ordinary entry keeps the platform open verb.
+  const absolute = { id: 'x', path: '/Applications/X.app', launch: { darwin: { bin: '/usr/local/bin/x', args: ['--dir', '{path}'] } } }
+  assert.deepEqual(launchArgv(absolute, '/work/dir', 'open', 'darwin'), ['/usr/local/bin/x', ['--dir', '/work/dir']])
+  assert.deepEqual(launchArgv({ id: 'finder', path: '/System/Library/CoreServices/Finder.app' }, '/work/dir', 'open', 'darwin'), ['open', ['-a', '/System/Library/CoreServices/Finder.app', '/work/dir']])
+  assert.deepEqual(launchArgv(null, '/work/file.ts', 'reveal', 'darwin'), ['open', ['-R', '/work/file.ts']])
+  assert.deepEqual(launchArgv(null, '/work/file.ts', 'open', 'win32'), ['cmd', ['/c', 'start', '', '/work/file.ts']])
+  assert.deepEqual(launchArgv({ id: 'code', path: '/usr/bin/code' }, '/work/dir', 'open', 'linux'), ['/usr/bin/code', ['/work/dir']])
+})
+
+test('a bundle icon is the declared icns, or the first one it ships', () => {
+  const joinPath = (...parts) => parts.join('/')
+  const plist = (name) => JSON.stringify({ CFBundleIconFile: name })
+  assert.equal(bundleIconFile('/A/Otty.app', { plistJson: plist('AppIcon'), entries: [], joinPath }), '/A/Otty.app/Contents/Resources/AppIcon.icns')
+  assert.equal(bundleIconFile('/A/Otty.app', { plistJson: plist('App.icns'), entries: [], joinPath }), '/A/Otty.app/Contents/Resources/App.icns')
+  // Malformed plutil output falls back to the first icns the bundle ships.
+  assert.equal(bundleIconFile('/A/Otty.app', { plistJson: 'not json', entries: ['a.icns', 'b.png'], joinPath }), '/A/Otty.app/Contents/Resources/a.icns')
+  assert.equal(bundleIconFile('/A/Otty.app', { plistJson: '{}', entries: ['b.png'], joinPath }), null)
+  assert.equal(bundleIconFile('/A/Otty.app', { plistJson: null, entries: null, joinPath }), null)
+})
+
+test('bundle icon extraction is macOS-only, and asks plutil before anything else', async () => {
+  let ran = 0
+  assert.equal(await bundleIconPng('/Applications/Otty.app', { platform: 'linux', run: () => { ran += 1; return Promise.resolve(null) } }), null)
+  assert.equal(ran, 0)
+  // A bundle that declares no icon never reaches sips.
+  const calls = []
+  const run = (command) => { calls.push(command); return Promise.resolve(command === 'plutil' ? '{}' : null) }
+  assert.equal(await bundleIconPng('/nonexistent-dsh-flow-probe.app', { platform: 'darwin', run }), null)
+  assert.deepEqual(calls, ['plutil'])
+})
+
+test('the icon route serves one known id and 404s everything else', async () => {
+  const bytes = Buffer.from([1, 2, 3])
+  const handler = appIconRequestHandler({
+    apps: () => [{ id: 'otty', name: 'Otty', kind: 'terminal', path: '/Applications/Otty.app' }],
+    extract: (path) => Promise.resolve(path === '/Applications/Otty.app' ? bytes : null),
+  })
+
+  const found = response()
+  await handler({ method: 'GET', url: APP_ICON_PATH + '/otty' }, found)
+  assert.equal(found.statusCode, 200)
+  assert.equal(found.headers['content-type'], 'image/png')
+  assert.equal(found.headers['cache-control'], 'public, max-age=3600')
+  assert.deepEqual(found.body, bytes)
+
+  const unknown = response()
+  await handler({ method: 'GET', url: APP_ICON_PATH + '/nope' }, unknown)
+  assert.equal(unknown.statusCode, 404)
+
+  const method = response()
+  await handler({ method: 'POST', url: APP_ICON_PATH + '/otty' }, method)
+  assert.equal(method.statusCode, 405)
+  assert.equal(method.headers.allow, 'GET')
+
+  const fenced = response()
+  const rejecting = appIconRequestHandler({ rejected: (_req, res) => { res.statusCode = 401; res.end(); return true } })
+  await rejecting({ method: 'GET', url: APP_ICON_PATH + '/otty' }, fenced)
+  assert.equal(fenced.statusCode, 401)
+
+  // An extractor that throws is a 404, never an unhandled rejection.
+  const throwing = response()
+  const broken = appIconRequestHandler({
+    apps: () => [{ id: 'otty', name: 'Otty', kind: 'terminal', path: '/Applications/Otty.app' }],
+    extract: () => { throw new Error('sips exploded') },
+  })
+  await broken({ method: 'GET', url: APP_ICON_PATH + '/otty' }, throwing)
+  assert.equal(throwing.statusCode, 404)
 })
 

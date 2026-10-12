@@ -115,6 +115,15 @@ window.__ModuleLoader__.load({
     /** GET prefix serving one PNG bundle icon per catalog id. */
     const OPEN_IN_APP_ICON_ROUTE = '/open-in-app/icon'
 
+    /** GET prefix serving this bundle's own extracted bundle icons, by catalog id. */
+    const APP_ICON_ROUTE = '/flow/app-icon'
+
+    /** The one terminal app this bundle adds to the shipped "Open In…" menu. */
+    const OTTY_APP_ID = 'otty'
+
+    /** The shipped header's utilities host: only that control's menu is ours to extend. */
+    const HEADER_UTILITIES_SELECTOR = '[data-slot="conversation.session.header.utilities"]'
+
     /**
      * Catalog ids whose label this plugin carries.
      *
@@ -126,7 +135,7 @@ window.__ModuleLoader__.load({
       'intellij', 'pycharm', 'webstorm', 'phpstorm', 'goland', 'rider', 'rustrover',
       'fork', 'sourcetree', 'github', 'tower', 'gitkraken', 'smartgit', 'sublimemerge',
       'ghostty', 'warp', 'iterm', 'kitty', 'windowsterminal', 'gitbash', 'gnometerminal', 'konsole',
-      'finder', 'explorer', 'filemanager', 'terminal',
+      'finder', 'explorer', 'filemanager', 'terminal', 'otty',
     ])
 
     /** The schemes the OS opener is allowed to receive. */
@@ -335,6 +344,167 @@ window.__ModuleLoader__.load({
         node = node.parentElement
       }
       return null
+    }
+
+    /**
+     * The header's "Open In…" more button, or null.
+     *
+     * Only the conversation header's utilities slot is this plugin's to extend:
+     * the Sidebar's own Files tab renders the same `[data-open-target="directory"]`
+     * shape, so the slot host is the positive half of the scope.
+     *
+     * @param target - the pressed element.
+     * @returns whether the press opened the header's directory menu.
+     */
+    function isHeaderOpenInAppMore(target) {
+      if (!isElement(target) || typeof target.closest !== 'function') return false
+      const split = target.closest('[data-open-target="directory"]')
+      if (split === null || split === undefined) return false
+      if (typeof split.closest !== 'function' || split.closest(HEADER_UTILITIES_SELECTOR) === null) return false
+      const more = typeof split.querySelector === 'function' ? split.querySelector('button[aria-haspopup="menu"]') : null
+      if (more === null || more === undefined) return false
+      if (more === target) return true
+      return typeof more.contains === 'function' && more.contains(target)
+    }
+
+    /**
+     * Build one menu row with the shipped rows' own markup.
+     *
+     * The classes are copied off a sibling row rather than hard-coded: they are
+     * CSS-module hashes that move between builds, and the row must look exactly
+     * like its neighbours in whichever build is running.
+     *
+     * @param doc - the document that owns the menu.
+     * @param menu - the shipped menu element.
+     * @param input.label - the visible row text.
+     * @param input.iconSrc - the icon URL.
+     * @param input.onPick - row activation.
+     * @returns the row element, or null when the menu carries no sibling to copy.
+     */
+    function buildMenuRow(doc, menu, { label, iconSrc, onPick }) {
+      if (menu === null || menu === undefined || typeof menu.querySelector !== 'function') return null
+      const template = menu.querySelector('button[role="menuitem"]')
+      if (template === null || template === undefined) return null
+      const wrap = doc.createElement('div')
+      const templateWrap = template.parentElement
+      if (templateWrap !== null && templateWrap !== undefined && typeof templateWrap.className === 'string') wrap.className = templateWrap.className
+      const button = doc.createElement('button')
+      button.type = 'button'
+      button.setAttribute('role', 'menuitem')
+      if (typeof template.className === 'string') button.className = template.className
+      const children = template.children ?? []
+      const icon = doc.createElement('span')
+      if (children[0] !== undefined && typeof children[0].className === 'string') icon.className = children[0].className
+      const image = doc.createElement('img')
+      image.setAttribute('src', iconSrc)
+      image.setAttribute('alt', '')
+      image.setAttribute('draggable', 'false')
+      if (typeof icon.appendChild === 'function') icon.appendChild(image)
+      const text = doc.createElement('span')
+      if (children[1] !== undefined && typeof children[1].className === 'string') text.className = children[1].className
+      text.textContent = label
+      if (typeof button.appendChild === 'function') {
+        button.appendChild(icon)
+        button.appendChild(text)
+      }
+      button.addEventListener('click', onPick)
+      if (typeof wrap.appendChild === 'function') wrap.appendChild(button)
+      return wrap
+    }
+
+    /** How long after a header press an appearing menu is still assumed to be that one. */
+    const OTTY_PENDING_MS = 1500
+
+    /** Observe one subtree through the engine's own MutationObserver, or null without one. */
+    function observeSubtree(target, callback) {
+      if (typeof MutationObserver !== 'function') return null
+      const observer = new MutationObserver(callback)
+      observer.observe(target, { childList: true, subtree: true })
+      return () => { observer.disconnect() }
+    }
+
+    /**
+     * Extend the shipped "Open In…" directory menu with one extra row.
+     *
+     * The shipped `Menu` has no registration seam, so the row is a node inserted
+     * into its portaled list. Its keyboard walk queries the live list
+     * (`button:not(:disabled)`), so the inserted row joins the arrow walk and
+     * Home/End with no help; the menu is dismissed after a pick by one dispatched
+     * `pointerdown` on the body, the same outside press the list already handles.
+     *
+     * The installer is inert until a header more-button is pressed, and claims the
+     * first portaled `[role="menu"]` to appear after that press: only one menu
+     * opens per press, and this one was opened by the press we observed.
+     *
+     * @param input.document - the page document.
+     * @param input.rowOf - `() => {label, icon} | null`, read at injection time.
+     * @param input.onPick - row activation.
+     * @param input.close - dismiss the open menu after a pick.
+     * @param input.prime - refresh the catalog; its resolution retries the injection.
+     * @param input.observe - `(target, callback) => cleanup`, defaulting to MutationObserver.
+     * @returns a cleanup that removes the listener, the observer and any inserted row.
+     */
+    function installOttyInjector({ document, rowOf, onPick, close = () => {}, prime = null, observe = observeSubtree } = {}) {
+      if (document === null || document === undefined || typeof document.addEventListener !== 'function') return () => {}
+      let pending = false
+      let timer = null
+      let menu = null
+      let row = null
+
+      const forget = () => { menu = null; row = null }
+
+      const inject = () => {
+        if (menu === null || row !== null) return
+        const sighted = typeof rowOf === 'function' ? rowOf() : null
+        if (sighted === null || sighted === undefined) return
+        const viewport = typeof menu.querySelector === 'function' ? (menu.querySelector('[role="presentation"]') ?? menu) : menu
+        if (viewport === null || viewport === undefined || typeof viewport.appendChild !== 'function') return
+        const node = buildMenuRow(document, menu, {
+          label: sighted.label,
+          iconSrc: sighted.icon,
+          onPick: () => { try { onPick?.() } finally { close?.() } },
+        })
+        if (node === null) return
+        viewport.appendChild(node)
+        row = node
+      }
+
+      const onDocumentClick = (event) => {
+        if (!isHeaderOpenInAppMore(event?.target)) return
+        pending = true
+        if (timer !== null) clearTimeout(timer)
+        timer = setTimeout(() => { pending = false; timer = null }, OTTY_PENDING_MS)
+        if (typeof prime === 'function') {
+          Promise.resolve().then(prime).then(() => { if (menu !== null) inject() }, () => {})
+        }
+      }
+
+      const onMutation = () => {
+        const body = document.body
+        const attached = body !== null && body !== undefined && typeof body.contains === 'function' && body.contains(menu)
+        if (menu !== null && !attached) forget()
+        if (menu === null && pending) {
+          const candidate = body !== null && body !== undefined && typeof body.querySelector === 'function' ? body.querySelector('[role="menu"]') : null
+          if (candidate !== null && candidate !== undefined) {
+            pending = false
+            if (timer !== null) { clearTimeout(timer); timer = null }
+            menu = candidate
+            inject()
+            return
+          }
+        }
+        if (menu !== null) inject()
+      }
+
+      document.addEventListener('click', onDocumentClick, true)
+      const stop = typeof observe === 'function' ? observe(document.body, onMutation) : null
+      return () => {
+        document.removeEventListener('click', onDocumentClick, true)
+        if (typeof stop === 'function') stop()
+        if (timer !== null) { clearTimeout(timer); timer = null }
+        if (row !== null && typeof row.remove === 'function' && row.parentElement !== null && row.parentElement !== undefined) row.remove()
+        forget()
+      }
     }
 
     /**
@@ -1460,7 +1630,7 @@ window.__ModuleLoader__.load({
         const label = APP_LABEL_IDS.has(id)
           ? t('app.' + id)
           : (typeof app.name === 'string' && app.name !== '' ? app.name : id)
-        rows.push({ key: id, id, label, kind: String(app.kind ?? ''), icon: OPEN_IN_APP_ICON_ROUTE + '/' + id })
+        rows.push({ key: id, id, label, kind: String(app.kind ?? ''), icon: appIconUrl(id) })
       }
       return rows
     }
@@ -2424,6 +2594,53 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read the Otty-row preference off the plugin's config form.
+     *
+     * The default is on, and an unreadable form keeps that default: a Host that
+     * does not project the field yet must not silently take the row away.
+     *
+     * @param form - `ctx.configForms.get('flow')`.
+     * @returns whether the header's "Open In…" menu grows an Otty row.
+     */
+    function readOttyEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.otty !== false
+    }
+
+    /**
+     * The icon URL one catalog id's row wears.
+     *
+     * The shipped route serves the shipped catalog; this bundle's own route serves
+     * the one id it adds. Either route's unknown-id 404 is absorbed by the `img`.
+     *
+     * @param id - catalog id.
+     * @returns the icon URL.
+     */
+    function appIconUrl(id) {
+      return (id === OTTY_APP_ID ? APP_ICON_ROUTE : OPEN_IN_APP_ICON_ROUTE) + '/' + id
+    }
+
+    /**
+     * The Otty row when the Host reports the app installed, else null.
+     *
+     * @param apps - the `apps` array `GET /flow/apps` answered, when it did.
+     * @param t - the plugin's localized copy.
+     * @returns `{label, icon}`, or null when Otty is not installed.
+     */
+    function ottyMenuRow(apps, t) {
+      if (!Array.isArray(apps)) return null
+      const installed = apps.some((app) => app !== null && typeof app === 'object' && app.id === OTTY_APP_ID)
+      if (!installed) return null
+      return { label: t('app.otty'), icon: appIconUrl(OTTY_APP_ID) }
+    }
+
+    /**
      * The rows one changed-file menu shows.
      *
      * The default action and the file-manager reveal are always there, so the
@@ -2780,11 +2997,13 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'app.explorer': '文件资源管理器',
       'app.filemanager': '文件管理器',
       'app.terminal': '终端',
+      'app.otty': 'Otty',
       'changesFile.open': '用默认应用打开',
       'changesFile.reveal': '在文件管理器中显示',
       'changesFile.failed': '无法用默认应用打开这个文件',
       'changesFile.revealFailed': '无法在文件管理器中显示这个文件',
       'linkMissing.notice': '找不到这个路径',
+      'otty.failed': '无法在 Otty 中打开这个工作区',
       'section.title': '心流',
       'section.locate.title': '定位当前会话按钮',
       'section.locate.description': '在工作区标题行、搜索按钮右侧显示「定位当前会话」按钮：点击后展开并滚动到当前打开的会话。',
@@ -2803,6 +3022,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'section.history.description': '草稿为空时，用 ↑/↓ 在当前对话发过的消息之间切换：↑ 更早、↓ 更新，越过最新一条回到原来的草稿。带图片的消息会把图片重新粘回草稿；文件附件（本插件读不回内容）以一行占位文字保留，可自行删除。',
       'section.workspaceName.title': '在「打开」按钮里显示当前工作区名',
       'section.workspaceName.description': '在会话标题行右侧「打开」按钮的图标左侧显示当前工作区名（过长会截断）。名字属于同一个按钮，点它的效果和点图标完全一样；没有归属工作区的会话不显示，关闭后按钮恢复原样。',
+      'section.otty.title': '在「打开」菜单里加入 Otty',
+      'section.otty.description': '在会话标题行右侧「打开」按钮的下拉菜单里追加一行 Otty（本机装了才显示），点击后在新 Otty 窗口里打开当前工作区目录。官方那份应用目录是编译期写死的、插件注册不进去，所以这一行由本插件插进那个菜单；关闭后不再插入。',
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -2857,11 +3078,13 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'app.explorer': 'File Explorer',
       'app.filemanager': 'Files',
       'app.terminal': 'Terminal',
+      'app.otty': 'Otty',
       'changesFile.open': 'Open in Default App',
       'changesFile.reveal': 'Show in File Manager',
       'changesFile.failed': 'Could not open this file in the default application',
       'changesFile.revealFailed': 'Could not show this file in the file manager',
       'linkMissing.notice': 'No such path',
+      'otty.failed': 'Could not open this workspace in Otty',
       'section.title': 'Flow',
       'section.locate.title': 'Locate current Session button',
       'section.locate.description': 'Show a “Locate current Session” button in the workspace header, beside the search control; clicking it expands and scrolls to the open Session.',
@@ -2880,6 +3103,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'section.history.description': 'With an empty draft, ↑/↓ walks the messages this conversation already sent: ↑ older, ↓ newer, and ↓ past the newest restores your draft. A recalled image is pasted back into the draft; a file attachment, whose bytes this plugin cannot read back, stays as one placeholder line you can delete.',
       'section.workspaceName.title': 'Show the workspace name in the “Open In” button',
       'section.workspaceName.description': 'Show the current workspace name to the left of the icon inside the header’s “Open In” button (long names are truncated). The name belongs to that same button, so clicking it does exactly what clicking the icon does; a Session no workspace claims shows nothing, and switching this off restores the button.',
+      'section.otty.title': 'Add Otty to the “Open In” menu',
+      'section.otty.description': 'Append an Otty row to the header’s “Open In” drop-down (shown only when Otty is installed), opening the current workspace directory in a new Otty window. The shipped app catalog is fixed at build time and takes no plugin registrations, so this bundle inserts the row itself; switching this off stops the insertion.',
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -3477,6 +3702,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
+        h(SettingsRow, {
+          config,
+          field: 'otty',
+          read: readOttyEnabled,
+          title: t('section.otty.title'),
+          description: t('section.otty.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
       )
     }
 
@@ -4041,6 +4275,63 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           inject: () => ({ config, workspaces, read: readWorkspaceNameEnabled }),
         }, WorkspaceNameSeat)), 'flow: workspace name seat')
 
+        // The header's "Open In…" menu is the shipped one, and its list exposes no
+        // registration seam; this bundle therefore inserts one Otty row into it while
+        // the preference is on. Off means neither the press listener nor the observer
+        // is installed, the same shape as the two context menus above.
+        const openOtty = () => {
+          let snapshot = null
+          try {
+            snapshot = sessions.getSnapshot()
+          } catch {
+            snapshot = null
+          }
+          const sessionId = currentSessionId(snapshot)
+          const cwd = sessionId === null ? null : sessionCwd(snapshot, sessionId)
+          if (cwd === null) return
+          openWithPath({ app: OTTY_APP_ID, path: cwd, fetch: (route, init) => fetch(route, init) })
+            .then((opened) => {
+              if (opened !== true) notify(t('otty.failed'), 'warning')
+            }, () => notify(t('otty.failed'), 'warning'))
+        }
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          let detach = null
+          let apps = null
+          const prime = () => resolveApps().then(
+            (value) => { apps = Array.isArray(value) ? value : null },
+            () => { apps = null },
+          )
+          const sync = () => {
+            if (!readOttyEnabled(config)) {
+              detach?.()
+              detach = null
+              return
+            }
+            if (detach !== null) return
+            detach = installOttyInjector({
+              document,
+              rowOf: () => ottyMenuRow(apps, t),
+              onPick: openOtty,
+              close: () => {
+                try {
+                  document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+                } catch {
+                  // A page without an Event constructor simply leaves the menu open.
+                }
+              },
+              prime,
+            })
+            prime()
+          }
+          sync()
+          const unsubscribe = config.subscribe(sync)
+          return () => {
+            if (typeof unsubscribe === 'function') unsubscribe()
+            detach?.()
+          }
+        }, 'flow: otty row in the open-in menu')
+
         // The Session row menu is the shell's own: a right-click on the row opens
         // it, so registering into its item list is what reaches both gestures.
         ctx.effect(() => ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
@@ -4209,6 +4500,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         createChangesMenuStore,
         readChangesFileOpen,
         readWorkspaceNameEnabled,
+        readOttyEnabled,
+        ottyMenuRow,
+        appIconUrl,
+        isHeaderOpenInAppMore,
+        buildMenuRow,
+        installOttyInjector,
+        OTTY_APP_ID,
+        APP_ICON_ROUTE,
+        HEADER_UTILITIES_SELECTOR,
         applicationsForKind,
         changesFileRows,
         openChangedFile,

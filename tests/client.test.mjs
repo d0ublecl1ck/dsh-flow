@@ -816,9 +816,10 @@ test('the inline-code listeners exist only while the preference is on', async ()
     removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
   }
   try {
-    // The changed-file menu is another feature's listener; it is held off here
-    // so this assertion stays about the inline-code pair alone.
-    const form = fakeForm({ codeMenu: true, changesFileOpen: false, composerHistory: false })
+    // The changed-file menu, the recalled messages and the Otty row are other
+    // features' listeners; they are held off here so this assertion stays about
+    // the inline-code pair alone.
+    const form = fakeForm({ codeMenu: true, changesFileOpen: false, composerHistory: false, otty: false })
     module.apply(fakeContext([], [], { form }))
     // `click` first is the off-origin link hand-off and `pointermove` is that
     // same feature's link cursor; the menu press and the path press are the two
@@ -830,18 +831,18 @@ test('the inline-code listeners exist only while the preference is on', async ()
 
     // A Host echo that turns the feature off detaches both listeners instead of
     // leaving ones behind that decide to do nothing.
-    form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false })
+    form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false, otty: false })
     assert.deepEqual(removed, [
       { type: 'contextmenu', listener: added[2].listener, capture: true },
       { type: 'click', listener: added[3].listener, capture: true },
     ])
     assert.deepEqual([...cursor], [], 'turning the feature off takes the cursor with it')
-    form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false })
+    form.publish({ codeMenu: false, changesFileOpen: false, composerHistory: false, otty: false })
     assert.equal(removed.length, 2, 'already detached listeners are not removed twice')
 
     // Turning it back on binds both again, and nothing else. The changed-file
     // menu keeps its own preference off throughout, so it never joins in.
-    form.publish({ codeMenu: true, changesFileOpen: false, composerHistory: false })
+    form.publish({ codeMenu: true, changesFileOpen: false, composerHistory: false, otty: false })
     assert.deepEqual(added.map((entry) => entry.type), ['click', 'pointermove', 'contextmenu', 'click', 'contextmenu', 'click'])
     assert.equal(added[4].capture, true)
     assert.equal(added[5].capture, true)
@@ -1405,11 +1406,12 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // Six separate capture-phase listeners: the link hand-off, the plain-text
+    // Seven separate capture-phase listeners: the link hand-off, the plain-text
     // link cursor, the inline-code menu press, the inline-code path press, the
-    // changed-file menu press, and the recalled-messages arrow press. None can be
-    // reached through another's registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['keydown', true]])
+    // changed-file menu press, the recalled-messages arrow press, and the Otty-row
+    // press that observes the header's "Open In…" more button. None can be reached
+    // through another's registration.
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['keydown', true], ['click', true]])
     assert.deepEqual(removed, [])
     // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
@@ -1420,6 +1422,7 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
       { type: 'click', listener: listeners[3].listener },
       { type: 'contextmenu', listener: listeners[4].listener },
       { type: 'keydown', listener: listeners[5].listener },
+      { type: 'click', listener: listeners[6].listener },
     ])
   } finally {
     delete globalThis.document
@@ -2583,6 +2586,220 @@ test('a recalled message brings its picture back and names the files it cannot',
   files.state.messages = [{ seq: 4, text: '看文件', images: [], files: [{ name: 'a.pdf' }] }]
   files.seat.handle(arrowPress('ArrowUp'))
   assert.equal(files.state.draft, '看文件\n[附件：a.pdf]')
+})
+
+// --- the Otty row inserted into the shipped "Open In…" menu -------------------
+
+/** A DOM node stub rich enough to assert the inserted menu row's shape. */
+function domNode({ tag = 'div', className = '', attrs = {}, children = [] } = {}) {
+  const element = {
+    nodeType: 1,
+    tagName: tag.toUpperCase(),
+    className,
+    children: [],
+    parentElement: null,
+    textContent: '',
+    type: '',
+    listeners: [],
+    removed: false,
+    getAttribute: (name) => (name in attrs ? attrs[name] : null),
+    setAttribute(name, value) { attrs[name] = String(value) },
+    addEventListener(type, listener) { element.listeners.push({ type, listener }) },
+    removeEventListener() {},
+    appendChild(child) { child.parentElement = element; element.children.push(child); return child },
+    remove() { element.removed = true },
+    querySelector() { return null },
+  }
+  for (const child of children) element.appendChild(child)
+  return element
+}
+
+/** One shipped directory menu: a viewport holding one templated app row. */
+function ottyMenuFixture() {
+  const icon = domNode({ tag: 'span', className: 'mi-icon' })
+  const text = domNode({ tag: 'span', className: 'mi-label' })
+  const template = domNode({ tag: 'button', className: 'mi-item', attrs: { role: 'menuitem' }, children: [icon, text] })
+  const wrap = domNode({ className: 'mi-wrap', children: [template] })
+  const viewport = domNode({ attrs: { role: 'presentation' }, children: [wrap] })
+  const menu = domNode({ attrs: { role: 'menu' }, children: [viewport] })
+  menu.querySelector = (selector) => {
+    if (selector === 'button[role="menuitem"]') return template
+    if (selector === '[role="presentation"]') return viewport
+    return null
+  }
+  return { menu, viewport, template }
+}
+
+test('readOttyEnabled defaults to on and is off only on an explicit false', async () => {
+  const { readOttyEnabled } = (await load()).internals
+  assert.equal(readOttyEnabled({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readOttyEnabled({ getSnapshot: () => ({ value: { otty: false } }) }), false)
+  assert.equal(readOttyEnabled({ getSnapshot: () => ({ value: { otty: true } }) }), true)
+  assert.equal(readOttyEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+test('the Otty row appears only when the Host reports Otty installed', async () => {
+  const { ottyMenuRow, appIconUrl, OTTY_APP_ID, APP_ICON_ROUTE } = (await load()).internals
+  const t = (key) => ({ 'app.otty': 'Otty' }[key] ?? key)
+  assert.equal(ottyMenuRow(null, t), null)
+  assert.equal(ottyMenuRow([], t), null)
+  assert.equal(ottyMenuRow([{ id: 'vscode', kind: 'ide' }], t), null)
+  assert.deepEqual(ottyMenuRow([{ id: 'otty', kind: 'terminal' }], t), { label: 'Otty', icon: APP_ICON_ROUTE + '/otty' })
+  // The one id the shipped icon route does not serve takes this bundle's route.
+  assert.equal(appIconUrl(OTTY_APP_ID), APP_ICON_ROUTE + '/otty')
+  assert.equal(appIconUrl('vscode'), '/open-in-app/icon/vscode')
+})
+
+test('only the conversation header\'s more button arms the Otty row', async () => {
+  const { isHeaderOpenInAppMore, HEADER_UTILITIES_SELECTOR } = (await load()).internals
+  const header = { nodeType: 1 }
+  const target = { nodeType: 1 }
+  const more = { nodeType: 1, contains: (node) => node === target }
+  const split = {
+    nodeType: 1,
+    closest: (selector) => (selector === HEADER_UTILITIES_SELECTOR ? header : null),
+    querySelector: (selector) => (selector === 'button[aria-haspopup="menu"]' ? more : null),
+  }
+  target.closest = (selector) => (selector === '[data-open-target="directory"]' ? split : null)
+  assert.equal(isHeaderOpenInAppMore(target), true)
+  // The Sidebar Files tab renders the same pill shape, but not inside the header slot.
+  const sidebarSplit = { ...split, closest: () => null }
+  const sidebarTarget = { nodeType: 1, closest: (selector) => (selector === '[data-open-target="directory"]' ? sidebarSplit : null) }
+  assert.equal(isHeaderOpenInAppMore(sidebarTarget), false)
+  // A press on the pill outside its chevron is not the more button.
+  const elsewhere = { nodeType: 1, closest: () => split }
+  more.contains = () => false
+  assert.equal(isHeaderOpenInAppMore(elsewhere), false)
+  assert.equal(isHeaderOpenInAppMore({ nodeType: 3 }), false)
+  assert.equal(isHeaderOpenInAppMore(null), false)
+})
+
+test('the Otty row is inserted into the shipped menu on the header press', async () => {
+  const { installOttyInjector, HEADER_UTILITIES_SELECTOR } = (await load()).internals
+  const { menu, viewport } = ottyMenuFixture()
+  let attached = false
+  const added = []
+  const removed = []
+  const document = {
+    body: {
+      contains: (node) => attached && node === menu,
+      querySelector: (selector) => (attached && selector === '[role="menu"]' ? menu : null),
+    },
+    createElement: (tag) => domNode({ tag }),
+    addEventListener: (type, listener, capture) => added.push({ type, listener, capture }),
+    removeEventListener: (type, listener, capture) => removed.push({ type, listener, capture }),
+  }
+  let onMutation = null
+  const picks = []
+  const closes = []
+  const cleanup = installOttyInjector({
+    document,
+    rowOf: () => ({ label: 'Otty', icon: '/flow/app-icon/otty' }),
+    onPick: () => picks.push('picked'),
+    close: () => closes.push('closed'),
+    observe: (_target, callback) => { onMutation = callback; return () => { onMutation = null } },
+  })
+  assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true]])
+
+  // A press anywhere else arms nothing: the menu that later appears stays untouched.
+  added[0].listener({ target: { nodeType: 1, closest: () => null } })
+  attached = true
+  onMutation()
+  assert.equal(viewport.children.length, 1)
+
+  // The header more-button arms the next menu.
+  const headerTarget = { nodeType: 1 }
+  const more = { nodeType: 1, contains: (node) => node === headerTarget }
+  const split = {
+    nodeType: 1,
+    closest: (selector) => (selector === HEADER_UTILITIES_SELECTOR ? {} : null),
+    querySelector: () => more,
+  }
+  headerTarget.closest = (selector) => (selector === '[data-open-target="directory"]' ? split : null)
+  added[0].listener({ target: headerTarget })
+  onMutation()
+  assert.equal(viewport.children.length, 2)
+  const inserted = viewport.children[1]
+  const button = inserted.children[0]
+  assert.equal(inserted.className, 'mi-wrap')
+  assert.equal(button.getAttribute('role'), 'menuitem')
+  assert.equal(button.className, 'mi-item')
+  assert.equal(button.children[0].className, 'mi-icon')
+  assert.equal(button.children[0].children[0].getAttribute('src'), '/flow/app-icon/otty')
+  assert.equal(button.children[1].className, 'mi-label')
+  assert.equal(button.children[1].textContent, 'Otty')
+  assert.equal(button.listeners.length, 1)
+  button.listeners[0].listener()
+  assert.deepEqual(picks, ['picked'])
+  assert.deepEqual(closes, ['closed'])
+
+  // Re-running the mutation does not add a second row.
+  onMutation()
+  assert.equal(viewport.children.length, 2)
+
+  cleanup()
+  assert.equal(removed.length, 1)
+  assert.equal(removed[0].type, 'click')
+  assert.equal(onMutation, null)
+  assert.equal(inserted.removed, true)
+})
+
+test('a late catalog answer still fills a menu that is already open', async () => {
+  const { installOttyInjector, HEADER_UTILITIES_SELECTOR } = (await load()).internals
+  const { menu, viewport } = ottyMenuFixture()
+  let attached = false
+  let ready = false
+  const document = {
+    body: {
+      contains: (node) => attached && node === menu,
+      querySelector: () => (attached ? menu : null),
+    },
+    createElement: (tag) => domNode({ tag }),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+  let onMutation = null
+  const listener = (() => {
+    // The installer adds its press listener through document.addEventListener; keep it.
+    let captured = null
+    document.addEventListener = (type, fn) => { captured = fn }
+    return () => captured
+  })()
+  installOttyInjector({
+    document,
+    rowOf: () => (ready ? { label: 'Otty', icon: '/x' } : null),
+    onPick: () => {},
+    close: () => {},
+    prime: () => Promise.resolve().then(() => { ready = true }),
+    observe: (_target, callback) => { onMutation = callback; return () => {} },
+  })
+  const headerTarget = { nodeType: 1 }
+  const more = { nodeType: 1, contains: (node) => node === headerTarget }
+  const split = {
+    nodeType: 1,
+    closest: (selector) => (selector === HEADER_UTILITIES_SELECTOR ? {} : null),
+    querySelector: () => more,
+  }
+  headerTarget.closest = (selector) => (selector === '[data-open-target="directory"]' ? split : null)
+  listener()({ target: headerTarget })
+  attached = true
+  onMutation()
+  assert.equal(viewport.children.length, 1, 'nothing to insert until the catalog answers')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(viewport.children.length, 2)
+})
+
+test('the settings copy names the Otty row in both dictionaries', async () => {
+  const recorded = []
+  const module = await load()
+  module.apply(fakeContext([], [], { recorded }))
+  const flow = recorded.find((entry) => entry.ns === 'flow')
+  assert.equal(flow.zh['app.otty'], 'Otty')
+  assert.equal(flow.en['app.otty'], 'Otty')
+  assert.ok(flow.zh['section.otty.title'])
+  assert.ok(flow.en['section.otty.title'])
+  assert.ok(flow.zh['otty.failed'])
+  assert.ok(flow.en['otty.failed'])
 })
 
 

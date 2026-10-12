@@ -956,6 +956,23 @@ const WORKSPACE_NAME_SWITCH = '[role="dialog"] .flow-row:nth-child(8) [role="swi
 const WORKSPACE_NAME_PRESENT = `document.querySelector('[data-open-target="directory"] button[data-flow-workspace]') !== null`
 
 /**
+ * Read the rows of the portaled "Open In" menu, and locate the inserted Otty row.
+ *
+ * The row is only ever read here: activating it would open a real Otty window on
+ * the machine running this verification.
+ */
+const OTTY_MENU_PROBE = `(() => {
+  const menu = document.querySelector('body > [role="menu"]');
+  if (menu === null) return { open: false };
+  const rows = [...menu.querySelectorAll('button[role="menuitem"]')].map((button) => {
+    const img = button.querySelector('img');
+    return { label: (button.innerText || '').trim(), icon: img === null ? null : img.getAttribute('src') };
+  });
+  const otty = rows.find((row) => row.label === 'Otty') ?? null;
+  return { open: true, rows, otty, ottyIndex: rows.findIndex((row) => row.label === 'Otty') };
+})()`
+
+/**
  * Page-side predicate: a copy notice is on screen right now.
  *
  * The panel's own warnings use the same role, so the sentence is part of the
@@ -1746,8 +1763,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息', '在「打开」按钮里显示当前工作区名'])) {
-      pass('the 心流 page renders all eight preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息', '在「打开」按钮里显示当前工作区名', '在「打开」菜单里加入 Otty'])) {
+      pass('the 心流 page renders all nine preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }
@@ -2415,6 +2432,51 @@ async function main() {
           }
         }
         await shoot(cdp, sessionId, 'workspace-name-restored.png')
+      }
+    }
+
+    // ---- K. the Otty row rides inside the shipped "Open In" menu ----------
+    // The shipped app catalog is a compile-time whitelist with no registration
+    // seam, so this bundle inserts an Otty row into the portaled menu itself. The
+    // row is only read, never pressed: activating it would launch a real Otty.
+    {
+      const appsResponse = await fetch(config.url + '/flow/apps', { headers: { cookie: cookie.name + '=' + cookie.value } })
+      const appsPayload = appsResponse.ok ? await appsResponse.json().catch(() => null) : null
+      const apps = Array.isArray(appsPayload?.apps) ? appsPayload.apps : []
+      if (!apps.some((app) => app.id === 'otty')) {
+        skip('the Host does not offer Otty (not installed, or its Host half predates this row)')
+      } else {
+        const icon = await fetch(config.url + '/flow/app-icon/otty', { headers: { cookie: cookie.name + '=' + cookie.value } })
+        if (icon.status === 200 && String(icon.headers.get('content-type')).startsWith('image/png')) {
+          pass('the bundle icon route serves Otty as a PNG')
+        } else {
+          fail('the bundle icon route did not serve Otty: ' + icon.status + ' ' + icon.headers.get('content-type'))
+        }
+
+        const content = await openContentSession(cdp, sessionId)
+        if (!content.ok) console.log('  NOTE  no content Session opened; the Otty leg uses the Session already on screen')
+
+        await click(cdp, sessionId, '[data-open-target="directory"] button[aria-haspopup="menu"]')
+        try {
+          await waitFor(cdp, sessionId, 'document.querySelector(\'body > [role="menu"]\') !== null', 'the shipped Open In menu', 8000)
+        } catch {
+          fail('the header "Open In" menu did not open')
+        }
+        const menu = await evaluate(cdp, sessionId, OTTY_MENU_PROBE)
+        if (menu === null || menu.open !== true) {
+          fail('no portaled "Open In" menu to inspect: ' + JSON.stringify(menu))
+        } else if (menu.ottyIndex < 0) {
+          fail('the Otty row is missing from the shipped menu: ' + JSON.stringify(menu.rows.map((row) => row.label)))
+        } else if (menu.otty.icon !== '/flow/app-icon/otty') {
+          fail('the Otty row wears the wrong icon: ' + JSON.stringify(menu.otty.icon))
+        } else if (menu.ottyIndex !== menu.rows.length - 1) {
+          fail('the Otty row is not the last row: ' + JSON.stringify(menu.rows.map((row) => row.label)))
+        } else {
+          pass('the shipped "Open In" menu grows one last Otty row, icon /flow/app-icon/otty')
+        }
+        await shoot(cdp, sessionId, 'otty-menu.png')
+        await pressEscape(cdp, sessionId)
+        if (await settleMenus(cdp, sessionId, 0) === 0) pass('Escape closes the extended menu')
       }
     }
   } finally {
