@@ -2432,6 +2432,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether one Host path is absolute, in any shape the platforms use.
+     *
+     * The changed-files card resolves its paths against the Session workspace,
+     * so they are absolute in practice. The copy row is the one row whose label
+     * promises an absolute path, so it is only offered for one: a POSIX
+     * `/…`, a Windows drive (`C:\…` or `C:/…`) or a UNC share (`\\server\…`).
+     *
+     * @param path - the path the card recorded.
+     * @returns whether it is absolute.
+     */
+    function isAbsoluteHostPath(path) {
+      if (typeof path !== 'string') return false
+      const value = path.trim()
+      if (value === '') return false
+      if (value.startsWith('/')) return true
+      if (value.startsWith('\\\\')) return true
+      return /^[A-Za-z]:[\\/]/.test(value)
+    }
+
+    /**
      * Capture-phase `contextmenu` handler for the changed-file rows.
      *
      * Same rule as the inline-code menu: the press is taken away from the
@@ -2503,6 +2523,42 @@ window.__ModuleLoader__.load({
         input.notify(input.t(failureKey), 'warning')
         return false
       })
+    }
+
+    /**
+     * Copy one changed file's absolute path and report the outcome.
+     *
+     * Same contract as copying a Session id or an inline code: the clipboard is
+     * asked first and the notice repeats its verdict, so a refused write reads
+     * as a refusal instead of as a copy that appeared to work. Nothing leaves
+     * the page — the path the card handed over is written verbatim.
+     *
+     * @param input.path - the absolute Host path the card recorded.
+     * @param input.write - the clipboard write, answering whether it was accepted.
+     * @param input.notify - raise a notice.
+     * @param input.t - the plugin's localized copy.
+     * @returns whether the clipboard accepted the write.
+     */
+    function copyChangedFilePath(input) {
+      const path = typeof input?.path === 'string' ? input.path.trim() : ''
+      const refuse = () => {
+        input.notify(input.t('changesFile.copyFailed'), 'warning')
+        return false
+      }
+      if (path === '' || typeof input.write !== 'function') return Promise.resolve(refuse())
+      return Promise.resolve()
+        .then(() => input.write(path))
+        .then(
+          (accepted) => {
+            const copied = accepted === true
+            input.notify(
+              copied ? input.t('changesFile.copied') : input.t('changesFile.copyFailed'),
+              copied ? 'success' : 'warning',
+            )
+            return copied
+          },
+          refuse,
+        )
     }
 
     /**
@@ -2666,7 +2722,10 @@ window.__ModuleLoader__.load({
      * menu that opens before the catalog lands is never empty. The application
      * rows are the IDEs the Host has installed — the caller filters the catalog
      * by kind before filling the seat — and they sit between the two anchors, so
-     * the first row never moves under the pointer as they arrive.
+     * neither the first row nor the copy row ever moves under the pointer as
+     * they arrive. Copying the absolute path is the one row that never hands
+     * anything to the Host, and it is offered only for a path that really is
+     * absolute.
      *
      * @param menu - the changed-file store's snapshot, or null.
      * @returns `[{key, kind, labelKey?, app?}]`.
@@ -2677,6 +2736,9 @@ window.__ModuleLoader__.load({
       const rows = [{ key: 'open', kind: 'open', labelKey: 'changesFile.open' }]
       for (const app of apps) rows.push({ key: 'app:' + app.id, kind: 'app', app })
       rows.push({ key: 'reveal', kind: 'reveal', labelKey: 'changesFile.reveal' })
+      if (isAbsoluteHostPath(menu.path)) {
+        rows.push({ key: 'copy-path', kind: 'copy-path', labelKey: 'changesFile.copyPath' })
+      }
       return rows
     }
 
@@ -3019,6 +3081,9 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'app.otty': 'Otty',
       'changesFile.open': '用默认应用打开',
       'changesFile.reveal': '在文件管理器中显示',
+      'changesFile.copyPath': '复制绝对路径',
+      'changesFile.copied': '已复制绝对路径',
+      'changesFile.copyFailed': '复制失败，剪贴板不可用',
       'changesFile.failed': '无法用默认应用打开这个文件',
       'changesFile.revealFailed': '无法在文件管理器中显示这个文件',
       'linkMissing.notice': '找不到这个路径',
@@ -3033,7 +3098,7 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'section.codeMenu.title': '行内代码右键菜单',
       'section.codeMenu.description': '在对话正文的行内代码上点右键，弹出「打开 / 复制」菜单：复制把代码原文写进剪贴板；打开对 ~/… 家目录路径会先展开、再由插件在侧栏打开（壳自己解析不了），其余仍走壳自己的链路。单击一条指向不存在路径的行内代码会换成一条非阻塞提示；关闭后右键与这条接管都不注册。',
       'section.changesFile.title': '改动文件右键菜单',
-      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开」；下面是你装的 IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标），最后是「在文件管理器中显示」。都交给本插件的宿主路由 POST /flow/open-with 执行，关闭后不注册这个右键菜单。',
+      'section.changesFile.description': '在「已编辑 N 个文件」卡片的文件行上点右键，弹出「用默认应用打开」；下面是你装的 IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标），然后是「在文件管理器中显示」，最后是「复制绝对路径」。前几项交给本插件的宿主路由 POST /flow/open-with 执行；复制只在页面里写剪贴板，不发请求。关闭后不注册这个右键菜单。',
       'section.sendKey.title': '⌘+Enter 发送',
       'section.sendKey.description': '打开后：⌘+Enter（Windows/Linux 为 Ctrl+Enter）发送，Enter 换行，⇧+Enter 仍是换行；⇧⌘+Enter 保留官方的另一种发送方式。关闭后回到官方行为——Enter 发送，⌘+Enter 走另一种发送方式。',
       'history.file': '[附件：{name}]',
@@ -3100,6 +3165,9 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'app.otty': 'Otty',
       'changesFile.open': 'Open in Default App',
       'changesFile.reveal': 'Show in File Manager',
+      'changesFile.copyPath': 'Copy Absolute Path',
+      'changesFile.copied': 'Absolute path copied',
+      'changesFile.copyFailed': 'Copy failed: the clipboard rejected the write',
       'changesFile.failed': 'Could not open this file in the default application',
       'changesFile.revealFailed': 'Could not show this file in the file manager',
       'linkMissing.notice': 'No such path',
@@ -3114,7 +3182,7 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'section.codeMenu.title': 'Inline code right-click menu',
       'section.codeMenu.description': 'Right-clicking inline code in a conversation opens an “Open / Copy” menu: Copy puts the code’s text on the clipboard, and Open expands a ~/… home path and opens it in the Sidebar itself — the shell cannot resolve that one; everything else keeps the shell’s own path. Left-clicking code whose path does not exist becomes a non-blocking notice instead; switching this off registers neither.',
       'section.changesFile.title': 'Changed-file right-click menu',
-      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App”, then the IDEs you have installed (VS Code, Zed, Xcode, IntelliJ IDEA…, with their icons), and finally “Show in File Manager”. All of them run through this plugin’s own POST /flow/open-with host route; switching this off registers no such menu.',
+      'section.changesFile.description': 'Right-clicking a file row on the edited-files card opens “Open in Default App”, then the IDEs you have installed (VS Code, Zed, Xcode, IntelliJ IDEA…, with their icons), then “Show in File Manager”, and finally “Copy Absolute Path”. The opening rows run through this plugin’s own POST /flow/open-with host route; copying only writes the clipboard in the page and sends no request. Switching this off registers no such menu.',
       'section.sendKey.title': '⌘+Enter to send',
       'section.sendKey.description': 'On: ⌘+Enter (Ctrl+Enter on Windows/Linux) sends, Enter starts a new line, ⇧+Enter still breaks the line, and ⇧⌘+Enter keeps the shell’s complementary delivery. Off: the shell’s own pair — Enter sends and ⌘+Enter uses the complementary delivery.',
       'history.file': '[attachment: {name}]',
@@ -3517,6 +3585,12 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         // Closing first keeps the menu's own dismissal out of the way of
         // whatever this is about to open.
         store.close()
+        if (row.kind === 'copy-path') {
+          // Copying never leaves the page: the clipboard is asked directly and
+          // the notice repeats its verdict.
+          copyChangedFilePath({ path, write: props.write, notify: props.notify, t })
+          return
+        }
         if (row.kind === 'app') {
           props.openFile({ path, app: row.app.id })
           return
@@ -4415,6 +4489,7 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           inject: () => ({
             store: changesMenu,
             config,
+            write: writeClipboard,
             notify,
             useLocaleRevision,
             openFile: (hit) => {
@@ -4530,6 +4605,8 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         HEADER_UTILITIES_SELECTOR,
         applicationsForKind,
         changesFileRows,
+        copyChangedFilePath,
+        isAbsoluteHostPath,
         openChangedFile,
         openWithPath,
         isPlainLeftPress,

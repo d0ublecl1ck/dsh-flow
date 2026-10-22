@@ -2045,23 +2045,25 @@ async function main() {
       // settled. A machine with no IDE legitimately stays on the shipped pair.
       await sleep(1500)
       const probe = await evaluate(cdp, sessionId, CHANGED_FILES_PROBE)
-      const shipped = ['用默认应用打开', '在文件管理器中显示']
+      const shipped = ['用默认应用打开', '在文件管理器中显示', '复制绝对路径']
       const editorLabels = /^(VS Code( Insiders)?|Cursor|Windsurf|Zed|Sublime Text|Xcode|Android Studio|IntelliJ IDEA|PyCharm|WebStorm|PhpStorm|GoLand|Rider|RustRover)$/
       const editors = probe.items.filter((label) => editorLabels.test(label))
       const unknown = probe.items.filter((label) => !shipped.includes(label) && !editorLabels.test(label))
       const rawBundle = probe.items.filter((label) => label.includes('.app'))
       if (pressed === null) {
         fail('nothing pressable on the changed-files card: ' + JSON.stringify(probe))
-      } else if (menus !== 1 || probe.items.length < 2) {
+      } else if (menus !== 1 || probe.items.length < 3) {
         fail('no changed-file menu after a right-click: ' + JSON.stringify({ items: probe.items, menus: probe.menus }))
       } else if (unknown.length > 0 || rawBundle.length > 0) {
-        fail('the changed-file menu listed something that is neither the shipped pair nor an installed IDE: ' + JSON.stringify({ unknown, rawBundle, items: probe.items }))
-      } else if (probe.items[probe.items.length - 1] !== '在文件管理器中显示') {
-        fail('显示文件位置 is not the last row of the changed-file menu: ' + JSON.stringify(probe.items))
+        fail('the changed-file menu listed something that is neither the shipped rows nor an installed IDE: ' + JSON.stringify({ unknown, rawBundle, items: probe.items }))
+      } else if (probe.items[probe.items.length - 1] !== '复制绝对路径') {
+        fail('复制绝对路径 is not the last row of the changed-file menu: ' + JSON.stringify(probe.items))
+      } else if (probe.items[probe.items.length - 2] !== '在文件管理器中显示') {
+        fail('显示文件位置 is not the second-to-last row of the changed-file menu: ' + JSON.stringify(probe.items))
       } else if (probe.items[0] !== '用默认应用打开') {
         fail('the changed-file menu does not lead with the default action: ' + JSON.stringify(probe.items))
       } else {
-        pass('right-clicking a changed file opens the default action' + (editors.length === 0 ? ' (no IDE is installed)' : ' plus ' + editors.join('、')) + ' then 在文件管理器中显示')
+        pass('right-clicking a changed file opens the default action' + (editors.length === 0 ? ' (no IDE is installed)' : ' plus ' + editors.join('、')) + ', then 在文件管理器中显示 and 复制绝对路径')
       }
       // The path the live card handed over is the contract unit tests cannot
       // reach: it comes from the shipped `aria-describedby` element, and a
@@ -2077,8 +2079,9 @@ async function main() {
       const closed = await settleMenus(cdp, sessionId, 0)
       if (closed === 0) pass('Escape closes the changed-file menu')
       else fail('Escape did not close the changed-file menu')
-      // No row is chosen on purpose: every one launches a real application on the
-      // human's desktop. The request each row sends is pinned by unit tests.
+      // No row is chosen on purpose: the opening rows launch a real application on
+      // the human's desktop. The request each row sends, and the exact text the
+      // copy row writes, are pinned by unit tests.
     }
 
     // The lookup above opened another Session — or tried several and found none

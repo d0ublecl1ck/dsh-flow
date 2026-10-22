@@ -68,18 +68,19 @@ DSH Desktop 的 Electron 壳把 `http://localhost`／`http://127.0.0.1` 当自�
 - **「这段 code 其实是链接」只有一个判定点：`inlineCodeLink()`。** 壳从两个方向把链接送进行内代码：① markdown 链接的文字是行内代码（`<a href><code>…</code></a>`，锚点是 `code` 的祖先）；② 壳把行内代码里的 URL 解析成了链接（`<code><a href>…</a></code>`，锚点是 `code` 的后代，URL 前面那颗地球图标就是它，来源是壳渲染器 `inlineCode` 分支里的 `Ab(s)`）。只写 `closest('a[href]')` 会漏掉②，症状是**点一下既在外链那侧打开、又被当成路径复制并弹出「已复制行内代码」**（2026-10-08 实拉复现）。以后壳再换渲染形状（`role="link"`、新的包裹层……）就在 `inlineCodeLink()` 里补，不要散到 `codeMenuTarget()` / `codeOpenTarget()` 的调用点。
 - 收窄：必须落在 `[class*="_markdown_"]` 祖先里。实拉运行中的实例，正文里的行内代码是 `code < li < ol < div._markdown_1ypvv_5 < div.hWmORq_body < …`；`_markdown_` 是 CSS module 的 local name（哈希会变），与本仓库既有的 `[class*="listArea"]` / `[class*="sectionHeader"]` 是同一类依赖，也让工具卡、设置页、别的插件面板里的 `code` 不被误接管。**不要**改去写 `hWmORq_root` 之类的会话容器选择器 —— 那是构建哈希。
 - 症状：官方改动 `code` 的渲染形状（例如把 `code > button` 换成 `code` 自身带 `onClick`）时本功能不报错，只会「右键菜单在、打开没反应」。改完跑 `npm run verify:browser`：它**自己植入**一个「壳接了线的 `button` + 含空格（非路径）文本」的行内代码，断言菜单给出「打开 / 复制」这对，并断言「打开」派发的合成 click 正好落在那个 `BUTTON` 上。**不要拿普通 `code` 去测这一条**：那种 code 现在只有「复制」（打不开就不给打开按钮），菜单里根本没有「打开」行。
-## 「已编辑 N 个文件」卡片的右键菜单（用默认应用打开 / 显示位置）
+## 「已编辑 N 个文件」卡片的右键菜单（用默认应用打开 / 显示位置 / 复制绝对路径）
 
-已完成轮次末尾的改动文件卡片（官方 `dsh-client-ui-deliverables`，0.2.0-rc.2 起标题是「已编辑 N 个文件」）里，每个文件行右键浮出一个菜单：第一行 `用默认应用打开`，随后是**本机装了的** IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标），最后一行 `在文件管理器中显示`。这条链路整个交给宿主，本插件不自己 spawn：
+已完成轮次末尾的改动文件卡片（官方 `dsh-client-ui-deliverables`，0.2.0-rc.2 起标题是「已编辑 N 个文件」）里，每个文件行右键浮出一个菜单：第一行 `用默认应用打开`，随后是**本机装了的** IDE（VS Code、Zed、Xcode、IntelliJ IDEA 等，带图标），然后是 `在文件管理器中显示`，最后一行 `复制绝对路径`。打开与显示这两类交给宿主，复制只在页面里写剪贴板——本插件不自己 spawn：
 
 - **路径来自卡片自己的无障碍描述，不是本插件解析出来的**：卡片把每个文件渲染成 `button[aria-describedby="<id>"]`（单文件形态的标题按钮同形），那个 id 指向的隐藏元素里是卡片自己算好的 Host 路径。`changedFileTarget()` 取 `button[aria-describedby]` → `ownerDocument.getElementById(id)` 的 `textContent`；取不到 id、取不到元素、或文本为空就整条放弃，绝不猜路径。
 - **正向范围是卡片根**：`element.closest('[data-changed-files]')` 必须非空；同一形状的 button 在别的面板里不动。
 - **执行走本插件的宿主路由**：`openChangedFile()` 把 `{app, path}` POST 给 `/flow/open-with`；默认动作传 `app: 'default'`、显示位置传 `app: 'reveal'`、选了某个 IDE 传它的 catalog id。宿主重新校验路径存在，并且**文件只接受 `kind === 'ide'`**，所以这里不查「系统为这个文件注册了谁」，只列本机装了哪些 IDE——写死别名、或列一个本来打不开文件的终端，都会在宿主那侧被拒。路由答 `{ok:true}`（200）或错误码（400/403/404/502），`response.ok === false`、抛错、没有 fetch 三种情形给同一条提示，绝不当成功。
-- **IDE 行来自同一份 catalog**：右键时调 `GET /flow/apps`（返回 `{apps:[{id,name,kind}]}`，kind ∈ `ide`/`terminal`/`files`），`applicationsForKind()` 只留 `kind === 'ide'` 的行；`changesMenu.mark(seq, patch)` 只打在同一个 seq 上，所以晚到的答案不会改到另一个菜单。菜单按下即出（默认行 + 显示位置行），IDE 行随后 `mark` 补上，第一行不会在指下移动。
+- **IDE 行来自同一份 catalog**：右键时调 `GET /flow/apps`（返回 `{apps:[{id,name,kind}]}`，kind ∈ `ide`/`terminal`/`files`），`applicationsForKind()` 只留 `kind === 'ide'` 的行；`changesMenu.mark(seq, patch)` 只打在同一个 seq 上，所以晚到的答案不会改到另一个菜单。菜单按下即出（默认行 + 显示位置行 + 复制行），IDE 行随后 `mark` 补上，首行与末行都不会在指下移动。
+- **复制绝对路径只写剪贴板，不发请求**：`copyChangedFilePath()` 把卡片给的路径原样交给 `writeClipboard`，成功与失败都由同一个提示座位说话（拒绝与抛错都读作同一条失败提示，绝不当成功）。`isAbsoluteHostPath()` 只让真正绝对的路径长出这一行——`/…`、`C:\…`/`C:/…`、`\\server\…`；标签承诺「绝对」，就只给绝对。
 - **catalog 一页只问一次**：`createAppsLookup()` 记住第一次成功的答案，两个菜单与 `~/…` 目录共用；**失败不缓存**（宿主重启后下一次照问）。图标沿用 `GET /open-in-app/icon/<id>`，未知 id 404 时 `<img>` 自己 `onError` 隐藏。
 - **监听只在偏好打开时存在**（与行内代码菜单同一范式）：`readChangesFileOpen` 翻到 false 就 detach，并顺手关掉可能还开着的菜单。`tests/client.test.mjs` 钉住「关闭时不注册 `contextmenu` 监听」「开启时只加这一条」。
 - **`shell.overlay` 上是本插件的第三个 cell**：id 用 `flow.changes-menu`，与 `flow`（复制提示）、`flow.code-menu` 各自独立；复用 id 会顶掉那个 cell 的内容。
-- **验收不按菜单项**：每一行都会在真人桌面上真的拉起应用，`scripts/verify-browser.mjs` 的 H 段只断言「右键浮出菜单、第一行是 `用默认应用打开`、行文案只可能是这两行或装了的 IDE（不含 `.app` 原名）、`在文件管理器中显示` 在最后、菜单锚点上带的路径等于卡片描述的路径、Esc 能关」，不点任何一行；请求载荷由单测钉住。
+- **验收不按菜单项**：打开类每一行都会在真人桌面上真的拉起应用，`scripts/verify-browser.mjs` 的 H 段只断言「右键浮出菜单、第一行是 `用默认应用打开`、行文案只可能是这三行或装了的 IDE（不含 `.app` 原名）、`在文件管理器中显示` 在倒数第二、`复制绝对路径` 在最后、菜单锚点上带的路径等于卡片描述的路径、Esc 能关」，不点任何一行；请求载荷与复制写入的文本由单测钉住。
 
 ## 发送键对调（为什么是「换手势」而不是「改快捷键」）
 

@@ -998,6 +998,9 @@ test('both dictionaries stay complete, copy included', async () => {
     'section.sendKey.description',
     'changesFile.open',
     'changesFile.reveal',
+    'changesFile.copyPath',
+    'changesFile.copied',
+    'changesFile.copyFailed',
     'changesFile.failed',
     'changesFile.revealFailed',
     'section.changesFile.title',
@@ -1017,6 +1020,9 @@ test('both dictionaries stay complete, copy included', async () => {
   assert.equal(flow.zh['codeMenu.done'], '已复制行内代码')
   assert.equal(flow.zh['changesFile.open'], '用默认应用打开')
   assert.equal(flow.zh['changesFile.reveal'], '在文件管理器中显示')
+  assert.equal(flow.zh['changesFile.copyPath'], '复制绝对路径')
+  assert.equal(flow.zh['changesFile.copied'], '已复制绝对路径')
+  assert.equal(flow.zh['changesFile.copyFailed'], '复制失败，剪贴板不可用')
   assert.equal(flow.zh['changesFile.failed'], '无法用默认应用打开这个文件')
   assert.equal(flow.zh['changesFile.revealFailed'], '无法在文件管理器中显示这个文件')
 })
@@ -2342,22 +2348,65 @@ test('the changed-file menu is handed an opener beside its store', async () => {
   const menu = registrations.find((entry) => entry.name === 'shell.overlay' && entry.id === 'flow.changes-menu')
   assert.ok(menu, 'the changed-file menu owns its own overlay cell')
   assert.equal(typeof menu.inject().openFile, 'function')
+  // Copying a path never leaves the page, so the cell is handed the clipboard
+  // writer rather than an opener.
+  assert.equal(typeof menu.inject().write, 'function')
 })
 
 
-test('changesFileRows lead with the default action, then the catalog IDEs, and end on reveal', async () => {
+test('changesFileRows lead with the default action, then the catalog IDEs, and end on reveal then copy', async () => {
   const { changesFileRows } = (await load()).internals
   const element = { nodeType: 1 }
   const vscode = { key: 'vscode', id: 'vscode', label: 'VS Code', kind: 'ide', icon: '/open-in-app/icon/vscode' }
   const zed = { key: 'zed', id: 'zed', label: 'Zed', kind: 'ide', icon: '/open-in-app/icon/zed' }
 
-  // The catalog has not landed yet: the shipped pair, so the menu is never empty.
-  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [] }).map((row) => row.kind), ['open', 'reveal'])
+  // The catalog has not landed yet: the shipped pair plus copy, so the menu is
+  // never empty and the copy row never moves when the IDEs arrive.
+  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [] }).map((row) => row.kind), ['open', 'reveal', 'copy-path'])
   // The default action stays first and generic — it no longer marks one IDE, so
   // every installed IDE gets its own row behind it.
-  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [vscode, zed] }).map((row) => row.kind), ['open', 'app', 'app', 'reveal'])
-  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [vscode, zed] }).map((row) => row.key), ['open', 'app:vscode', 'app:zed', 'reveal'])
+  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [vscode, zed] }).map((row) => row.kind), ['open', 'app', 'app', 'reveal', 'copy-path'])
+  assert.deepEqual(changesFileRows({ path: '/a.ts', element, apps: [vscode, zed] }).map((row) => row.key), ['open', 'app:vscode', 'app:zed', 'reveal', 'copy-path'])
   assert.deepEqual(changesFileRows(null).map((row) => row.kind), [])
+})
+
+test('the copy row only appears for a path that really is absolute', async () => {
+  const { changesFileRows, isAbsoluteHostPath } = (await load()).internals
+  const element = { nodeType: 1 }
+  for (const path of ['/a/b.ts', 'C:\\a\\b.ts', 'C:/a/b.ts', '\\\\server\\share\\a.ts']) {
+    assert.equal(isAbsoluteHostPath(path), true, path)
+    assert.deepEqual(changesFileRows({ path, element, apps: [] }).map((row) => row.kind), ['open', 'reveal', 'copy-path'], path)
+  }
+  for (const path of ['a/b.ts', '~/.codex/AGENTS.md', '', '   ', null, undefined, 7]) {
+    assert.equal(isAbsoluteHostPath(path), false, String(path))
+    assert.deepEqual(changesFileRows({ path, element, apps: [] }).map((row) => row.kind), ['open', 'reveal'], String(path))
+  }
+})
+
+test('copyChangedFilePath copies the exact Host path and repeats the verdict', async () => {
+  const { copyChangedFilePath } = (await load()).internals
+  const seen = []
+  const notify = (text, tone) => seen.push([text, tone])
+  const t = (key) => ({
+    'changesFile.copied': '已复制绝对路径',
+    'changesFile.copyFailed': '复制失败，剪贴板不可用',
+  }[key])
+  const written = []
+  const write = (text) => { written.push(text); return Promise.resolve(true) }
+
+  assert.equal(await copyChangedFilePath({ path: '/Users/a/b.ts', write, notify, t }), true)
+  assert.deepEqual(written, ['/Users/a/b.ts'], 'the path is copied verbatim')
+  assert.deepEqual(seen, [['已复制绝对路径', 'success']])
+
+  // A refused write, a rejection and a missing path all read as the same spoken
+  // refusal — a press never looks like it worked when it did not.
+  assert.equal(await copyChangedFilePath({ path: '/Users/a/b.ts', write: () => Promise.resolve(false), notify, t }), false)
+  assert.deepEqual(seen[1], ['复制失败，剪贴板不可用', 'warning'])
+  assert.equal(await copyChangedFilePath({ path: '/Users/a/b.ts', write: () => Promise.reject(new Error('nope')), notify, t }), false)
+  assert.deepEqual(seen[2], ['复制失败，剪贴板不可用', 'warning'])
+  assert.equal(await copyChangedFilePath({ path: '   ', write, notify, t }), false)
+  assert.deepEqual(seen[3], ['复制失败，剪贴板不可用', 'warning'])
+  assert.equal(written.length, 1, 'nothing is written for an empty path')
 })
 
 
