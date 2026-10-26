@@ -1763,8 +1763,8 @@ async function main() {
 
     // ---- E. the 心流 switch owns the copy feature -----------------------
     copy = await evaluate(cdp, sessionId, COPY_PROBE)
-    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息', '在「打开」按钮里显示当前工作区名', '在「打开」菜单里加入 Otty'])) {
-      pass('the 心流 page renders all nine preference rows')
+    if (JSON.stringify(copy.sectionTitles) === JSON.stringify(['定位当前会话按钮', '复制会话 ID', '在系统默认程序中打开链接', '行内代码右键菜单', '改动文件右键菜单', '⌘+Enter 发送', '↑↓ 切换发过的消息', '在「打开」按钮里显示当前工作区名', '在「打开」菜单里加入 Otty', '右栏页签操作'])) {
+      pass('the 心流 page renders all ten preference rows')
     } else {
       fail('unexpected settings rows: ' + JSON.stringify(copy.sectionTitles))
     }

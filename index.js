@@ -5,7 +5,7 @@
  *
  *  - the plugin's preference surface. `locateButton`, `copySessionId`,
  *    `externalLink`, `codeMenu`, `changesFileOpen`, `composerHistory`,
- *    `modEnterSend`, `workspaceName` and `otty` are volatile Config fields,
+ *    `modEnterSend`, `workspaceName`, `otty` and `tabActions` are volatile Config fields,
  *    which is what makes the settings provider project them into the namespace
  *    named by this row's id (`flow`); the browser half reads and writes that
  *    namespace through `ctx.configForms`.
@@ -52,6 +52,7 @@ export const name = 'flow'
  * @property {boolean} modEnterSend - whether Cmd/Ctrl+Enter sends and a plain Enter inserts a newline, instead of the shipped Enter-sends pair.
  * @property {boolean} workspaceName - whether the shipped "Open In…" split button carries the current Workspace's name beside its icon.
  * @property {boolean} otty - whether the header's "Open In…" menu grows an Otty row that opens the current workspace directory.
+ * @property {boolean} tabActions - whether a right-sidebar tab closes on a middle click and its context menu grows the pane-level close actions.
  */
 export const Config = z.object({
   locateButton: z.boolean().default(true).volatile(),
@@ -63,6 +64,7 @@ export const Config = z.object({
   modEnterSend: z.boolean().default(false).volatile(),
   workspaceName: z.boolean().default(true).volatile(),
   otty: z.boolean().default(true).volatile(),
+  tabActions: z.boolean().default(true).volatile(),
 })
 
 /** Exact route the browser half posts an off-origin link to. */

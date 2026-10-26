@@ -90,11 +90,19 @@ test('the send-key switch starts on the shell behaviour, and is volatile too', (
 })
 
 test('the toggles are volatile, which is what the settings form projects', () => {
-  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend', 'workspaceName', 'otty']) {
+  for (const name of ['locateButton', 'copySessionId', 'externalLink', 'codeMenu', 'changesFileOpen', 'modEnterSend', 'workspaceName', 'otty', 'tabActions']) {
     const field = Config.dict[name]
     assert.equal(field.meta.volatile, true, name)
     assert.equal(field.type, 'boolean', name)
   }
+})
+
+test('the tab-actions switch defaults to on, and is volatile too', () => {
+  assert.equal(z.resolve({}, Config)[0].tabActions.get(), true)
+  assert.equal(z.resolve({ tabActions: false }, Config)[0].tabActions.get(), false)
+  const field = Config.dict.tabActions
+  assert.equal(field.meta.volatile, true)
+  assert.equal(field.type, 'boolean')
 })
 
 test('the workspace-name switch defaults to on, and is volatile too', () => {

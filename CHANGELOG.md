@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 右侧栏页签支持**中键关闭**，右键菜单在官方「关闭」之下追加 **关闭其他页签 / 关闭左侧页签 / 关闭右侧页签 / 关闭全部页签**（默认开，设置 → **心流** → 「右栏页签操作」）。中键是一对文档级捕获监听（右栏作用域内记下起手的那颗页签，`auxclick` 才关，两半都 `preventDefault` 掉自动滚动）；右键四项走官方扩展席位 `sidebar.right.tab.menu.item`，用同款 `MenuItemButton`、第一项带分隔线。
+- 顺序从 DOM 读（同一 `[data-dockkit-strip]` 内 `[data-dockkit-tab]` 的先后），关闭只调 `ctx.sidebarRight.close(tabId)`：不读布局快照、不写 `localStorage`、不跨分栏；浮窗按自己的页签条算。只剩一个页签时只显示一条禁用提示，唯一引导页不受这套动作影响。
+- 单测 153 → 160：偏好默认值与不可读表单、四种动作的关闭集合与边界、四种位次的可用性、菜单行列表（含单页签提示）、中键只在起手的那颗页签上关一次、左键/别的表面/关掉开关三种放行、`apply` 新增的席位注册。
+- 新增可单测纯函数与出口：`tabOrderOf` / `tabElementById` / `tabClosePlan` / `tabActionState` / `tabMenuRows` / `installTabMiddleClick`；`Config` 增加第十个 volatile 字段 `tabActions`。
+- 文档同步：README 新增「右栏页签的中键与右键」并更新原则表（九落点）、触发方式、安全边界与已知限制；AGENTS 记录席位、DOM 契约、为什么读顺序与只走公开 close。
+
 - 「已编辑 N 个文件」卡片的右键菜单末尾新增 **复制绝对路径**：把卡片自己记下的 Host 路径原样写进剪贴板，成功弹「已复制绝对路径」，剪贴板拒绝或抛错弹「复制失败，剪贴板不可用」。这一行只在路径真的是绝对路径时出现（`/…`、`C:\…`/`C:/…`、`\\server\…`），且**不发任何请求**——其余行仍走 `POST /flow/open-with`。
 - 行序固定为「用默认应用打开 → 本机 IDE → 在文件管理器中显示 → 复制绝对路径」：catalog 晚到只往中间插，首行与末行都不会在指针下方移动。
 - 单测 151 → 153：复制行的位置与关键路径、非绝对路径不出这一行、`copyChangedFilePath()` 的成功/拒绝/抛错/空路径四种应答、overlay 注入的剪贴板写入、双语词典。

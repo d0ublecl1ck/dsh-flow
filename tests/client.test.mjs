@@ -818,13 +818,14 @@ test('the inline-code listeners exist only while the preference is on', async ()
   try {
     // The changed-file menu, the recalled messages and the Otty row are other
     // features' listeners; they are held off here so this assertion stays about
-    // the inline-code pair alone.
+    // the inline-code pair alone. The tab pair is unconditional by design (it
+    // reads its own preference per gesture), so it is always present.
     const form = fakeForm({ codeMenu: true, changesFileOpen: false, composerHistory: false, otty: false })
     module.apply(fakeContext([], [], { form }))
     // `click` first is the off-origin link hand-off and `pointermove` is that
-    // same feature's link cursor; the menu press and the path press are the two
-    // below them.
-    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true]])
+    // same feature's link cursor; the menu press and the path press follow, and
+    // the tab middle press/release close the list.
+    assert.deepEqual(added.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true], ['pointerdown', true], ['auxclick', true]])
     // The pointer cursor rides the same switch: code is only clickable while the
     // menu owns the press.
     assert.deepEqual([...cursor], ['data-flow-code-cursor=true'])
@@ -843,9 +844,9 @@ test('the inline-code listeners exist only while the preference is on', async ()
     // Turning it back on binds both again, and nothing else. The changed-file
     // menu keeps its own preference off throughout, so it never joins in.
     form.publish({ codeMenu: true, changesFileOpen: false, composerHistory: false, otty: false })
-    assert.deepEqual(added.map((entry) => entry.type), ['click', 'pointermove', 'contextmenu', 'click', 'contextmenu', 'click'])
-    assert.equal(added[4].capture, true)
-    assert.equal(added[5].capture, true)
+    assert.deepEqual(added.map((entry) => entry.type), ['click', 'pointermove', 'contextmenu', 'click', 'pointerdown', 'auxclick', 'contextmenu', 'click'])
+    assert.equal(added[6].capture, true)
+    assert.equal(added[7].capture, true)
     assert.deepEqual([...cursor], ['data-flow-code-cursor=true'])
   } finally {
     delete globalThis.document
@@ -1412,12 +1413,13 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
   try {
     const disposers = []
     module.apply(fakeContext([], [], { disposers }))
-    // Seven separate capture-phase listeners: the link hand-off, the plain-text
+    // Nine separate capture-phase listeners: the link hand-off, the plain-text
     // link cursor, the inline-code menu press, the inline-code path press, the
-    // changed-file menu press, the recalled-messages arrow press, and the Otty-row
-    // press that observes the header's "Open In…" more button. None can be reached
+    // changed-file menu press, the recalled-messages arrow press, the Otty-row
+    // press that observes the header's "Open In…" more button, and the
+    // right-sidebar tab's middle press plus its release. None can be reached
     // through another's registration.
-    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['keydown', true], ['click', true]])
+    assert.deepEqual(listeners.map((entry) => [entry.type, entry.capture]), [['click', true], ['pointermove', true], ['contextmenu', true], ['click', true], ['contextmenu', true], ['keydown', true], ['click', true], ['pointerdown', true], ['auxclick', true]])
     assert.deepEqual(removed, [])
     // Every listener is registered by an effect, so the fiber owns their lifetimes.
     for (const dispose of disposers) dispose()
@@ -1429,6 +1431,8 @@ test('apply listens for anchor clicks, inline-code context menus and path presse
       { type: 'contextmenu', listener: listeners[4].listener },
       { type: 'keydown', listener: listeners[5].listener },
       { type: 'click', listener: listeners[6].listener },
+      { type: 'pointerdown', listener: listeners[7].listener },
+      { type: 'auxclick', listener: listeners[8].listener },
     ])
   } finally {
     delete globalThis.document
@@ -2879,3 +2883,125 @@ test('the settings copy names the Otty row in both dictionaries', async () => {
 })
 
 
+
+
+// --- 右栏页签：中键关闭与右键菜单 -----------------------------------------
+
+/** One docked tab as the kit renders it: the strip owns the order. */
+function tabStub(id, { scoped = true, connected = true } = {}) {
+  const strip = { querySelectorAll: () => [] }
+  const node = {
+    nodeType: 1,
+    isConnected: connected,
+    getAttribute: (name) => (name === 'data-dockkit-tab' ? id : null),
+    closest: (selector) => {
+      if (selector === '[data-dockkit-tab]') return node
+      if (selector === '[data-sidebar-right-session]') return scoped ? {} : null
+      if (selector === '[data-dockkit-strip]') return strip
+      return null
+    },
+    contains: (target) => target === node,
+  }
+  return { node, strip }
+}
+
+test('the tab-actions preference defaults to on, and an unreadable form keeps it on', async () => {
+  const { readTabActionsEnabled } = (await load()).internals
+  assert.equal(readTabActionsEnabled({ getSnapshot: () => ({ value: {} }) }), true)
+  assert.equal(readTabActionsEnabled({ getSnapshot: () => ({ value: { tabActions: false } }) }), false)
+  assert.equal(readTabActionsEnabled({ getSnapshot: () => ({ value: { tabActions: true } }) }), true)
+  assert.equal(readTabActionsEnabled({ getSnapshot: () => { throw new Error('no host') } }), true)
+})
+
+test('one pane order yields the ids each action closes', async () => {
+  const { tabClosePlan, tabActionState } = (await load()).internals
+  const order = ['a', 'b', 'c']
+  assert.deepEqual(tabClosePlan(order, 'b', 'others'), ['a', 'c'])
+  assert.deepEqual(tabClosePlan(order, 'b', 'left'), ['a'])
+  assert.deepEqual(tabClosePlan(order, 'b', 'right'), ['c'])
+  assert.deepEqual(tabClosePlan(order, 'b', 'all'), ['a', 'b', 'c'])
+  assert.deepEqual(tabClosePlan(order, 'a', 'left'), [])
+  assert.deepEqual(tabClosePlan(order, 'c', 'right'), [])
+  assert.deepEqual(tabClosePlan([], 'x', 'all'), [])
+  assert.deepEqual(tabActionState(3, 0), { single: false, others: true, left: false, right: true, all: true })
+  assert.deepEqual(tabActionState(1, 0), { single: true, others: false, left: false, right: false, all: false })
+})
+
+test('the tab menu lists four actions, dropping the ones a position cannot reach', async () => {
+  const { tabMenuRows, tabActionState } = (await load()).internals
+  const t = (key) => key
+  const middle = tabMenuRows(tabActionState(3, 1), t)
+  assert.deepEqual(
+    middle.map((row) => row.label),
+    ['tabMenu.closeOthers', 'tabMenu.closeLeft', 'tabMenu.closeRight', 'tabMenu.closeAll'],
+  )
+  assert.deepEqual(middle.map((row) => row.disabled), [false, false, false, false])
+  const last = tabMenuRows(tabActionState(3, 2), t)
+  assert.equal(last[2].disabled, true, 'nothing sits to the right of the last tab')
+  const single = tabMenuRows(tabActionState(1, 0), t)
+  assert.equal(single.length, 1)
+  assert.equal(single[0].label, 'tabMenu.none')
+  assert.equal(single[0].disabled, true)
+})
+
+test('middle-click closes the tab it started on, once', async () => {
+  const { installTabMiddleClick } = (await load()).internals
+  const listeners = new Map()
+  const document = {
+    addEventListener: (type, listener) => { listeners.set(type, listener) },
+    removeEventListener: (type) => { listeners.delete(type) },
+  }
+  const closed = []
+  const detach = installTabMiddleClick({
+    document,
+    closeTab: (id) => closed.push(id),
+    isEnabled: () => true,
+  })
+  const tab = tabStub('t1')
+  const press = { button: 1, target: tab.node, preventDefault() {} }
+  listeners.get('pointerdown')(press)
+  listeners.get('auxclick')(press)
+  assert.deepEqual(closed, ['t1'])
+  // The press is consumed: a following middle click without its own down does nothing.
+  listeners.get('auxclick')(press)
+  assert.deepEqual(closed, ['t1'])
+  detach()
+  assert.equal(listeners.size, 0)
+})
+
+test('middle-click ignores a left press, another surface and a switched-off preference', async () => {
+  const { installTabMiddleClick } = (await load()).internals
+  const listeners = new Map()
+  const document = {
+    addEventListener: (type, listener) => { listeners.set(type, listener) },
+    removeEventListener: (type, listener) => { listeners.delete(type) },
+  }
+  const closed = []
+  let enabled = true
+  installTabMiddleClick({ document, closeTab: (id) => closed.push(id), isEnabled: () => enabled })
+  const tab = tabStub('t1')
+  // A left press is left to the kit (focus + activate).
+  listeners.get('pointerdown')({ button: 0, target: tab.node, preventDefault() {} })
+  listeners.get('auxclick')({ button: 1, target: tab.node, preventDefault() {} })
+  assert.deepEqual(closed, [])
+  // A tab outside the right sidebar is not ours.
+  const outside = tabStub('t2', { scoped: false })
+  listeners.get('pointerdown')({ button: 1, target: outside.node, preventDefault() {} })
+  listeners.get('auxclick')({ button: 1, target: outside.node, preventDefault() {} })
+  assert.deepEqual(closed, [])
+  // The preference is read per gesture.
+  enabled = false
+  listeners.get('pointerdown')({ button: 1, target: tab.node, preventDefault() {} })
+  listeners.get('auxclick')({ button: 1, target: tab.node, preventDefault() {} })
+  assert.deepEqual(closed, [])
+})
+
+test('apply adds one tab-menu cell to the right sidebar menu', async () => {
+  const module = await load()
+  const registrations = []
+  module.apply(fakeContext(registrations, []))
+  const cell = registrations.find((entry) => entry.name === 'sidebar.right.tab.menu.item')
+  assert.ok(cell, 'the tab menu gains a cell only while the plugin is mounted')
+  assert.equal(cell.id, 'flow.tab-menu')
+  assert.equal(cell.locale, 'flow')
+})

@@ -1,5 +1,6 @@
 # FREAK
 
+- [ ] **右栏页签动作还没进 `scripts/verify-browser.mjs`**（`2026-10-26`）：本轮由 7 条新单测 + 一次真浏览器手工探针覆盖；脚本缺固定段（开 3 个页签 → 右键断言四项 → 逐个动作 → 中键关一个），`assets/` 也还没有对应示意图。下次动这段前先补段补图，并把 E 段「心流页」行标题补成十行。
 `dsh-flow` 历次洁癖审查留下的待核查线索。只记「下次该优先看哪里」，权威结论在 `README.md` / `AGENTS.md`。
 
 - [ ] **DSH Desktop 上宿主半边不能在线重载**（`2026-10-12`，host 0.2.0-rc.2）：改 `index.js` 后，Remote `pluginManager/setBundleEnabled` 关→开、CLI `dsh plugin --profile web remove` + `add`、以及 remove+add 后再补一次 Remote 关→开，三种都试过 —— 组合确实重跑（路由 404 再 200），但重新 `import` 命中 Node ESM 的 `loadCache`，拿到的仍是旧模块。`dsh-hmr` 有能清 `loadCache` 的 `partialReload`，但它的 watcher 只覆盖 profile 目录内，`link:` 到仓库外的目标不在监听范围。唯一路径是**退出 DSH Desktop 再打开**。已写进 AGENTS「运行中的实例怎么认这份代码」。

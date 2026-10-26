@@ -149,6 +149,136 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The docked tab a press landed on, or null when the press is not ours.
+     *
+     * The right sidebar's tabs are the kit's (docked or floating); every other
+     * tab-like surface in the page — the bottom workbench of another plugin, a
+     * segmented control — must keep its own middle-click behaviour, so the scope
+     * check is part of the lookup rather than a later filter.
+     *
+     * @param target - the press's target.
+     * @returns the tab element, or null.
+     */
+    function sidebarTabOf(target) {
+      if (typeof target?.closest !== 'function') return null
+      const tab = target.closest('[' + TAB_ATTR + ']')
+      if (!isElement(tab) || typeof tab.closest !== 'function') return null
+      return tab.closest(TAB_SCOPE_SELECTOR) === null ? null : tab
+    }
+
+    /**
+     * The id the kit records on one docked tab.
+     * @param tab - one tab element.
+     * @returns the id, or null for an element that carries none.
+     */
+    function tabIdOf(tab) {
+      if (!isElement(tab) || typeof tab.getAttribute !== 'function') return null
+      const id = tab.getAttribute(TAB_ATTR)
+      return typeof id === 'string' && id !== '' ? id : null
+    }
+
+    /**
+     * Every tab id of one pane, in strip order.
+     *
+     * Order is the only thing the menu needs from the layout: the actions are
+     * all "close the ids before/after/around this one", and the kit's own
+     * close(tabId) is the only mutation, so no layout state is read or copied.
+     *
+     * @param tab - one docked tab.
+     * @returns the pane's tab ids, left to right.
+     */
+    function tabOrderOf(tab) {
+      if (!isElement(tab) || typeof tab.closest !== 'function') return []
+      const strip = tab.closest(TAB_STRIP_SELECTOR)
+      if (!isElement(strip) || typeof strip.querySelectorAll !== 'function') return []
+      return Array.from(strip.querySelectorAll('[' + TAB_ATTR + ']'))
+        .map((node) => tabIdOf(node))
+        .filter((id) => id !== null)
+    }
+
+    /**
+     * The docked tab with this id inside the right sidebar.
+     *
+     * The menu's owner props name the tab it was opened for; the element is what
+     * carries the pane's order. A tab that unmounted between the right-click and
+     * the render simply yields null, and the cell renders nothing.
+     *
+     * @param id - the tab id from the slot's owner props.
+     * @param doc - the page document.
+     * @returns the tab element, or null.
+     */
+    function tabElementById(id, doc) {
+      if (doc === null || doc === undefined || typeof doc.querySelectorAll !== 'function') return null
+      for (const tab of doc.querySelectorAll(TAB_SCOPE_SELECTOR + ' [' + TAB_ATTR + ']')) {
+        if (tabIdOf(tab) === id) return tab
+      }
+      return null
+    }
+
+    /**
+     * The ids one tab-menu action closes, scoped to the right-clicked tab's pane.
+     *
+     * The target itself is never part of "close others": the action means "keep
+     * this one". An unknown action, or an id no longer in the pane, closes nothing.
+     *
+     * @param order - the pane's tab ids, left to right.
+     * @param tabId - the right-clicked tab.
+     * @param action - others | left | right | all.
+     * @returns the ids to close, in strip order.
+     */
+    function tabClosePlan(order, tabId, action) {
+      const ids = Array.isArray(order) ? order : []
+      const index = ids.indexOf(tabId)
+      if (index < 0) return []
+      if (action === 'others') return ids.filter((id) => id !== tabId)
+      if (action === 'left') return ids.slice(0, index)
+      if (action === 'right') return ids.slice(index + 1)
+      if (action === 'all') return ids.slice()
+      return []
+    }
+
+    /**
+     * Which close actions a position inside one pane can reach.
+     *
+     * A lone tab has none: "close all" would be the kit's own close button again,
+     * and closing a lone guide tab records nothing (the kit protects it), so the
+     * menu says so instead of offering a no-op.
+     *
+     * @param count - tabs in the pane.
+     * @param index - the right-clicked tab's position.
+     * @returns one boolean per action, plus single.
+     */
+    function tabActionState(count, index) {
+      const total = Number.isInteger(count) && count > 0 ? count : 0
+      const at = Number.isInteger(index) ? index : -1
+      const single = total <= 1
+      return {
+        single,
+        others: !single,
+        left: !single && at > 0,
+        right: !single && at >= 0 && at < total - 1,
+        all: !single,
+      }
+    }
+
+    /**
+     * The rows the tab menu renders for one position.
+     * @param state - tabActionState(...).
+     * @param t - namespace-bound translate.
+     * @returns label + disabled rows, in menu order.
+     */
+    function tabMenuRows(state, t) {
+      if (state?.single === true) return [{ action: 'none', label: t('tabMenu.none'), disabled: true }]
+      const flags = state ?? {}
+      return [
+        { action: 'others', label: t('tabMenu.closeOthers'), disabled: flags.others !== true },
+        { action: 'left', label: t('tabMenu.closeLeft'), disabled: flags.left !== true },
+        { action: 'right', label: t('tabMenu.closeRight'), disabled: flags.right !== true },
+        { action: 'all', label: t('tabMenu.closeAll'), disabled: flags.all !== true },
+      ]
+    }
+
+    /**
      * Find the Session the conversation column currently shows.
      *
      * `retainedBy.mainView` is the shell's own signal for "the main column holds
@@ -523,6 +653,50 @@ window.__ModuleLoader__.load({
         if (timer !== null) { clearTimeout(timer); timer = null }
         if (row !== null && typeof row.remove === 'function' && row.parentElement !== null && row.parentElement !== undefined) row.remove()
         forget()
+      }
+    }
+
+    /**
+     * Middle-click closes a right-sidebar tab.
+     *
+     * The kit's tab listens for pointerdown and treats every button but the
+     * right one as focus, so this claims only the middle press: record the tab
+     * the press started on, then close it on the matching auxclick. A press that
+     * started elsewhere, a tab that unmounted between the two events, or a
+     * preference switched off in between closes nothing. preventDefault on both
+     * halves keeps the browser's autoscroll out of the gesture.
+     *
+     * @param input - the page document, the public close, and the live preference.
+     * @returns the disposer that removes both listeners.
+     */
+    function installTabMiddleClick({ document: doc, closeTab, isEnabled }) {
+      let pressed = null
+      const onPointerDown = (event) => {
+        if (event?.button !== 1) return
+        const tab = sidebarTabOf(event.target)
+        if (tab === null) return
+        const id = tabIdOf(tab)
+        if (id === null) return
+        pressed = { id, node: tab }
+        event.preventDefault?.()
+      }
+      const onAuxClick = (event) => {
+        if (event?.button !== 1) return
+        const started = pressed
+        pressed = null
+        if (started === null) return
+        if (started.node.isConnected !== true) return
+        if (typeof started.node.contains !== 'function' || !started.node.contains(event.target)) return
+        if (typeof isEnabled === 'function' && !isEnabled()) return
+        event.preventDefault?.()
+        closeTab(started.id)
+      }
+      doc.addEventListener('pointerdown', onPointerDown, true)
+      doc.addEventListener('auxclick', onAuxClick, true)
+      return () => {
+        doc.removeEventListener('pointerdown', onPointerDown, true)
+        doc.removeEventListener('auxclick', onAuxClick, true)
+        pressed = null
       }
     }
 
@@ -2689,6 +2863,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read the tab-actions preference off the plugin's config form.
+     *
+     * The default is on: the actions are additive (the kit's own Close row keeps
+     * its place) and the only gesture they take over is the middle click, which
+     * the kit never used. An unreadable form therefore keeps them.
+     *
+     * @param form - ctx.configForms.get('flow').
+     * @returns whether middle-click and the extra menu rows are active.
+     */
+    function readTabActionsEnabled(form) {
+      let value
+      try {
+        value = form.getSnapshot()?.value
+      } catch {
+        value = undefined
+      }
+      if (value === null || typeof value !== 'object') return true
+      return value.tabActions !== false
+    }
+
+    /**
      * The icon URL one catalog id's row wears.
      *
      * The shipped route serves the shipped catalog; this bundle's own route serves
@@ -2808,6 +3003,27 @@ window.__ModuleLoader__.load({
      * replace one another.
      */
     const CHANGES_MENU_ID = 'flow.changes-menu'
+
+    /**
+     * Cell key of this plugin's row group in the right sidebar's tab menu.
+     *
+     * The kit's menu is a list slot: its own "Close" row is drawn first, then
+     * whatever each registered cell renders. One cell carries the whole group so
+     * the four actions stay together and the group opens with one separator.
+     */
+    const TAB_MENU_ID = 'flow.tab-menu'
+
+    /** The right sidebar's tab-menu extension seat (a list slot). */
+    const TAB_MENU_SLOT = 'sidebar.right.tab.menu.item'
+
+    /** The kit records a docked tab's id on this attribute; the strip owns the order. */
+    const TAB_ATTR = 'data-dockkit-tab'
+
+    /** The pane that owns one tab strip. */
+    const TAB_STRIP_SELECTOR = '[data-dockkit-strip]'
+
+    /** The right sidebar's per-Session owner: the only scope these gestures belong to. */
+    const TAB_SCOPE_SELECTOR = '[data-sidebar-right-session]'
 
     /**
      * Document attribute that turns on the pointer cursor for inline code.
@@ -3044,6 +3260,12 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'codeMenu.openFailed': '打开失败',
       'codeMenu.done': '已复制行内代码',
       'codeMenu.failed': '复制失败，剪贴板不可用',
+      'tabMenu.closeOthers': '关闭其他页签',
+      'tabMenu.closeLeft': '关闭左侧页签',
+      'tabMenu.closeRight': '关闭右侧页签',
+      'tabMenu.closeAll': '关闭全部页签',
+      'tabMenu.none': '没有可关闭的其他页签',
+
       'app.cursor': 'Cursor',
       'app.vscode': 'VS Code',
       'app.vscodeinsiders': 'VS Code Insiders',
@@ -3108,6 +3330,9 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'section.workspaceName.description': '在会话标题行右侧「打开」按钮的图标左侧显示当前工作区名（过长会截断）。名字属于同一个按钮，点它的效果和点图标完全一样；没有归属工作区的会话不显示，关闭后按钮恢复原样。',
       'section.otty.title': '在「打开」菜单里加入 Otty',
       'section.otty.description': '在会话标题行右侧「打开」按钮的下拉菜单里追加一行 Otty（本机装了才显示），点击后在新 Otty 窗口里打开当前工作区目录。官方那份应用目录是编译期写死的、插件注册不进去，所以这一行由本插件插进那个菜单；关闭后不再插入。',
+      'section.tabActions.title': '右栏页签操作',
+      'section.tabActions.description': '在右侧栏的页签上支持中键关闭，并在右键菜单里追加「关闭其他页签 / 关闭左侧页签 / 关闭右侧页签 / 关闭全部页签」。官方那一行「关闭」保持原位；只剩一个页签时只显示一条不可用的提示。关闭后恢复官方行为。',
+
       'section.saveError': '偏好没有保存成功，请重试',
     }
 
@@ -3128,6 +3353,12 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'codeMenu.openFailed': 'Could not open',
       'codeMenu.done': 'Inline code copied',
       'codeMenu.failed': 'Copy failed: the clipboard rejected the write',
+      'tabMenu.closeOthers': 'Close other tabs',
+      'tabMenu.closeLeft': 'Close tabs to the left',
+      'tabMenu.closeRight': 'Close tabs to the right',
+      'tabMenu.closeAll': 'Close all tabs',
+      'tabMenu.none': 'No other tabs to close',
+
       'app.cursor': 'Cursor',
       'app.vscode': 'VS Code',
       'app.vscodeinsiders': 'VS Code Insiders',
@@ -3192,6 +3423,9 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
       'section.workspaceName.description': 'Show the current workspace name to the left of the icon inside the header’s “Open In” button (long names are truncated). The name belongs to that same button, so clicking it does exactly what clicking the icon does; a Session no workspace claims shows nothing, and switching this off restores the button.',
       'section.otty.title': 'Add Otty to the “Open In” menu',
       'section.otty.description': 'Append an Otty row to the header’s “Open In” drop-down (shown only when Otty is installed), opening the current workspace directory in a new Otty window. The shipped app catalog is fixed at build time and takes no plugin registrations, so this bundle inserts the row itself; switching this off stops the insertion.',
+      'section.tabActions.title': 'Right sidebar tab actions',
+      'section.tabActions.description': 'Middle-clicking a right sidebar tab closes it, and the tab context menu grows Close other tabs / Close tabs to the left / Close tabs to the right / Close all tabs. The shipped Close row keeps its place; a lone tab shows one disabled hint instead. Switching this off restores the shipped behaviour.',
+
       'section.saveError': 'The preference was not saved. Try again.',
     }
 
@@ -3409,6 +3643,46 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         },
         t('copy.menu'),
       )
+    }
+
+    /**
+     * One cell of the right sidebar's tab menu: the pane-level close actions.
+     *
+     * The kit draws its own Close row first and then this cell, so the group is
+     * additive. Order comes from the live strip (the owner props carry only the
+     * right-clicked tab); every mutation goes through the public
+     * ctx.sidebarRight.close(tabId), never through the layout store.
+     *
+     * @param props - the slot's owner props (tab, dismiss) plus this plugin's
+     *   injected face.
+     */
+    function TabMenuItems(props) {
+      const { tab, dismiss, config, closeTab, t } = props
+      // Every Hook runs before the preference is consulted: the cell stays
+      // mounted across a toggle and React keeps one call order.
+      const enabled = useConfigValue(config, readTabActionsEnabled)
+      props.useLocaleRevision()
+      if (!enabled || tab === null || tab === undefined || typeof tab.id !== 'string') return null
+      const order = tabOrderOf(tabElementById(tab.id, typeof document === 'undefined' ? null : document))
+      const index = order.indexOf(tab.id)
+      if (index < 0) return null
+      const rows = tabMenuRows(tabActionState(order.length, index), t)
+      const run = (action) => {
+        const ids = tabClosePlan(order, tab.id, action)
+        if (typeof dismiss === 'function') dismiss()
+        for (const id of ids) closeTab(id)
+      }
+      return h(React.Fragment, null, rows.map((row, position) => h(
+        MenuItemButton,
+        {
+          key: row.action,
+          // The kit's Close row opens the group; ours starts its own.
+          separatorBefore: position === 0,
+          disabled: row.disabled,
+          onSelect: () => { if (!row.disabled) run(row.action) },
+        },
+        row.label,
+      )))
     }
 
     /**
@@ -3801,6 +4075,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           read: readOttyEnabled,
           title: t('section.otty.title'),
           description: t('section.otty.description'),
+          error: t('section.saveError'),
+          useLocaleRevision: props.useLocaleRevision,
+        }),
+        h(SettingsRow, {
+          config,
+          field: 'tabActions',
+          read: readTabActionsEnabled,
+          title: t('section.tabActions.title'),
+          description: t('section.tabActions.description'),
           error: t('section.saveError'),
           useLocaleRevision: props.useLocaleRevision,
         }),
@@ -4425,6 +4708,32 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
           }
         }, 'flow: otty row in the open-in menu')
 
+        // Middle-click on a right-sidebar tab closes it. The kit owns the strip,
+        // so this is one document-level gesture plus the public close(); a press
+        // that starts outside the right sidebar is left to whatever it belongs to.
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          return installTabMiddleClick({
+            document,
+            closeTab: (tabId) => { ctx.sidebarRight?.close?.(tabId) },
+            isEnabled: () => readTabActionsEnabled(config),
+          })
+        }, 'flow: right sidebar tab middle click')
+
+        // The tab menu is the kit's own; this adds one cell after its Close row.
+        // The cell reads the pane's order from the live strip at render time.
+        ctx.effect(() => ctx.slots.inject(TAB_MENU_SLOT, () => ctx.slots.register({
+          name: TAB_MENU_SLOT,
+          id: TAB_MENU_ID,
+          locale: ENTRY_ID,
+          inject: () => ({
+            config,
+            t,
+            closeTab: (tabId) => { ctx.sidebarRight?.close?.(tabId) },
+            useLocaleRevision,
+          }),
+        }, TabMenuItems)), 'flow: right sidebar tab menu')
+
         // The Session row menu is the shell's own: a right-click on the row opens
         // it, so registering into its item list is what reaches both gestures.
         ctx.effect(() => ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
@@ -4600,6 +4909,15 @@ a[data-flow-link-trimmed]{text-decoration:none!important}
         isHeaderOpenInAppMore,
         buildMenuRow,
         installOttyInjector,
+        readTabActionsEnabled,
+        tabOrderOf,
+        tabElementById,
+        tabClosePlan,
+        tabActionState,
+        tabMenuRows,
+        installTabMiddleClick,
+        TAB_MENU_ID,
+        TAB_MENU_SLOT,
         OTTY_APP_ID,
         APP_ICON_ROUTE,
         HEADER_UTILITIES_SELECTOR,
