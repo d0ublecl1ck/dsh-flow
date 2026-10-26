@@ -15,6 +15,8 @@
  *    swap, plus what the rewrite does and does not touch;
  *  - `assets/link-open.svg` — the same `http://localhost` click before and after
  *    the plugin, plus the host route's contract (see `index.js` `openRequestHandler`).
+ *  - `assets/tab-menu.svg` — the right sidebar's tab strip: the middle-click
+ *    close gesture and the pane menu the extension cell adds.
  *  - `assets/workspace-name.svg` — the shipped "Open In…" split button with
  *    and without the Workspace name, plus why the name can live inside that
  *    button at all (the seat writes data-flow-workspace, and the stylesheet
@@ -679,6 +681,89 @@ function ottyDrawing() {
     + parts.join('') + '</svg>\n'
 }
 
+/**
+ * The right-sidebar tab actions: middle click, and the pane menu the slot adds.
+ *
+ * A diagram, not a screenshot: the strip and rows are drawn from the same
+ * labels the plugin ships, and the notes state the two contracts the feature
+ * depends on (the kit's tab elements, and the public close API).
+ *
+ * @returns the SVG document.
+ */
+function tabActionsDrawing() {
+  const parts = []
+  parts.push('<rect width="' + WIDTH + '" height="' + HEIGHT + '" fill="' + CANVAS + '"/>')
+  parts.push(text(28, 44, '右栏页签：中键关一个，右键关其他 / 左侧 / 右侧 / 全部', { size: 22, weight: 600 }))
+  parts.push(text(28, 68, '页签条是官方右栏的，插件只加一条中键手势与菜单里的一个 cell（示意图，非截图）', { size: 13, fill: MUTED }))
+
+  const ax = 28
+  const ay = 100
+  const aw = 620
+  const ah = 360
+  parts.push(rect(ax, ay, aw, ah, { radius: 12 }))
+  parts.push(text(ax + 20, ay + 32, '右侧栏', { size: 13, weight: 600 }))
+  // tab strip
+  const tabs = [
+    { label: '文件', active: true },
+    { label: '开始', active: false },
+    { label: '终端', active: false },
+  ]
+  let tx = ax + 20
+  for (const tab of tabs) {
+    const width = 104
+    parts.push(rect(tx, ay + 48, width, 32, { fill: tab.active ? ACCENT_SOFT : PANEL, stroke: tab.active ? ACCENT : LINE, radius: 8 }))
+    parts.push(text(tx + 14, ay + 69, tab.label, { size: 12.5, fill: tab.active ? ACCENT : INK, weight: tab.active ? 600 : 400 }))
+    parts.push(text(tx + width - 18, ay + 69, '×', { size: 12, fill: MUTED }))
+    tx += width + 10
+  }
+  // middle-click annotation on the 终端 tab
+  const lastX = tx - 114
+  parts.push(rect(ax + 20, ay + 96, 132, 24, { fill: PANEL, stroke: ACCENT, radius: 12 }))
+  parts.push(text(ax + 86, ay + 112, '中键 · 直接关', { size: 11, fill: ACCENT, weight: 600, anchor: 'middle' }))
+  parts.push(text(ax + 20, ay + 138, '起手与释放必须在同一颗页签', { size: 10, fill: MUTED }))
+  // menu
+  const mx = ax + 250
+  const my = ay + 150
+  const rows = ['关闭', '关闭其他页签', '关闭左侧页签', '关闭右侧页签', '关闭全部页签']
+  parts.push(rect(mx, my, 244, 34 + rows.length * 30, { fill: PANEL, radius: 10 }))
+  rows.forEach((label, index) => {
+    const ry = my + 26 + index * 30
+    const disabled = index === 3
+    parts.push(text(mx + 16, ry, label, { size: 12.5, fill: disabled ? MUTED : INK }))
+    if (index > 0 && index < rows.length) parts.push('<path d="M' + (mx + 10) + ' ' + (ry - 20) + ' H' + (mx + 234) + '" stroke="' + LINE + '" stroke-width="1"/>')
+  })
+  parts.push(text(mx - 8, my - 8, '右键页签', { size: 11, fill: MUTED }))
+  parts.push(text(ax + 20, ay + 346, '官方「关闭」保持第一行；四项只作用于这一格，摆不下的项变灰。', { size: 11.5, fill: MUTED }))
+
+  const bx = 668
+  const bw = 504
+  parts.push(rect(bx, ay, bw, ah, { radius: 12 }))
+  parts.push(text(bx + 20, ay + 32, '开关与边界', { size: 13, weight: 600 }))
+  const bullets = [
+    '设置 → 心流 →「右栏页签操作」：默认开，关掉后中键与四项一起消失。',
+    '顺序只读 DOM：同一 data-dockkit-strip 内 data-dockkit-tab 的先后。',
+    '关闭只调 ctx.sidebarRight.close(tabId)：不读布局快照，不写 localStorage。',
+    '浮窗有自己的页签条，按各自的顺序算；跨分栏不动作。',
+    '只剩一个页签时只显示一条禁用提示；唯一引导页仍受官方保护。',
+  ]
+  bullets.forEach((line, index) => {
+    parts.push(text(bx + 20, ay + 62 + index * 34, '· ' + line, { size: 11.5 }))
+  })
+  parts.push(rect(bx + 16, ay + 240, bw - 32, 70, { fill: '#fbfcfd', stroke: 'none', radius: 10 }))
+  parts.push(text(bx + 30, ay + 264, '静默失效点', { size: 12, weight: 600, fill: ACCENT }))
+  parts.push(text(bx + 30, ay + 286, '官方改 data-dockkit-tab / data-dockkit-strip / 右栏作用域，', { size: 11 }))
+  parts.push(text(bx + 30, ay + 304, '症状只是「菜单少几项」「中键不关」，不报错。', { size: 11 }))
+
+  parts.push(rect(ax, 482, WIDTH - 56, 116, { radius: 12 }))
+  parts.push(text(ax + 20, 512, '为什么不是新插件', { size: 13, weight: 600 }))
+  parts.push(text(ax + 20, 538, '心流已经有设置页、菜单骨架与真浏览器验收；页签动作作为第十个开关落在这里，卸载/关掉即还原。', { size: 12 }))
+  parts.push(text(ax + 20, 560, '官方席位是 sidebar.right.tab.menu.item（list），关闭走公开 close；没有 fork 官方包。', { size: 12 }))
+  parts.push(text(28, HEIGHT - 16, '示意图，非截图：本文件不含任何真实会话、工作区或账号。', { size: 11, fill: MUTED }))
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + WIDTH + '" height="' + HEIGHT + '" viewBox="0 0 ' + WIDTH + ' ' + HEIGHT + '" role="img" aria-label="dsh-flow：右栏页签的中键关闭与关闭其他 / 左侧 / 右侧 / 全部">'
+    + parts.join('') + '</svg>\n'
+}
+
 /** Every asset this repo publishes, in the order it renders them. */
 const ASSETS = [
   { name: 'locate-flow', draw: drawing },
@@ -687,6 +772,7 @@ const ASSETS = [
   { name: 'send-key', draw: sendKeyDrawing },
   { name: 'workspace-name', draw: workspaceNameDrawing },
   { name: 'otty-menu', draw: ottyDrawing },
+  { name: 'tab-menu', draw: tabActionsDrawing },
 ]
 
 async function main() {

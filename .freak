@@ -1,6 +1,8 @@
 # FREAK
 
-- [ ] **右栏页签动作还没进 `scripts/verify-browser.mjs`**（`2026-10-26`）：本轮由 7 条新单测 + 一次真浏览器手工探针覆盖；脚本缺固定段（开 3 个页签 → 右键断言四项 → 逐个动作 → 中键关一个），`assets/` 也还没有对应示意图。下次动这段前先补段补图，并把 E 段「心流页」行标题补成十行。
+- [ ] **验收脚本被中断会把 `flow.locateButton` 留在关闭态**（`2026-10-26` 实拉）：C 段先关再开，若本轮在 C 段后失败，下一轮会在 `[data-flow-host]` 等待处超时，看起来像客户端没加载。下次跑挂后先开一次设置看心流第一行是否关着，或先查页面上 `[data-flow-host]` 是否存在。
+- [ ] **L 段只逐步断言了「关闭其他」与中键**（`2026-10-26`）：关闭左侧/右侧/全部的动作集合由单测覆盖，脚本没有逐个点；引导页独占时中键不关属官方保护，未写断言。
+- [ ] **菜单视觉仍未与 dockit 原生行对齐**（`2026-10-26`）：扩展项是 primitives 的 `MenuItemButton`，分隔线很淡、无图标；要像素级一致得按原生行的 padding/分隔线自绘或换用套件的行组件。
 `dsh-flow` 历次洁癖审查留下的待核查线索。只记「下次该优先看哪里」，权威结论在 `README.md` / `AGENTS.md`。
 
 - [ ] **DSH Desktop 上宿主半边不能在线重载**（`2026-10-12`，host 0.2.0-rc.2）：改 `index.js` 后，Remote `pluginManager/setBundleEnabled` 关→开、CLI `dsh plugin --profile web remove` + `add`、以及 remove+add 后再补一次 Remote 关→开，三种都试过 —— 组合确实重跑（路由 404 再 200），但重新 `import` 命中 Node ESM 的 `loadCache`，拿到的仍是旧模块。`dsh-hmr` 有能清 `loadCache` 的 `partialReload`，但它的 watcher 只覆盖 profile 目录内，`link:` 到仓库外的目标不在监听范围。唯一路径是**退出 DSH Desktop 再打开**。已写进 AGENTS「运行中的实例怎么认这份代码」。

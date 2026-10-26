@@ -302,6 +302,49 @@ async function openRowMenu(cdp, sessionId, rowKey) {
   })()`)
   await sleep(400)
 }
+/** Count the right sidebar's docked tabs. */
+async function sidebarTabCount(cdp, sessionId) {
+  return evaluate(cdp, sessionId, "document.querySelectorAll('[data-sidebar-right-session] [data-dockkit-tab]').length")
+}
+
+/** Press one control inside the right sidebar by its exact visible text. */
+async function clickSidebarText(cdp, sessionId, text) {
+  const centre = await evaluate(cdp, sessionId, `(() => {
+    const button = [...document.querySelectorAll('[data-dockkit-surface] button')].find((node) => (node.textContent || '').trim() === ${JSON.stringify(text)});
+    if (button === undefined) return null;
+    const rect = button.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`)
+  if (centre === null) return false
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+  return true
+}
+
+/**
+ * Open the active right-sidebar tab's own menu.
+ *
+ * Headless Chrome never turns a right press into `contextmenu`, so the event is
+ * dispatched at the tab's real coordinates. It targets the *active* tab on
+ * purpose: a synthetic click on an inactive tab re-renders the strip and the
+ * menu would mount for a node that is already gone. `composed` matters — the
+ * kit's menu is portaled.
+ */
+async function openTabMenu(cdp, sessionId, selector) {
+  const delivered = await evaluate(cdp, sessionId, `(() => {
+    const tab = document.querySelector(${JSON.stringify(selector)});
+    if (tab === null) return false;
+    const rect = tab.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, view: window, button: 2, buttons: 2, clientX: x, clientY: y }));
+    return true;
+  })()`)
+  await sleep(delivered ? 500 : 0)
+}
+
 /** Click the Session row menu entry whose label contains `label`. */
 async function clickMenuEntry(cdp, sessionId, label) {
   // Same discipline as aim(): the menu portals in, so the entry is pressed only
@@ -978,6 +1021,14 @@ const OTTY_MENU_PROBE = `(() => {
  * The panel's own warnings use the same role, so the sentence is part of the
  * predicate rather than the role alone.
  */
+
+/** The tab menu's rows, in DOM order, with their disabled state. */
+const TAB_MENU_PROBE = `(() => {
+  const menu = document.querySelector('[data-dockkit-tab-menu]');
+  if (menu === null) return null;
+  return { rows: [...menu.querySelectorAll('button')].map((button) => ({ label: (button.textContent || '').trim(), disabled: button.disabled })) };
+})()`
+
 const NOTICE_VISIBLE = `[...document.querySelectorAll('[role="alert"]')].some((n) => n.textContent.includes('已复制会话 ID'))`
 
 /**
@@ -1348,6 +1399,44 @@ async function clearStartupVeil(cdp, sessionId) {
   })()`)
 }
 
+
+/**
+ * Dismiss a first-install notice that covers the page in a throwaway profile.
+ *
+ * Another plugin's 用户须知 dialog renders a full-page mask whose hit test fails
+ * every press below, and its accept button stays disabled until its own
+ * checkbox is ticked — so both halves are pressed here, with real mouse events
+ * (a scripted .click() on the checkbox does not move React's state). The dialog
+ * belongs to this throwaway profile; no preference or Session is touched.
+ *
+ * @returns whether a notice was found and accepted.
+ */
+async function dismissInstallNotice(cdp, sessionId) {
+  const present = await evaluate(cdp, sessionId, `[...document.querySelectorAll('[role="dialog"]')].some((dialog) => (dialog.textContent || '').includes('用户须知'))`)
+  if (!present) return false
+  try {
+    await click(cdp, sessionId, '[role="dialog"] input[type="checkbox"]')
+  } catch {
+    // A skin that hides the input still lets its label be pressed; the accept
+    // button then either works or the run reports the real failure below.
+  }
+  await sleep(300)
+  const centre = await evaluate(cdp, sessionId, `(() => {
+    const accept = [...document.querySelectorAll('[role="dialog"] button')].find((button) => (button.textContent || '').trim() === '我已知晓并继续');
+    if (accept === undefined) return null;
+    const rect = accept.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`)
+  if (centre !== null) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: centre.x, y: centre.y, button: 'none', buttons: 0 }, sessionId)
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: centre.x, y: centre.y, button: 'left', buttons: 1, clickCount: 1 }, sessionId)
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: centre.x, y: centre.y, button: 'left', buttons: 0, clickCount: 1 }, sessionId)
+  }
+  await sleep(600)
+  return true
+}
+
 /** Press one shortcut with its modifier bitmask (Alt 1, Ctrl 2, Meta 4, Shift 8). */
 async function pressShortcut(cdp, sessionId, { key, code, virtualKeyCode, modifiers }) {
   const base = { modifiers, key, code, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode }
@@ -1462,6 +1551,9 @@ async function main() {
     }, sessionId)
     await cdp.send('Page.navigate', { url: config.url + '/' }, sessionId)
     await waitFor(cdp, sessionId, 'document.readyState === "complete"', 'document load')
+    // A first-install notice from another plugin owns the whole page until it is
+    // accepted; leaving it up makes every later hit test fail for the wrong reason.
+    if (await dismissInstallNotice(cdp, sessionId)) pass('the install notice was accepted before any press')
     await waitFor(cdp, sessionId, 'document.querySelector(\'[data-flow-host="locate"]\') !== null', 'the locate container')
     pass('signed browser session accepted at ' + config.url)
 
@@ -2482,6 +2574,101 @@ async function main() {
         if (await settleMenus(cdp, sessionId, 0) === 0) pass('Escape closes the extended menu')
       }
     }
+
+    // ---- L. right-sidebar tab actions: middle click and the pane menu -------
+    // The tab strip belongs to the shipped right sidebar; this bundle only adds
+    // a document-level middle gesture and one cell in the kit's own tab menu.
+    // The section seeds its tabs through the guide page, so nothing about the
+    // user's own layout is read or written (the profile is throwaway anyway).
+    {
+      const tabCount = () => sidebarTabCount(cdp, sessionId)
+      let ready = false
+      try {
+        if (await evaluate(cdp, sessionId, "document.querySelector('[data-sidebar-right-expand]') !== null")) {
+          await click(cdp, sessionId, '[data-sidebar-right-expand]')
+          await sleep(900)
+        }
+        for (let round = 0; round < 4 && !ready; round += 1) {
+          if (await tabCount() >= 2) { ready = true; break }
+          const opened = await clickSidebarText(cdp, sessionId, '文件')
+          if (!opened) {
+            try { await click(cdp, sessionId, '[data-dockkit-add-tab]') } catch { /* the guide tab hides the + control */ }
+          }
+          await sleep(800)
+        }
+        ready = await tabCount() >= 2
+      } catch (error) {
+        console.log('  NOTE  the right sidebar was not reachable: ' + error.message)
+      }
+      if (!ready) {
+        skip('the right sidebar shows fewer than two docked tabs; tab actions not exercised')
+      } else {
+        // Activate the first tab with a real press so the menu opens for the node
+        // that stays mounted, then read its position for the disabled flags.
+        try { await click(cdp, sessionId, '[data-dockkit-tab]') } catch { /* fall through to the menu probe */ }
+        await sleep(500)
+        const active = await evaluate(cdp, sessionId, `(() => {
+          const tabs = [...document.querySelectorAll('[data-sidebar-right-session] [data-dockkit-tab]')];
+          const index = tabs.findIndex((tab) => tab.getAttribute('aria-selected') === 'true');
+          return { count: tabs.length, index, label: index < 0 ? null : (tabs[index].textContent || '').trim() };
+        })()`)
+        await openTabMenu(cdp, sessionId, '[data-dockkit-tab][aria-selected="true"]')
+        let menu = null
+        try {
+          await waitFor(cdp, sessionId, "document.querySelector('[data-dockkit-tab-menu]') !== null", 'the tab menu', 4000)
+          menu = await evaluate(cdp, sessionId, TAB_MENU_PROBE)
+        } catch { /* reported below */ }
+        const labels = menu === null ? [] : menu.rows.map((row) => row.label)
+        if (menu === null) {
+          fail('right-clicking a docked tab opened no menu')
+        } else if (JSON.stringify(labels) !== JSON.stringify(['关闭', '关闭其他页签', '关闭左侧页签', '关闭右侧页签', '关闭全部页签'])) {
+          fail('unexpected tab menu rows: ' + JSON.stringify(labels))
+        } else if (menu.rows[2].disabled !== (active.index === 0) || menu.rows[3].disabled !== (active.index === active.count - 1) || menu.rows[1].disabled !== (active.count <= 1)) {
+          fail('the disabled rows do not match the tab position ' + JSON.stringify(active) + ': ' + JSON.stringify(menu.rows))
+        } else {
+          pass('the tab menu carries the shipped close row plus four pane actions')
+        }
+        await shoot(cdp, sessionId, 'tab-menu.png')
+        if (menu !== null) {
+          try {
+            await clickExactMenuEntry(cdp, sessionId, '关闭其他页签')
+          } catch (error) {
+            fail('the close-others row did not press: ' + error.message)
+          }
+          await sleep(700)
+          const left = await tabCount()
+          if (left === 1) pass('close-others leaves exactly the right-clicked tab')
+          else fail('close-others left ' + left + ' tabs')
+        }
+        // Restore a second tab, then middle-click the non-guide one: the lone
+        // guide tab is protected by the kit, so a middle click there proves nothing.
+        try { await click(cdp, sessionId, '[data-dockkit-add-tab]') } catch { /* reported by the count */ }
+        await sleep(800)
+        if (await tabCount() === 2) {
+          const middle = await evaluate(cdp, sessionId, `(() => {
+            const tabs = [...document.querySelectorAll('[data-sidebar-right-session] [data-dockkit-tab]')];
+            const target = tabs.find((tab) => (tab.textContent || '').trim() !== '开始');
+            if (target === undefined) return null;
+            const rect = target.getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          })()`)
+          if (middle === null) {
+            skip('no non-guide tab to middle-click')
+          } else {
+            await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: middle.x, y: middle.y, button: 'none', buttons: 0 }, sessionId)
+            await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: middle.x, y: middle.y, button: 'middle', buttons: 4, clickCount: 1 }, sessionId)
+            await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: middle.x, y: middle.y, button: 'middle', buttons: 0, clickCount: 1 }, sessionId)
+            await sleep(700)
+            const remaining = await evaluate(cdp, sessionId, "[...document.querySelectorAll('[data-sidebar-right-session] [data-dockkit-tab]')].map((tab) => (tab.textContent || '').trim())")
+            if (remaining.length === 1 && remaining[0] === '开始') pass('a middle click closes the docked tab it started on')
+            else fail('middle click left tabs: ' + JSON.stringify(remaining))
+          }
+        } else {
+          skip('could not restore a second tab for the middle-click leg')
+        }
+      }
+    }
+
   } finally {
     socket?.close()
     await shutdown(chrome, profile)

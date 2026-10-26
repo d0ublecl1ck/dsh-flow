@@ -7,6 +7,8 @@
 - 单测 153 → 160：偏好默认值与不可读表单、四种动作的关闭集合与边界、四种位次的可用性、菜单行列表（含单页签提示）、中键只在起手的那颗页签上关一次、左键/别的表面/关掉开关三种放行、`apply` 新增的席位注册。
 - 新增可单测纯函数与出口：`tabOrderOf` / `tabElementById` / `tabClosePlan` / `tabActionState` / `tabMenuRows` / `installTabMiddleClick`；`Config` 增加第十个 volatile 字段 `tabActions`。
 - 文档同步：README 新增「右栏页签的中键与右键」并更新原则表（九落点）、触发方式、安全边界与已知限制；AGENTS 记录席位、DOM 契约、为什么读顺序与只走公开 close。
+- `scripts/verify-browser.mjs` 新增 L 段：接受首装须知 → 展开右栏并种出两个页签 → 在活动页签上派发 contextmenu → 断言官方「关闭」+ 四项与置灰位次 → 点「关闭其他页签」只剩目标 → 补引导页后中键关掉非引导页签。另加 `dismissInstallNotice()`：第三方首装须知会盖住整页，不处理会让所有按压失败。
+- 新增示意图 `assets/tab-menu.svg` / `.png`（由 `scripts/render-assets.mjs` 生成），README 的「右栏页签的中键与右键」一节引用。
 
 - 「已编辑 N 个文件」卡片的右键菜单末尾新增 **复制绝对路径**：把卡片自己记下的 Host 路径原样写进剪贴板，成功弹「已复制绝对路径」，剪贴板拒绝或抛错弹「复制失败，剪贴板不可用」。这一行只在路径真的是绝对路径时出现（`/…`、`C:\…`/`C:/…`、`\\server\…`），且**不发任何请求**——其余行仍走 `POST /flow/open-with`。
 - 行序固定为「用默认应用打开 → 本机 IDE → 在文件管理器中显示 → 复制绝对路径」：catalog 晚到只往中间插，首行与末行都不会在指针下方移动。
